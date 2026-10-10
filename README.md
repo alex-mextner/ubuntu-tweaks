@@ -5,8 +5,8 @@ My personal Ubuntu (GNOME, Wayland) tweaks.
 ## Install
 
 ```sh
-git clone https://github.com/alex-mextner/ubuntu-tweaks ~/ubuntu-tweaks
-~/ubuntu-tweaks/install.sh
+git clone https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
+~/xp/ubuntu-tweaks/install.sh
 ```
 
 Then log out and back in. GNOME extensions are symlinked into
