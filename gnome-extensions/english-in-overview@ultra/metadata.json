@@ -1,0 +1,6 @@
+{
+  "uuid": "english-in-overview@ultra",
+  "name": "English in Overview",
+  "description": "Switches the keyboard layout to English (us) whenever the Activities overview / app launcher opens.",
+  "shell-version": ["50"]
+}
