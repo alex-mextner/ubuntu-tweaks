@@ -1,6 +1,6 @@
 # Spec: memguard — macOS-like memory-pressure guard, hang capture, swap hygiene
 
-Source of truth for the `memguard`, `hang-capture` and `machines/*` modules. Every user
+Source of truth for the `memguard`, `hang-capture`, `apple-hid-battery` and `machines/*` modules. Every user
 request is recorded verbatim under *Requests*; *Requirements* is what they mean for the
 implementation. Change this file in the same commit as any behavior change. The module
 model (`modules/<name>/module.toml`, actions with `check()`/`run()`, `apply --commit`,
@@ -17,6 +17,7 @@ model (`modules/<name>/module.toml`, actions with `check()`/`run()`, `apply --co
    более удачные идеи и реализации. и пусть оно умеет будет расширяемым, чтобы rig в него
    мог агентов закинуть которые много ресурсов жрут например.»
 2. «например omp-supervisor и omp-steer кажется должно быть в agent-tools»
+3. «важно чтобы все что мы настраиваем в систему сохранялось в ~/xp/ubuntu-tweaks/»
 
 ### Decisions approved by the owner (2026-10-11)
 
@@ -329,6 +330,72 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   `swapoff -a && swapon -a`; otherwise logs a skip. Values are keys under
   `[swap] drain_min_used_gb = 4`, `drain_headroom_gb = 8` in `memguard.toml`.
 
+### Per-machine profile: `machines/msi-pulse-gl66/`
+
+Requirements of this laptop, each a file in the profile and a check in its `status.sh`:
+
+- **Secure Boot = Disabled** (machine requirement). 2026-10-11 ~19:05 the BIOS update
+  E1581IMS.308 → .313 succeeded, but "Load Optimized Defaults" re-enabled Secure Boot →
+  kernel lockdown → every unsigned out-of-tree module stopped loading: nvidia 595.99.02 DKMS
+  (no display, GDM down), `livepatch_hid_battery_offset.ko`, apfs DKMS. `doctor` checks
+  `mokutil --sb-state` reports disabled and that every module under
+  `/lib/modules/$(uname -r)/updates/**` appears in `lsmod`; `BIOS.md` and `doctor` both warn:
+  after any BIOS "load defaults", re-check Secure Boot before rebooting into the desktop.
+- **`nvidia-runtime-pm.modprobe.conf`** (`NVreg_DynamicPowerManagement=0x00`) is the HDMI
+  fix of 2026-10-09 17:01 (sessions "🖥️ HDMI" / "🖥️ DISPL"): HDMI-A-1 is wired to the RTX
+  3060 and the GSP fails `GFW_BOOT` on runtime-D3 exit, so the GPU must never enter D3.
+  Needs `update-initramfs -u -k all` after install; `status.sh` checks the initramfs carries
+  the file (`lsinitramfs | grep`).
+- **Kernel pin to 7.0.0-15** (`kernel-15.sh`) is the current state, not an experiment: apt
+  hold on the `-15` image/headers/modules, `GRUB_DEFAULT` set to the `-15` menu id,
+  `GRUB_TIMEOUT=0` + `GRUB_TIMEOUT_STYLE=hidden`. `status.sh` checks `uname -r`, the holds
+  and `/etc/default/grub`.
+- **`BIOS.md`**: .313 installed 2026-10-11, the update procedure (USB FAT32, M-Flash), the
+  RAM memtest result and one-stick plan, and the Secure Boot warning above.
+- **Inventory, origin unknown**: system files found on disk with no session trail, absorbed
+  into `machines/msi-pulse-gl66/inventory/` verbatim; `status.sh` checks presence only (no
+  `cmp`, no install): `/etc/modules-load.d/apfs.conf` + DKMS `linux-apfs-rw` 0.3.18,
+  `/etc/modules-load.d/msr.conf`, `/etc/sysctl.d/60-inotify.conf`,
+  `/etc/sysctl.d/60-multihome-arp.conf`, `/etc/systemd/logind.conf.d/lid-switch.conf`,
+  `/etc/systemd/system/ha-compose.service`, `/etc/systemd/system/gnome-shell-leak-guard.service`
+  (+ `.timer`, script `/usr/local/sbin/gnome-shell-leak-guard`),
+  `/etc/default/grub.d/kdump-tools.cfg`. `90-usb-stability.rules` is *not* on disk: it was
+  never applied.
+
+### `apple-hid-battery` — Magic Keyboard / Trackpad battery livepatch
+
+Apple Magic Keyboard Touch ID (`004C:0321`, `hid_apple`) and Magic Trackpad 2 (`004C:0265`,
+`hid_magicmouse`) over Bluetooth report 100 % / 0 % battery because
+`hidinput_query_battery_capacity()` in `hid-input.c` reads `buf[1]`, while Apple's report
+`0x90` is `[id, flags, charge]`. Upstream fix d07644524b65 (7.3) is absent in Ubuntu
+7.0.0-15/-38. Source session "🍎 MAGIC" 2026-10-09T23:51Z, transcript
+`~/.omp/agent/sessions/-tmp/2026-10-09T23-51-08-062Z_01a12313-e21e-7499-8c19-02a237636fc2.jsonl`;
+the C source and Makefile recovered from it are in the repo verbatim.
+
+- Fix: kernel livepatch (klp object `hid`) replacing that one function; it locates the
+  battery field in the report and reads `buf[1 + report_offset / 8]`, scaled by
+  `battery_min/max`. Nothing else in the kernel changes; no ABI change.
+- Build: never locally — `build.sh` runs on a Runpod pod via `runpod-run` (installs
+  `linux-headers-<k>` for every installed kernel, `make -C <headers> M=$PWD modules`,
+  `strip --strip-debug`); `--local` builds with the host headers for the running kernel.
+- Install (`install.sh`, root): `.ko` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`
+  for each kernel, `depmod -a`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`.
+  Rollback: `echo 0 > /sys/kernel/livepatch/livepatch_hid_battery_offset/enabled`, then
+  `rmmod`. Unsigned → requires Secure Boot disabled (above).
+- `status.sh`: module in `lsmod` and `/sys/kernel/livepatch/*/enabled` = 1 → 0; present but
+  disabled → 3.
+- Self-remove: on a running kernel ≥ 7.3 (upstream fix present) the module is a no-op —
+  `install.sh` removes the `.ko` and the modules-load entry, `status.sh` exits 0.
+
+### Principle: every system change lands here the same day
+
+Any change an agent session makes to this machine's system — a file under `/etc`, a module
+in `/lib/modules`, a GRUB or BIOS setting — must be committed to this repo the same day, as
+a module or a `machines/` profile entry, together with the session's transcript path.
+Sessions working from `/tmp` are why three fixes (HDMI runtime PM, the HID livepatch, the
+kernel pin) were lost and had to be recovered from transcripts. `ubuntu-tweak doctor` is
+the check: a file on disk with a `# installed by` header and no module is drift.
+
 ### Module layout
 
 Modules of kind `system` are root install steps, not GNOME settings. They extend the module
@@ -354,7 +421,8 @@ today only links extensions; the flag is additive).
 |---|---|
 | `modules/memguard/` | `memguard.py` → `/usr/local/sbin/memguard`; `memguard.service` → `/etc/systemd/system/`; `memguard.toml` → `/etc/memguard/memguard.toml`; `policy.d/10-desktop.toml`, `20-docker.toml`, `00-protected.toml` → `/etc/memguard/policy.d/`; `memguard-dialog.py` → `/usr/local/libexec/memguard/dialog`; `memguard-dialog.service` → `/etc/systemd/user/`; `memguard-cli.py` → `/usr/local/bin/memguard`; `docker-name` → `/usr/local/libexec/memguard/`; `earlyoom.default` → `/etc/default/earlyoom`; `oomd/-.slice.conf` → `/etc/systemd/system/-.slice.d/90-memguard.conf`; `oomd/oomd.conf` → `/etc/systemd/oomd.conf.d/90-memguard.conf`; `docker-limited.slice` → `/etc/systemd/system/`; `92-memguard.sysctl.conf` → `/etc/sysctl.d/92-memguard.conf`; `swap-drain{,.service,.timer}` → `/usr/local/sbin/`, `/etc/systemd/system/`; `logrotate` → `/etc/logrotate.d/memguard` |
 | `modules/hang-capture/` | `90-lockup-capture.conf`, `90-dirty-writeback.conf`, `91-hang-evidence.conf` → `/etc/sysctl.d/`; `hw-watchdog.service` → `/etc/systemd/system/`; `90-hw-watchdog.conf` → `/etc/systemd/system.conf.d/`; `90-hang.conf` → `/etc/systemd/journald.conf.d/`; `hang-probe.sh` → `/usr/local/sbin/hang-probe`; `hang-probe.service` → `/etc/systemd/system/`; `after-hang.sh` → `/usr/local/sbin/after-hang`; `logrotate` → `/etc/logrotate.d/hang-probe` |
-| `machines/msi-pulse-gl66/` | per-machine profile, applied only when `dmidecode -s system-product-name` matches `profile.toml` `match`: `90-usb-stability.rules` → `/etc/udev/rules.d/` (keep hubs, JMS578 bridge, both xHCI awake); `usb-storage-quirks.modprobe.conf`, `nvidia-runtime-pm.modprobe.conf` (`NVreg_DynamicPowerManagement=0x00`: GSP fails `GFW_BOOT` on D3cold exit) → `/etc/modprobe.d/` + initramfs rebuild; `kernel-15.sh` (experiment, not applied: pins 7.0.0-15, hold + GRUB default); `BIOS.md` (E1581IMS.308 → .313, RAM 2×32 GB Kingston KF3200C20S4/32GX memtest result, one-stick plan) |
+| `modules/apple-hid-battery/` | `livepatch_hid_battery_offset.c`, `Makefile` (source, in repo); `build.sh` → `.ko` per kernel; `install.sh` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`; `status.sh` |
+| `machines/msi-pulse-gl66/` | per-machine profile, applied only when `dmidecode -s system-product-name` matches `profile.toml` `match`: `90-usb-stability.rules` → `/etc/udev/rules.d/` (keep hubs, JMS578 bridge, both xHCI awake; never applied so far); `usb-storage-quirks.modprobe.conf`, `nvidia-runtime-pm.modprobe.conf` → `/etc/modprobe.d/` + `update-initramfs -u -k all`; `kernel-15.sh` (applied, current state: pins 7.0.0-15); `BIOS.md`; `inventory/` (see *Per-machine profile*) |
 
 Every installed file carries a header `# installed by ubuntu-tweaks/<module>`; `status.sh`
 compares each with `cmp -s` (drift = modified) and checks units active/enabled.
@@ -366,6 +434,7 @@ compares each with `cmp -s` (drift = modified) and checks units active/enabled.
 | memguard daemon, policy format, dialog, CLI, oomd/earlyoom/docker-limited, swap hygiene | ubuntu-tweaks | `modules/memguard/` |
 | hang capture, probe, after-hang | ubuntu-tweaks | `modules/hang-capture/` |
 | USB/NVIDIA/BIOS/kernel-pin for this laptop | ubuntu-tweaks | `machines/msi-pulse-gl66/` |
+| Apple Magic Keyboard / Trackpad battery livepatch | ubuntu-tweaks | `modules/apple-hid-battery/` |
 | omp cgroup wrapper: `harness_wrappers` `cgroup:` option — scope `omp-<N>` in `omp.slice`, `MemoryHigh=12G`, `MemoryMax=20G`, `MemorySwapMax=2G`, `REVIEW_MAX_CONCURRENCY=2` env (`~/.config/environment.d/50-omp.conf`), `PI_INSTALL_DIR` redirect, in-scope re-exec guard, throwaway-scope probe | rig | replaces `~/.local/bin/omp` |
 | user unit `omp.slice` (`MemoryAccounting=yes`, `ManagedOOMMemoryPressure=kill`, `ManagedOOMMemoryPressureLimit=40%`) | rig | `~/.config/systemd/user/omp.slice` on `rig apply` |
 | `~/.config/memguard/policy.d/50-agents.toml` (match `omp.slice/omp-*.scope`, display via `tg-ctl omp-live status`, warn → `omp-steer`, critical → freeze) | rig | dropped on `rig apply` |
@@ -400,7 +469,8 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
 - removed from `~/.cache/omp-supervisor/root-fixes/`: `mem-guard.sh`, `mem-sentinel.py`,
   `mem-sentinel.service`, `install-sentinel.sh`, `hang-probe.sh`, `diag.sh`, `capture.sh`,
   `after-hang.sh`, `90-lockup-capture.sysctl.conf`, `90-dirty-writeback.sysctl.conf`,
-  `90-usb-stability.rules`, `usb-storage-quirks.modprobe.conf`,
+  `90-usb-stability.rules` (never applied: absent from `/etc/udev/rules.d/`, stays an
+  experiment in the profile), `usb-storage-quirks.modprobe.conf`,
   `nvidia-runtime-pm.modprobe.conf`, `kernel-15.sh` (all absorbed above);
 - `OPEN-ISSUES.md` moves to `machines/msi-pulse-gl66/OPEN-ISSUES.md`; `apply.sh` and
   `shutdown-debug.sh` stay there until OPEN-ISSUES #4 is closed;
@@ -433,6 +503,12 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
   workarounds never apply to another box.
 - **oomd per-slice pressure kill stays with the slice owner**: this repo cannot know which
   slices exist; the policy's `[oomd]` list is the hook for others.
+- **Secure Boot stays Disabled on msi-pulse-gl66**: nvidia DKMS, the HID livepatch and apfs
+  DKMS are unsigned out-of-tree modules; MOK-signing every rebuild adds more failure points
+  than value. Checked by `doctor`, documented in `BIOS.md`.
+- **Every system change lands in this repo the same day**: three fixes (HDMI/runtime PM,
+  the HID livepatch, the kernel pin) were made from `/tmp` sessions and had to be recovered
+  from transcripts. A change with no module or `machines/` file is a bug.
 
 ## Open questions
 
@@ -444,3 +520,5 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
    allocating again.
 3. Does `docker-limited.slice` (8G) need per-compose-project sub-slices, or is one cap
    enough once sessions are capped at 20G each?
+4. `apple-hid-battery` on a kernel where `hid_apple`/`hid_magicmouse` are signed in-tree but
+   the livepatch is not: is it worth enrolling a MOK for this one module, or wait for 7.3?
