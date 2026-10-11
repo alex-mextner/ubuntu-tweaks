@@ -29,6 +29,8 @@ macOS 26 Tahoe (top) and this dock (bottom):
 
 ![macOS 26 Tahoe dock above this dock, same width](docs/dock/compare-tahoe.png)
 
+*Top: Apple, macOS 26 Dock — screenshot from [Apple Support](https://support.apple.com/guide/mac-help/open-apps-from-the-dock-mh35859/26/mac/26), used for comparison.*
+
 | Screenshots stack: glass popover with a notch at the icon | Glass Trash: empty, a few items, many items |
 |---|---|
 | ![](docs/dock/stack.png) | ![](docs/dock/trash.png) |
