@@ -144,7 +144,7 @@ Order: submodules → migrations → schemas → symlinks → enable/disable →
 | `compile-schemas` | `gschemas.compiled` newer than every `*.gschema.xml` | `glib-compile-schemas` |
 | `link` | `~/.local/share/gnome-shell/extensions/<uuid>` is a symlink to the source | `ln -sfnT`; an existing real directory is moved to `~/.local/state/ubuntu-tweaks/backup/<timestamp>/` first |
 | `enable` / `disable` | uuid in / not in the user value of `enabled-extensions` and `disabled-extensions` | add / remove the one item |
-| `set-key` | user value equals the wanted value | write it |
+| `set-key` | effective value (`get_value`: user value, else schema default) equals the wanted value | write it |
 | `seed-key` | key has a user value | write the provider's value |
 | `migrate` | see *Migrations* | copy values, retire old uuid |
 
@@ -163,7 +163,7 @@ would freeze it (the reason `install.sh` used `dconf` directly).
 `status` compares declared state with the machine, using the same `check()` as `apply`.
 
 - **Missing** (declared, not on disk): a symlink, an enabled uuid, a conflict still
-  enabled, a key never written. `apply --commit` fixes it.
+  enabled. `apply --commit` fixes it.
 - **Modified** (declared, different on disk): a key whose value differs. Values are
   compared as typed `GLib.Variant`s read through the schema, so `5`, `uint32 5` and an
   unset key at its default compare correctly; a raw `dconf read` string diff would report
