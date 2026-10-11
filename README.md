@@ -43,7 +43,8 @@ macOS 26 Tahoe (top) and this dock (bottom):
   from the stack's right-click menu.
 - **Badges and progress** from apps (Unity LauncherEntry: Telegram, Thunderbird, downloads)
   and red notification counts.
-- **Genie minimize** into the app icon (own GPU effect); launch and attention bounces.
+- **Genie minimize** into a tile of the window before Trash, as on macOS (own GPU
+  effect); clicking the tile restores the window out of it. Launch and attention bounces.
 - **Drag and drop:** drag an icon off the dock to remove it; drop files onto Trash to
   trash them, onto an app to open them with it, or onto a stack to move or copy them
   there.

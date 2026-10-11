@@ -25,8 +25,13 @@ in the same commit as any behavior change.
 11. «Прямоугольные Оверлеи с файлами показываются не так как на маке. Перегораживают
     содержимое дока и не имеют уголка откуда растут» (Telegram)
 12. «Обновленные скрины закинь в ридми потом» (Telegram)
+13. «так док уже есть но только в обзоре окон на 3 пальце вверх. а вот внизу не всплывает.
+    а еще свернутые окна почему-то не в доке справа а в общем списке окон показываются»
+    — the dock had not loaded (Shell not restarted after install); minimized windows
+    belong in tiles on the right of the dock (`minimized-window-tiles` on).
 14. «почини нормально и включи по умолчанию и на моей машине» (file drops,
     [#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13))
+15. «и оставшиеся работы тоже доделывай» (the remaining open tickets)
 
 ## Requirements
 
@@ -46,8 +51,10 @@ in the same commit as any behavior change.
 - Separators are centred vertically on the glass platter, at rest and while icons are
   magnified.
 - Icon magnification on hover, bounce on launch, running-app dots, labels on hover.
-- Minimize with the genie effect into the app's icon: the dock's own GPU effect
-  (`minimize-to-icon`, `minimize-effect=1`).
+- Minimize with the genie effect into a tile of the window, right of the stacks and left
+  of Trash; the dock opens a slot for it while the window flies in. Clicking the tile
+  restores the window out of it, then the slot closes. The dock's own GPU effect
+  (`minimized-window-tiles`, `minimize-to-icon`, `minimize-effect=1`).
 - Clicking the focused app's icon does not minimize it (setting; upstream default kept).
 
 ### Folder stacks
@@ -115,9 +122,9 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 | 19 | Hide toggle shortcut (⌥⌘D) | works | `toggle-autohide-shortcut` = Super+Alt+D |
 | 20 | Dock background menu (hiding, magnification, position, settings) | works | `background-menu` |
 | 21 | Recent apps section | works | `recent-apps-count=3` |
-| 22 | Minimize into the app icon | works | `minimize-to-icon` |
-| 23 | Genie minimize effect | works | `minimize-effect=1` (own GPU effect) |
-| 24 | Minimized windows as tiles before Trash | works | `minimized-window-tiles` (off in the preset) |
+| 22 | Minimize into the app icon | configurable | `minimize-to-icon` with `minimized-window-tiles` off |
+| 23 | Genie minimize effect | works | `minimize-effect=1` (own GPU effect), into the tile or the app icon |
+| 24 | Minimized windows as tiles before Trash | works | `minimized-window-tiles` (on in the preset, macOS default) |
 | 25 | Magnification | configurable | `animate-icons`, `animation-magnify` |
 | 26 | Size, position, auto-hide | configurable | `icon-size`, `dock-location`, `autohide-dash` |
 | 27 | Open-app indicators | configurable | `running-indicator-style` |
@@ -168,6 +175,13 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
   the watchdog alone ends the drag 264 ms after the release, the helper's leave alone
   10 ms. A buttonless drag resting 1.2 s on Trash still drops. Shell exit mid-drag: 5/5
   clean.
+- Minimized-window tiles (fork `954293a`, mac + full preset + tiles): the window's icon
+  geometry when the minimize effect starts equals its tile's rest rect (x 1177, then
+  1147 and 1207 for two windows, also when both minimize in one call); the genie lands
+  in the new slot left of Trash, and follows its tile when a second window minimized
+  200 ms later opens a slot (target 1177 → 1147, the tile's x); a click on the tile
+  restores the window out of it and the tile goes once the effect ends; tiles off:
+  geometry is the app icon again.
 
 ## Decisions
 
@@ -184,8 +198,11 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 - Magic Lamp dropped: `Clutter.DeformEffect` paints nothing on Mutter 50; the dock has its
   own GPU genie (`minimize-effect=1`). `install.sh` disables the lamp if enabled.
 - Live-windows glass backdrop is optional (`glass-backdrop`); wallpaper is cheaper.
-- `minimized-window-tiles` off in the preset: minimize goes into the app icon (macOS
-  option "Minimize windows into application icon").
+- `minimized-window-tiles` on in the preset: macOS's default ("Minimize windows into
+  application icon" off). The window minimizes into its tile and restores out of it; the
+  tile is laid out as soon as Mutter flags the window minimized, so the effect's target
+  (the window's icon geometry) is the tile's final slot. With tiles off, windows
+  minimize into the app icon.
 - `click-action-spread` off in the preset: macOS does nothing on clicking the active app.
 - Shift+click opens a new window (Ubuntu behaviour); macOS has no shift-click.
 - `isolate-workspaces` off: Ubuntu-only behaviour.
