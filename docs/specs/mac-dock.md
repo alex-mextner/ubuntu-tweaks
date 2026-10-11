@@ -25,6 +25,8 @@ in the same commit as any behavior change.
 11. «Прямоугольные Оверлеи с файлами показываются не так как на маке. Перегораживают
     содержимое дока и не имеют уголка откуда растут» (Telegram)
 12. «Обновленные скрины закинь в ридми потом» (Telegram)
+14. «почини нормально и включи по умолчанию и на моей машине» (file drops,
+    [#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13))
 
 ## Requirements
 
@@ -91,9 +93,9 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 
 | # | Behaviour | Status | Setting / note |
 |---|---|---|---|
-| 1 | Drag a file onto Trash moves it to the trash | opt-in | `file-drops` (helper window: Wayland drags never drop on Shell actors); off in the preset until [#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13) is fixed |
-| 2 | Drag a file onto an app opens it with that app | opt-in | `file-drops`, off in the preset (see row 1) |
-| 3 | Drag a file onto a stack moves/copies it | opt-in | `file-drops`, off in the preset (see row 1) |
+| 1 | Drag a file onto Trash moves it to the trash | works | `file-drops` (on in the preset; a helper window takes the drop: Wayland drags never drop on Shell actors) |
+| 2 | Drag a file onto an app opens it with that app | works | `file-drops` (see row 1) |
+| 3 | Drag a file onto a stack moves/copies it | works | `file-drops` (see row 1) |
 | 3a | Spring-loading: hover a dragged file over an app raises it | works | `spring-loading` |
 | 4 | Drag an icon off the dock removes it (label + poof) | works | `drag-off-remove` |
 | 5 | Keep in Dock (Pin/Unpin) | works | GNOME app menu |
@@ -156,6 +158,16 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
   live, no hang, no recursion errors; badge count 3 + progress pill drawn; a file dragged
   from Files onto Trash lands in the trash; idle gnome-shell CPU 0.10 % over 20 s;
   with a 30 fps video under the dock 3.85 %.
+- File drops ([#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13)), 30
+  synthetic drags from Files: 10 begun right after a helper restart (5 of them before the
+  helper was ready), drops onto Trash, Text Editor and the Screenshots stack, Esc, release
+  off the dock, a refused drop, a 1.5 s pause. The drop window leaves input 10–29 ms
+  after the release; before the fix it stayed 406–427 ms, until the helper unmapped it,
+  after every drag not cancelled with Esc. The helper unmaps it within 430 ms, and the
+  next click on a dock icon activates the app every time. With Meta.Dnd's leave blocked,
+  the watchdog alone ends the drag 264 ms after the release, the helper's leave alone
+  10 ms. A buttonless drag resting 1.2 s on Trash still drops. Shell exit mid-drag: 5/5
+  clean.
 
 ## Decisions
 
@@ -177,9 +189,13 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 - `click-action-spread` off in the preset: macOS does nothing on clicking the active app.
 - Shift+click opens a new window (Ubuntu behaviour); macOS has no shift-click.
 - `isolate-workspaces` off: Ubuntu-only behaviour.
-- `file-drops` off in the preset: file drops work, but the first file drag after the
-  helper (re)starts can leave the drop window over the dock, swallowing dock clicks until
-  the next click ([#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13)).
-  Re-enable once that is fixed. The shell crash on exit while the drop window was up
+- `file-drops` on in the preset. The Shell owns the drop window's input: the layer
+  holding it is visible only while a drag is live and hidden at whichever drag end comes
+  first (Meta.Dnd's leave, the helper's drop, or, once a pointer drag's button is up, the
+  helper's leave or a 250 ms watchdog), so the window cannot take a dock click after a
+  drag, however late the helper unmaps it. The helper reports ready before it gets any
+  "show" ([#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13)). A touch drag
+  ends only on Meta.Dnd's leave or its drop: a silence timeout would lose the drop of a
+  finger resting on its target. The shell crash on exit while the drop window was up
   ([#12](https://github.com/alex-mextner/ubuntu-tweaks/issues/12)) is fixed: the file-drop
   layer hands window actors back to `window_group` when it is destroyed.
