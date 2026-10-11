@@ -44,7 +44,9 @@ macOS 26 Tahoe (top) and this dock (bottom):
 - **Badges and progress** from apps (Unity LauncherEntry: Telegram, Thunderbird, downloads)
   and red notification counts.
 - **Genie minimize** into the app icon (own GPU effect); launch and attention bounces.
-- **Drag and drop:** files onto Trash, apps or stacks; drag an icon off the dock to remove it.
+- **Drag and drop:** drag an icon off the dock to remove it. Dropping files onto Trash,
+  apps or stacks is opt-in for now (`file-drops`, off in the preset, see
+  [#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13)).
 - **Super+Alt+D** toggles auto-hide; right-click the dock background for hiding,
   magnification, position and settings.
 - **Show All Windows** of an app from its menu; **recent apps** after the running ones.

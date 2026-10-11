@@ -91,9 +91,9 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 
 | # | Behaviour | Status | Setting / note |
 |---|---|---|---|
-| 1 | Drag a file onto Trash moves it to the trash | works | `file-drops` (helper window: Wayland drags never drop on Shell actors) |
-| 2 | Drag a file onto an app opens it with that app | works | `file-drops` |
-| 3 | Drag a file onto a stack moves/copies it | works | `file-drops` |
+| 1 | Drag a file onto Trash moves it to the trash | opt-in | `file-drops` (helper window: Wayland drags never drop on Shell actors); off in the preset until [#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13) is fixed |
+| 2 | Drag a file onto an app opens it with that app | opt-in | `file-drops`, off in the preset (see row 1) |
+| 3 | Drag a file onto a stack moves/copies it | opt-in | `file-drops`, off in the preset (see row 1) |
 | 3a | Spring-loading: hover a dragged file over an app raises it | works | `spring-loading` |
 | 4 | Drag an icon off the dock removes it (label + poof) | works | `drag-off-remove` |
 | 5 | Keep in Dock (Pin/Unpin) | works | GNOME app menu |
@@ -177,3 +177,9 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 - `click-action-spread` off in the preset: macOS does nothing on clicking the active app.
 - Shift+click opens a new window (Ubuntu behaviour); macOS has no shift-click.
 - `isolate-workspaces` off: Ubuntu-only behaviour.
+- `file-drops` off in the preset: file drops work, but the first file drag after the
+  helper (re)starts can leave the drop window over the dock, swallowing dock clicks until
+  the next click ([#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13)).
+  Re-enable once that is fixed. The shell crash on exit while the drop window was up
+  ([#12](https://github.com/alex-mextner/ubuntu-tweaks/issues/12)) is fixed: the file-drop
+  layer hands window actors back to `window_group` when it is destroyed.
