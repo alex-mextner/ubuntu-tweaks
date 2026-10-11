@@ -61,7 +61,10 @@ in the same commit as any behavior change.
 - Downloads and Screenshots stacks on the right by default, left of Trash.
 - Screenshots = `<XDG Pictures>/<localized "Screenshots">`, where GNOME saves them.
 - Any folder can be a stack: setting `folder-stacks` (JSON array of `"path"` or
-  `{"path", "title", "icon"}`), editable in Preferences → Others → Folder Stacks.
+  `{"path", "title", "icon"}`), editable in Preferences → Others → Folder Stacks. Any
+  path works, also with a newline, backslash, quotes, `%` or non-Latin letters; an entry
+  that is not a folder is skipped with one warning and the dock still loads
+  ([#11](https://github.com/alex-mextner/ubuntu-tweaks/issues/11)).
 - A stack opens as a fan of the newest files (hidden files excluded); images show a
   scaled preview (freedesktop thumbnail if present). Folders update live.
 - "More…"/the stack's own app open the folder itself.
@@ -182,6 +185,15 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
   200 ms later opens a slot (target 1177 → 1147, the tile's x); a click on the tile
   restores the window out of it and the tile goes once the effect ends; tiles off:
   geometry is the app icon again.
+- Folder stacks with odd paths ([#11](https://github.com/alex-mextner/ubuntu-tweaks/issues/11)):
+  `"new\nline"`, `back\slash`, `quo'te"d`, Cyrillic, `per%cent` and a missing path. Before
+  the fix the extension failed to enable (KeyFileError, no dock); after, it loads, shows
+  every real folder and each one opens in Files. A drop read after 5 later drags lands
+  on where its drag ended.
+- Shell exit ([#14](https://github.com/alex-mextner/ubuntu-tweaks/issues/14)), fork
+  `0abdfe8`: "already disposed" lines from the dock 297 → 0 (hovering), 341 → 0
+  (mid-bounce), 0 with a minimized tile and after 3 disable/enable cycles. The 91 left
+  come from the Shell's own IBus candidate popup.
 
 ## Decisions
 
@@ -216,3 +228,13 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
   finger resting on its target. The shell crash on exit while the drop window was up
   ([#12](https://github.com/alex-mextner/ubuntu-tweaks/issues/12)) is fixed: the file-drop
   layer hands window actors back to `window_group` when it is destroyed.
+- A drop the helper accepted keeps its drag's target until the helper delivers it,
+  however many drags begin meanwhile; unaccepted drags are forgotten after 4 more
+  ([#11](https://github.com/alex-mextner/ubuntu-tweaks/issues/11)).
+- The Shell disposes the dock without disabling the extension on exit: the dock's
+  `destroy` signal cancels its timers and takes it out of the extension's lists
+  ([#14](https://github.com/alex-mextner/ubuntu-tweaks/issues/14)).
+- The fork's `make install`/`g44`/`install-zip` refuse to run when the installed
+  extension dir is a symlink (it is one to this repo's submodule), as installing would
+  empty the checkout it points to; `make build-g44` builds into `./build` only
+  ([#15](https://github.com/alex-mextner/ubuntu-tweaks/issues/15)).
