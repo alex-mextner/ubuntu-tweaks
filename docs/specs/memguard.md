@@ -522,3 +522,10 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
    enough once sessions are capped at 20G each?
 4. `apple-hid-battery` on a kernel where `hid_apple`/`hid_magicmouse` are signed in-tree but
    the livepatch is not: is it worth enrolling a MOK for this one module, or wait for 7.3?
+
+### Sentinel false positives observed 2026-10-11 (requirements for memguard daemon)
+
+- 19:5x: "WARNING #2, still growing" was sent with growth +0.0 GB, tree shrinking 9.8 -> 7.5 GB, avail 36.6 GB (79 %). Escalation (`nth`) MUST re-check the triggering reason on the current tick; a repeat notify without a live reason is a bug.
+- `fall_per_min` showed 6.8 GB/min while avail moved 36.4 -> 36.6 GB: compute the slope over the 60 s ring, report 0 when |delta avail| < 256 MB.
+- Tree accounting by RSS double-counts shared pages of omp + its subagents (7.5 GB for a tree whose top-3 sum to 0.7 GB): use PSS (`/proc/<pid>/smaps_rollup`) for process trees; cgroups already use `memory.current`.
+- The 2.4 GB spike was `tasklib.classify_server` (task-cli local model, on-demand, lives ~minutes): policy needs `ignore = { comm = "..." }` entries for known short-lived daemons; rig ships one for classify_server in `50-agents.toml`.
