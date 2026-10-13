@@ -529,3 +529,18 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
 - `fall_per_min` showed 6.8 GB/min while avail moved 36.4 -> 36.6 GB: compute the slope over the 60 s ring, report 0 when |delta avail| < 256 MB.
 - Tree accounting by RSS double-counts shared pages of omp + its subagents (7.5 GB for a tree whose top-3 sum to 0.7 GB): use PSS (`/proc/<pid>/smaps_rollup`) for process trees; cgroups already use `memory.current`.
 - The 2.4 GB spike was `tasklib.classify_server` (task-cli local model, on-demand, lives ~minutes): policy needs `ignore = { comm = "..." }` entries for known short-lived daemons; rig ships one for classify_server in `50-agents.toml`.
+
+### 2026-10-13 22:04 critical: headless sessions are unreachable by steer
+
+- PSI full avg10 54 %, swap 24 % used, avail falling 5 GB/min with 21 GB still free: 9
+  sessions; the heavy ones were `omp -p --auto-approve --no-session` batch runs (a `bun test`
+  suite, two `review diff`, `docker run nixos/nix --memory=5g`). The broadcast reached TUI
+  sessions only; `who-ran --live --steer` reported "no live omp owner" for every heavy pid —
+  headless omp has no TUI bridge, so the steer channel is blind to exactly the sessions that
+  run unattended batch work.
+- Requirement: a unit whose `notify.exec` exits non-zero (no channel) escalates to `freeze` on
+  the same tick already at stage `high`, not only at `critical`; the dialog lists it like any
+  other unit. rig: the cgroup wrapper must wrap `omp -p` runs too (same scope and limits), and
+  `50-agents.toml` must treat a failed `notify.exec` as "unreachable".
+- The sentinel did fire at 40 % free (on 10-11 nothing fired at all): the heuristics work; the
+  delivery channel was the gap.
