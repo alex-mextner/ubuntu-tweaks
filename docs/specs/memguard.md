@@ -343,14 +343,16 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   - `heavy-run`: the heavy-op gate's own `/proc` live-runner scan (`heavy_op_memory_gate.py`,
     found through the `cmd` of the installed omp hook; run as the desktop user, never as
     root, because the gate is a user-writable file) reports fewer than its
-    `RIG_HEAVY_OP_MAX_LIVE` runners. A gate that cannot run is logged and skipped.
+    `RIG_HEAVY_OP_MAX_LIVE` runners. A scan that cannot run skips the drain too (fail
+    closed: the drain is the disruptive side); `heavy_gate = ""` turns the scan off.
   - `heavy-lock`: a shared non-blocking `flock` on every `heavy_locks` path (default
     `/tmp/3d-cli-heavy.lock`, the lock agents queue heavy runs with) succeeds. The drain
     holds it until it ends, so a queued `flock /tmp/3d-cli-heavy.lock <cmd>` waits for the
     drain instead of starting in the middle of it. Lock files are never created (with
     `fs.protected_regular=2` a root-owned file in `/tmp` would lock the user out) and never
     opened through a symlink. The unit has no `PrivateTmp=`.
-  - One exclusive lock `/run/lock/swap-drain.lock` covers every caller; a second request
+  - One exclusive lock `/run/memguard/swap-drain.lock` covers every caller (in the root-owned
+    state dir, not sticky `/run/lock`, where any user could pre-create it); a second request
     prints `drain already in progress (started HH:MM, N MB left on DEV)` instead of the
     kernel's EINVAL.
 
@@ -422,7 +424,9 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   drains; 1507 MB used, headroom, PSI, fall, cooldown, lock held, heavy lock held, heavy
   runners at the limit skip), the watchdog with stub `swapoff`/`swapon` (low avail, PSI,
   SIGTERM → `aborted`, device still on), mem-sentinel with a live/stale drain state, the
-  trigger's stability/retry/cooldown, sd_notify, and the polkit rule under node.
+  trigger's stability/retry/cooldown, sd_notify, `memguard swap-drain` against a fake
+  `systemctl` (skip reason, `--wait` result, in progress, polkit refusal), and the polkit rule
+  under node.
 - **Verify after install** (`sudo modules/memguard/install.sh`; `--dry-run` shows the diff and
   exits 3 while changes are pending, 0 when none):
   - `systemctl is-enabled swap-drain.timer` → not found; `systemctl show -p Type,WatchdogUSec

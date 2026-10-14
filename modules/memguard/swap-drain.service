@@ -1,0 +1,22 @@
+# installed by ubuntu-tweaks/memguard -> /etc/systemd/system/swap-drain.service
+# No timer: started by mem-sentinel when the drain conditions hold, or by `memguard swap-drain`
+# (polkit rule 50-memguard-swap-drain.rules).
+[Unit]
+Description=memguard swap-drain: gated, abortable swap-to-RAM drain
+Documentation=https://github.com/alex-mextner/ubuntu-tweaks/blob/main/docs/specs/memguard.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -u /usr/local/sbin/swap-drain
+# skipped (10), already in progress (11) and aborted by the watchdog (12) are normal outcomes
+SuccessExitStatus=10 11 12
+SyslogIdentifier=swap-drain
+# swapoff itself runs at nice 19. The supervisor keeps normal priority: its watchdog must get
+# the CPU to abort a drain. No SCHED_IDLE for swapoff either: it holds the mmap lock of the
+# process it is filling while it reads pages, and a starved idle-class holder would stall that
+# process. IOSchedulingClass is moot here (the NVMe queue scheduler is "none").
+# systemctl stop: SIGTERM to the supervisor only, which aborts swapoff and makes sure the device
+# is back on before it exits.
+KillMode=mixed
+TimeoutStopSec=90
+# No PrivateTmp=: the heavy lock /tmp/3d-cli-heavy.lock must be the real /tmp.

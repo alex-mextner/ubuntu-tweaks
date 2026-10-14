@@ -1,0 +1,39 @@
+# installed by ubuntu-tweaks/memguard -> /etc/memguard/memguard.toml
+# Every key below is shown with its default (memguard_swap.DEFAULTS); a missing key or file
+# means the default. Re-run modules/memguard/install.sh after editing the repo copy.
+
+[swap]
+# --- drain conditions: swap-drain runs only when all hold; each skip logs the failing one ---
+drain_min_used_gb = 4.0          # SwapUsed >= this ...
+drain_below_free_pct = 50.0      # ... or SwapFree below this % of SwapTotal
+drain_headroom_gb = 8.0          # MemAvailable - SwapUsed(device) >= max(this GB,
+drain_headroom_pct = 20.0        #   this % of MemTotal): RAM keeps headroom after the pages return
+psi_some_avg60_max = 5.0         # /proc/pressure/memory some avg60 below this
+psi_full_avg10_max = 1.0         # ... and full avg10 below this
+fall_gb_per_min_max = 1.0        # MemAvailable not falling faster (sampled for fall_window_s)
+fall_window_s = 15
+drain_cooldown_min = 20          # since the last drain finished (done or aborted)
+# Shared non-blocking flock on each, held for the whole drain: a heavy run queued with
+# `flock /tmp/3d-cli-heavy.lock <cmd>` waits for the drain instead of starting mid-drain;
+# a held lock skips the drain (heavy-lock). Missing files are ignored, never created.
+heavy_locks = ["/tmp/3d-cli-heavy.lock"]
+# Live heavy runners (pytest, bun test, review seats, ...) counted by the heavy-op gate's own
+# scan, run as `user`; at the gate's RIG_HEAVY_OP_MAX_LIVE (or heavy_max_live) the drain skips
+# (heavy-run). "auto" = the "cmd" of heavy_hook; "" = no scan. A scan that cannot run (hook
+# moved, gate broken) also skips: fail closed.
+heavy_gate = "auto"
+heavy_hook = "~/.omp/agent/hooks/heavy-op-memory-gate.pre-bash.json"
+heavy_max_live = 0               # 0 = the gate's own limit
+user = "ultra"                   # desktop user: runs the heavy scan, owns the polkit rule, and is
+                                 # mem-sentinel's session user (MEM_SENTINEL_USER overrides)
+
+# --- watchdog: SIGTERM to swapoff (the device stays on, nothing is lost) when any trips ---
+abort_avail_gb = 6.0             # MemAvailable below max(this GB,
+abort_avail_pct = 12.0           #   this % of MemTotal)
+abort_psi_full_avg10 = 5.0       # PSI full avg10 above this
+abort_after_min = 15             # the drain has run longer than this
+
+# --- trigger: mem-sentinel starts swap-drain.service (there is no timer) ---
+trigger = true
+trigger_stable_s = 300           # the drain conditions held this long without a break
+trigger_retry_min = 10           # at most one start per this many minutes
