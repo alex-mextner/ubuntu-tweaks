@@ -325,10 +325,115 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
 ### Swap hygiene
 
 - `/etc/sysctl.d/92-memguard.conf`: `vm.swappiness=10`, `vm.vfs_cache_pressure=100`.
-- `/usr/local/sbin/swap-drain` + `swap-drain.timer` (`OnBootSec=15min`,
-  `OnUnitActiveSec=1h`): when SwapUsed > 4 GB and MemAvailable > SwapUsed + 8 GB,
-  `swapoff -a && swapon -a`; otherwise logs a skip. Values are keys under
-  `[swap] drain_min_used_gb = 4`, `drain_headroom_gb = 8` in `memguard.toml`.
+- **swap-drain** (HYP-1706): `modules/memguard/swap-drain` → `/usr/local/sbin/swap-drain`,
+  run as the root oneshot `swap-drain.service`; shared code (config, readers, decision, state
+  file) in `memguard_swap.py` → `/usr/local/lib/memguard/`. Linux never swaps pages back in on
+  its own; on 2026-10-14 swap sat at 98–100 % with 27–30 GB RAM free, and the hand-made hourly
+  `swapoff -a && swapon -a` (root-fixes `mem-guard.sh` section c) left it full most of the hour
+  and showed SwapFree 0 for 1–6.5 min per run.
+
+  Conditions, all keys under `[swap]` in `/etc/memguard/memguard.toml` (the shipped file lists
+  every key with its default); every skip logs the failing condition:
+  - `min_used`: SwapUsed ≥ `drain_min_used_gb` (4) or SwapFree < `drain_below_free_pct` (50 %).
+  - `headroom`: MemAvailable − SwapUsed(device) ≥ max(`drain_headroom_gb` 8 GB,
+    `drain_headroom_pct` 20 % of MemTotal), per device, re-checked before each device.
+  - `psi`: memory `some avg60` < 5 and `full avg10` < 1. `fall`: MemAvailable not falling
+    faster than 1 GB/min, sampled over `fall_window_s` (15 s) by the oneshot itself.
+  - `cooldown`: `drain_cooldown_min` (20) since the last drain finished, done or aborted.
+  - `heavy-run`: the heavy-op gate's own `/proc` live-runner scan (`heavy_op_memory_gate.py`,
+    found through the `cmd` of the installed omp hook; run as the desktop user, never as
+    root, because the gate is a user-writable file) reports fewer than its
+    `RIG_HEAVY_OP_MAX_LIVE` runners. A gate that cannot run is logged and skipped.
+  - `heavy-lock`: a shared non-blocking `flock` on every `heavy_locks` path (default
+    `/tmp/3d-cli-heavy.lock`, the lock agents queue heavy runs with) succeeds. The drain
+    holds it until it ends, so a queued `flock /tmp/3d-cli-heavy.lock <cmd>` waits for the
+    drain instead of starting in the middle of it. Lock files are never created (with
+    `fs.protected_regular=2` a root-owned file in `/tmp` would lock the user out) and never
+    opened through a symlink. The unit has no `PrivateTmp=`.
+  - One exclusive lock `/run/lock/swap-drain.lock` covers every caller; a second request
+    prints `drain already in progress (started HH:MM, N MB left on DEV)` instead of the
+    kernel's EINVAL.
+
+  Mechanism: `swapoff <dev>` one device at a time (never `-a`), at nice 19, then `swapon <dev>`
+  at once (with its priority if it was set). A watchdog in the supervisor reads meminfo/PSI
+  every second and sends SIGTERM to `swapoff` when MemAvailable < max(`abort_avail_gb` 6 GB,
+  `abort_avail_pct` 12 %), PSI `full avg10` > `abort_psi_full_avg10` (5) or the drain has run
+  `abort_after_min` (15) minutes; `systemctl stop swap-drain` does the same. The kernel's
+  `try_to_unuse` stops on the pending signal and `reinsert_swap_info` puts the device back
+  with the rest of its pages still in swap, so an abort loses nothing (result `aborted`).
+  The supervisor keeps normal priority so its watchdog gets the CPU; `swapoff` gets no
+  `SCHED_IDLE` because it holds the mmap lock of the process it is filling while it reads,
+  and a starved idle-class holder would stall that process. `IOSchedulingClass` is moot (the
+  NVMe queue scheduler is `none`). Before a drain it logs used/avail/PSI and the top five
+  leaf cgroups by `memory.swap.current`; after it, result, duration and the same figures.
+
+  Triggers (no timer; the old `swap-drain.timer` is disabled and removed by the install):
+  - **mem-sentinel**, which already samples every 2 s: once the conditions above (minus the
+    heavy checks, which the oneshot runs) have held for `trigger_stable_s` (300 s) without a
+    break — a spike, pressure or a fall resets the clock — and no drain runs, it starts
+    `swap-drain.service`, at most once per `trigger_retry_min` (10). The sentinel unit is
+    `Type=notify` with `WatchdogSec=30`: the loop sends `WATCHDOG=1` every tick, so systemd
+    restarts a hung sentinel as well as a dead one (`Restart=always`).
+  - **On demand**: `memguard swap-drain [--dry-run] [--wait]` (`/usr/local/bin/memguard`)
+    starts the unit and prints the decision (`--wait`: also the result). The polkit rule
+    `/etc/polkit-1/rules.d/50-memguard-swap-drain.rules` lets the desktop user (`user`) start
+    and stop exactly `swap-drain.service`, no sudo, no password; any other unit or verb falls
+    through to the default policy. `--dry-run` decides locally and executes nothing.
+
+  Exit codes (`swap-drain` and `memguard swap-drain`): 0 drained/started, 1 error, 2 usage or
+  config, 10 skipped, 11 already in progress, 12 aborted (10–12 are `SuccessExitStatus`).
+
+- **Why a manual `swapoff /swap_new.img` returned EINVAL** (2026-10-14 19:27:58, 12 s into the
+  timer's `swapoff -a`): `SYSCALL_DEFINE1(swapoff)` only matches areas that still have
+  `SWP_WRITEOK`; the first swapoff clears it at once, so a second one finds nothing and
+  returns `-EINVAL`, while `/proc/swaps` keeps listing the area (`SWP_USED`) until the first
+  finishes. Hence the single lock and the "already in progress" message.
+- **SwapFree 0 % during a drain**: `si_swapinfo` reports SwapTotal = pages still on the
+  device and SwapFree = 0 while `swapoff` runs. That steered the largest session with (d)
+  (2026-10-14 19:28:20, steer #30), blocked the heavy-op gate (`SwapFree < 30 %`) and showed
+  the swap-in as a 6 GB/min fall. The drain publishes `/run/memguard/swap-drain.json`:
+
+  | key | meaning |
+  |---|---|
+  | `state` | `draining` while a swapoff runs, else `idle` |
+  | `pid`, `started`, `updated` | the swap-drain process; `updated` is refreshed every second |
+  | `device`, `size_kb`, `left_kb` | device being drained, its size, pages still in swap |
+  | `swap_total_after_kb`, `swap_free_after_kb` | SwapTotal/SwapFree once the device is back on and empty |
+  | `last_decision` | `{at, action, reason, detail}` of the latest run |
+  | `last`, `last_drain_finished` | `{result, devices, duration_s, finished, detail}`; the cooldown's clock |
+
+  A reader trusts `draining` only while `pid` is alive and `updated` is under 30 s old.
+  mem-sentinel then judges (d) on `swap_*_after_kb`, and keeps MemAvailable − the device's
+  pages still in swap (`/proc/swaps` Used) in its fall ring, so the swap-in (which lowers both
+  equally) does not count, and resets the ring when a drain starts or ends. The heavy-op gate
+  gets the same rule in [rig-cli#693](https://git.hyperide.ai/ultrabricks/rig-cli/issues/693)
+  (the gate lives in agent-tools, rig installs it); the ticket carries this contract.
+- **Alternatives**: no `/proc/sys/vm` knob swaps pages back in (`drop_caches` drops clean page
+  cache, `compact_memory` defragments, `swappiness`/`watermark_scale_factor` shape future
+  reclaim only). `vm.swappiness` stays 10: lowering it does not return swapped pages and does
+  not stop `memory.high` reclaim inside omp scopes (`MemoryHigh=12G`) from swapping. Per-process
+  swap-in (`MADV_WILLNEED`, touching `/proc/<pid>/mem`) keeps swap slots allocated until a
+  fault and is unproven. zswap keeps the swap slots, so SwapFree does not improve. **zram as
+  primary swap** (zstd, priority 100, `/swap_new.img` as fallback at -1) is the follow-up:
+  spikes land in compressed RAM and draining it needs no disk reads; the gates must then count
+  zram + disk swap.
+- **Tests**: `python3 -B -m unittest discover -s modules/memguard/tests` — fixture decisions via
+  `swap-drain --dry-run --meminfo/--psi/--swaps/--now/--state-dir` (the 2026-10-14 19:27 state
+  drains; 1507 MB used, headroom, PSI, fall, cooldown, lock held, heavy lock held, heavy
+  runners at the limit skip), the watchdog with stub `swapoff`/`swapon` (low avail, PSI,
+  SIGTERM → `aborted`, device still on), mem-sentinel with a live/stale drain state, the
+  trigger's stability/retry/cooldown, sd_notify, and the polkit rule under node.
+- **Verify after install** (`sudo modules/memguard/install.sh`; `--dry-run` shows the diff and
+  exits 3 while changes are pending, 0 when none):
+  - `systemctl is-enabled swap-drain.timer` → not found; `systemctl show -p Type,WatchdogUSec
+    mem-sentinel` → `notify`, `30s`.
+  - `journalctl -t mem-sentinel --since -5min | grep start` shows `swap_trigger=True`.
+  - As the desktop user, `memguard swap-drain` prints a decision with no password prompt;
+    `systemctl start --no-ask-password ssh.service` is still refused (`Interactive
+    authentication required`).
+  - `journalctl -t swap-drain` has one line per decision (`skip <reason>: …` or
+    `drain start: …`, then `drain done|aborted in Ns …`); `journalctl -t mem-sentinel | grep
+    'swap-drain start'` shows each event trigger.
 
 ### Per-machine profile: `machines/msi-pulse-gl66/`
 
@@ -419,7 +524,7 @@ today only links extensions; the flag is additive).
 
 | Module | Files → target |
 |---|---|
-| `modules/memguard/` | `memguard.py` → `/usr/local/sbin/memguard`; `memguard.service` → `/etc/systemd/system/`; `memguard.toml` → `/etc/memguard/memguard.toml`; `policy.d/10-desktop.toml`, `20-docker.toml`, `00-protected.toml` → `/etc/memguard/policy.d/`; `memguard-dialog.py` → `/usr/local/libexec/memguard/dialog`; `memguard-dialog.service` → `/etc/systemd/user/`; `memguard-cli.py` → `/usr/local/bin/memguard`; `docker-name` → `/usr/local/libexec/memguard/`; `earlyoom.default` → `/etc/default/earlyoom`; `oomd/-.slice.conf` → `/etc/systemd/system/-.slice.d/90-memguard.conf`; `oomd/oomd.conf` → `/etc/systemd/oomd.conf.d/90-memguard.conf`; `docker-limited.slice` → `/etc/systemd/system/`; `92-memguard.sysctl.conf` → `/etc/sysctl.d/92-memguard.conf`; `swap-drain{,.service,.timer}` → `/usr/local/sbin/`, `/etc/systemd/system/`; `logrotate` → `/etc/logrotate.d/memguard` |
+| `modules/memguard/` | `memguard.py` → `/usr/local/sbin/memguard`; `memguard.service` → `/etc/systemd/system/`; `memguard.toml` → `/etc/memguard/memguard.toml`; `policy.d/10-desktop.toml`, `20-docker.toml`, `00-protected.toml` → `/etc/memguard/policy.d/`; `memguard-dialog.py` → `/usr/local/libexec/memguard/dialog`; `memguard-dialog.service` → `/etc/systemd/user/`; `memguard` (CLI) → `/usr/local/bin/memguard`; `docker-name` → `/usr/local/libexec/memguard/`; `earlyoom.default` → `/etc/default/earlyoom`; `oomd/-.slice.conf` → `/etc/systemd/system/-.slice.d/90-memguard.conf`; `oomd/oomd.conf` → `/etc/systemd/oomd.conf.d/90-memguard.conf`; `docker-limited.slice` → `/etc/systemd/system/`; `92-memguard.sysctl.conf` → `/etc/sysctl.d/92-memguard.conf`; `swap-drain` → `/usr/local/sbin/`, `swap-drain.service` → `/etc/systemd/system/` (no timer); `memguard_swap.py` → `/usr/local/lib/memguard/`; `50-memguard-swap-drain.rules` → `/etc/polkit-1/rules.d/`; `mem-sentinel`, `mem-sentinel.service` → `/usr/local/sbin/`, `/etc/systemd/system/` (until the daemon replaces it); `logrotate` → `/etc/logrotate.d/memguard` |
 | `modules/hang-capture/` | `90-lockup-capture.conf`, `90-dirty-writeback.conf`, `91-hang-evidence.conf` → `/etc/sysctl.d/`; `hw-watchdog.service` → `/etc/systemd/system/`; `90-hw-watchdog.conf` → `/etc/systemd/system.conf.d/`; `90-hang.conf` → `/etc/systemd/journald.conf.d/`; `hang-probe.sh` → `/usr/local/sbin/hang-probe`; `hang-probe.service` → `/etc/systemd/system/`; `after-hang.sh` → `/usr/local/sbin/after-hang`; `logrotate` → `/etc/logrotate.d/hang-probe` |
 | `modules/apple-hid-battery/` | `livepatch_hid_battery_offset.c`, `Makefile` (source, in repo); `build.sh` → `.ko` per kernel; `install.sh` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`; `status.sh` |
 | `machines/msi-pulse-gl66/` | per-machine profile, applied only when `dmidecode -s system-product-name` matches `profile.toml` `match`: `90-usb-stability.rules` → `/etc/udev/rules.d/` (keep hubs, JMS578 bridge, both xHCI awake; never applied so far); `usb-storage-quirks.modprobe.conf`, `nvidia-runtime-pm.modprobe.conf` → `/etc/modprobe.d/` + `update-initramfs -u -k all`; `kernel-15.sh` (applied, current state: pins 7.0.0-15); `BIOS.md`; `inventory/` (see *Per-machine profile*) |
