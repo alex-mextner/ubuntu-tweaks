@@ -60,8 +60,8 @@ paused and the user picks what to quit. That is the behavior requested here.
   dialog, kill as a last resort, capture hangs, keep swap usable. It is public and generic.
 - No agent knowledge lives here. Nothing in this repo knows what `omp`, `omp-steer`,
   `tg-ctl` or a "session" is. Agent-specific behavior arrives through the policy extension
-  point (`policy.d`) and is owned by rig; agent CLIs are owned by agent-tools (see *Cross-repo
-  split*).
+  point (`policy.d`): the policy file and agent CLIs are agent-tools', rig provisions them
+  (see *Cross-repo split*).
 - Hardware-specific fixes are not tweaks; they are a per-machine profile (`machines/`).
 - Not covered: the kernel panic/GPU investigation itself (OPEN-ISSUES #2, #5), shutdown
   debugging (#4).
@@ -74,7 +74,7 @@ Five layers, each useful alone; any one would have shortened the 10-11 incident.
 |---|---|---|
 | L1 admission | pre-command hooks refuse heavy local runs | agent-tools |
 | L2 containment | per-session scopes with `MemoryHigh/Max`, `docker-limited.slice` | rig (sessions), here (docker) |
-| L3 steer/freeze | `memguard` daemon: warn → freeze → dialog → auto-resume | here |
+| L3 steer/freeze | `memguard` daemon: warn → freeze → dialog → auto-resume; on Linux the single memory-steer channel (agent steers leave through `policy.d` hooks) | here |
 | L4 kill | systemd-oomd swap/pressure kill, earlyoom | here |
 | L5 forensics | hang-capture: lockup → panic → kdump, watchdog, probe, after-hang | here |
 
@@ -83,9 +83,17 @@ Five layers, each useful alone; any one would have shortened the 10-11 incident.
 `/usr/local/sbin/memguard`, python3 stdlib only, root, unit `memguard.service`
 (`Nice=-10`, `OOMScoreAdjust=-900`, `MemoryMin=256M`, `LimitMEMLOCK=infinity` with
 `mlockall`, `CPUWeight=500`, `IOWeight=500`, `Restart=always`): it must keep sampling while
-everything else thrashes. 2 s tick; one pass over `/proc` plus `memory.current` of every
+everything else thrashes. 2 s tick; one pass over `/proc` plus `memory.stat`/`memory.swap.current` of every
 accounted cgroup; `/proc/meminfo` and `/proc/pressure/memory` each tick. The baseline is
-today's `mem-sentinel.py`; its heuristics and defaults carry over unchanged, renamed from
+agent-tools `ops/mem-sentinel/mem_sentinel.py` at 0fe9f4a (PR #888), not the earlier
+hand-rolled copy. Its corrections carry over: a unit's footprint is `anon + shmem` from
+`memory.stat` plus `memory.swap.current`, never `memory.current`, which counts reclaimable
+page cache. Per-unit warnings fire only while the machine is short (avail < `low_avail_pct`
+or falling at `fall_gb_per_min`). (d) blames the unit holding the most swap. Kill advice
+never names a unit's leader or a protected pid. A repeat waits out a cooldown and re-checks
+its reason. The open agent-tools #889 items carry over too: per-process `VmSwap` for trees,
+bounded hook output, log fsync off the sampling thread. The unit is `Type=notify` with
+`WatchdogSec=30` and pings once per tick. Heuristics and defaults are renamed from
 `MEM_SENTINEL_*` env vars to `/etc/memguard/memguard.toml`:
 
 ```toml
@@ -119,7 +127,7 @@ install step renders the merged file. `memguard-dialog` reads the same file for 
 
 #### Units of accounting
 
-A **unit** is a cgroup under `/sys/fs/cgroup`; memory is `memory.current`, membership is
+A **unit** is a cgroup under `/sys/fs/cgroup`; memory is its footprint (`anon + shmem` from `memory.stat` plus `memory.swap.current`), membership is
 `cgroup.procs`. Enumerated each tick, deepest leaf wins, every pid counted once:
 
 - user session: `user.slice/user-<uid>.slice/user@<uid>.service/app.slice/app-*.scope`
@@ -181,7 +189,7 @@ protect = true                                                 # never frozen or
   service). The JSON on stdin is the extension point:
 
   ```json
-  {"stage": "warn", "class": "agents", "unit": "omp.slice/omp-4242-1760181234.scope",
+  {"schema": 1, "stage": "warn", "class": "agents", "unit": "omp.slice/omp-4242-1760181234.scope",
    "cgroup": "/sys/fs/cgroup/user.slice/…/omp-4242-1760181234.scope",
    "pids": [4242, 4310], "rss": 9123456789, "growth_30s": 4521000000,
    "top": [{"pid": 4310, "comm": "node", "rss": 3100000000}],
@@ -191,12 +199,16 @@ protect = true                                                 # never frozen or
 
   Rate-limited by `notify_cooldown_s` per unit; a repeat carries `"nth": 2`. Executed as
   the unit's uid (`runuser -u <user>` with the user's `PATH`/`HOME`, as mem-sentinel does),
-  off-thread, 40 s timeout, result logged.
+  off-thread, 40 s timeout, result logged. This JSON is a public interface for private
+  consumers (agent-tools): `schema` is bumped on any incompatible change. A hook that does
+  not know the version exits non-zero, and that counts as "no channel" (see the 2026-10-13
+  requirement below).
 - `kill` sends `SIGKILL` to the cgroup (`cgroup.kill`) or the tree. No shipped policy uses
   it; it exists so a user policy can make a class fail fast instead of freezing.
 
-How rig plugs in (owned by rig, documented here as the reference use of the extension
-point): `~/.config/memguard/policy.d/50-agents.toml` matches
+How the agent side plugs in (content and CLIs owned by agent-tools, dropped by `rig apply`;
+documented here as the reference use of the extension point):
+`~/.config/memguard/policy.d/50-agents.toml` matches
 `cgroup = "user.slice/*/omp.slice/omp-*.scope"`, `display.exec = "tg-ctl omp-live status
 --memguard"` (name "omp session: CRYPT", detail = cwd/title), `warn → notify.exec =
 "omp-steer --memguard"` (delivers mem-sentinel's steer text into the owning session),
@@ -437,14 +449,17 @@ compares each with `cmp -s` (drift = modified) and checks units active/enabled.
 | Apple Magic Keyboard / Trackpad battery livepatch | ubuntu-tweaks | `modules/apple-hid-battery/` |
 | omp cgroup wrapper: `harness_wrappers` `cgroup:` option — scope `omp-<N>` in `omp.slice`, `MemoryHigh=12G`, `MemoryMax=20G`, `MemorySwapMax=2G`, `REVIEW_MAX_CONCURRENCY=2` env (`~/.config/environment.d/50-omp.conf`), `PI_INSTALL_DIR` redirect, in-scope re-exec guard, throwaway-scope probe | rig | replaces `~/.local/bin/omp` |
 | user unit `omp.slice` (`MemoryAccounting=yes`, `ManagedOOMMemoryPressure=kill`, `ManagedOOMMemoryPressureLimit=40%`) | rig | `~/.config/systemd/user/omp.slice` on `rig apply` |
-| `~/.config/memguard/policy.d/50-agents.toml` (match `omp.slice/omp-*.scope`, display via `tg-ctl omp-live status`, warn → `omp-steer`, critical → freeze) | rig | dropped on `rig apply` |
-| `omp-steer`, `who-ran`, `omp-supervisor` (`watch.sh`), `WATCHDOG.md`, hooks `runpod-offload-gate` and `heavy-op-memory-gate` (thresholds relative to MemTotal, machine-wide heavy-runner count) | agent-tools | CLIs and hooks |
+| `50-agents.toml` content (match `omp.slice/omp-*.scope`, display via `tg-ctl omp-live status --memguard`, warn → `omp-steer --memguard`, critical → freeze, `ignore` for short-lived dev daemons) | agent-tools | catalog file; dropped into `~/.config/memguard/policy.d/` by `rig apply` |
+| `omp-steer` (with `--memguard`: hook JSON on stdin, exit ≠ 0 when the session has no channel), `who-ran`, `omp-supervisor` (`watch.sh`), `WATCHDOG.md`, hooks `runpod-offload-gate` and `heavy-op-memory-gate` (thresholds relative to MemTotal, machine-wide heavy-runner count) | agent-tools | CLIs and hooks |
+| `tg-ctl omp-live status --memguard` (display hook) | tg-cli | CLI flag |
+| `sysmon`, the cross-platform dev resource monitor (macOS LaunchAgent, Linux `systemd --user`) | rig | exists (rig-cli#622); on a Linux host with memguard installed it sends no session memory steers of its own |
+| `ops/mem-sentinel`, the interim per-session sentinel | agent-tools | installed until memguard with the #888 port is installed, then deleted (agent-tools#892) |
 
 ### Testing
 
 - Unit (`python3 -m unittest`, TDD): policy merge (two dirs, later/user wins by `name`),
   class matching (cgroup glob, comm/cmdline regex, uid, protect precedence, first-match),
-  heuristics a–f on recorded `meminfo`/`memory.current` sequences, the stage machine
+  heuristics a–f on recorded `meminfo`/`memory.stat` sequences, the stage machine
   (warn → critical → freeze set largest-first until projected 30 % → recovered → countdown
   → thaw; critical during countdown cancels it), countdown cancel/resume over the socket
   protocol with a fake daemon, display resolvers with a fake `.desktop` dir.
@@ -477,7 +492,8 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
 - `~/.local/bin/omp`, `~/.config/systemd/user/omp.slice`,
   `~/.config/environment.d/50-omp.conf` are replaced by rig's wrapper and units;
 - on disk: `mem-sentinel.service` disabled and removed, `/usr/local/sbin/mem-sentinel`
-  removed, `/etc/sysctl.d/92-mem-guard.conf` → `92-memguard.conf`,
+  removed (agent-tools then deletes `ops/mem-sentinel/`, agent-tools#892),
+  `/etc/sysctl.d/92-mem-guard.conf` → `92-memguard.conf`,
   `/etc/systemd/system/-.slice.d/90-oomd-swap.conf` and `/etc/systemd/oomd.conf.d/90-mem-guard.conf`
   → the `90-memguard.conf` pair, `/var/log/hang-probe/sentinel.log` → `/var/log/memguard/`;
   the `install.sh` of each module performs these renames (idempotent) so nothing is lost on
@@ -485,6 +501,14 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
 
 ## Decisions
 
+- **Placement (2026-10-15)**: the owner's rule is "rig/agent-tools = development; ubuntu-tweaks
+  = only Ubuntu; OS-level but applicable to macOS = maybe rig". Every mechanism here is
+  Linux- or GNOME-only (cgroup v2, `cgroup.freeze`, PSI, `swapoff`, polkit, oomd, earlyoom,
+  GTK4), and macOS has the same behavior built in, so the daemon stays here. The macOS-
+  applicable part, watching memory and nudging agents, is rig `sysmon`. Agent policy and CLIs
+  are agent-tools'. No component writes `/usr/local/sbin/mem-sentinel` except agent-tools'
+  installer, until memguard replaces it. Details, alternatives and the quorum:
+  [`2026-10-15-memory-pressure-split-design.md`](2026-10-15-memory-pressure-split-design.md).
 - **Freeze, not kill, at critical**: freezing stops growth and the thrash instantly and is
   reversible; the user decides what dies, as on macOS. Kill layers stay armed below it for
   the case where the daemon itself cannot run.
@@ -527,8 +551,8 @@ Once `ubuntu-tweak apply --commit --only memguard,hang-capture` (or
 
 - 19:5x: "WARNING #2, still growing" was sent with growth +0.0 GB, tree shrinking 9.8 -> 7.5 GB, avail 36.6 GB (79 %). Escalation (`nth`) MUST re-check the triggering reason on the current tick; a repeat notify without a live reason is a bug.
 - `fall_per_min` showed 6.8 GB/min while avail moved 36.4 -> 36.6 GB: compute the slope over the 60 s ring, report 0 when |delta avail| < 256 MB.
-- Tree accounting by RSS double-counts shared pages of omp + its subagents (7.5 GB for a tree whose top-3 sum to 0.7 GB): use PSS (`/proc/<pid>/smaps_rollup`) for process trees; cgroups already use `memory.current`.
-- The 2.4 GB spike was `tasklib.classify_server` (task-cli local model, on-demand, lives ~minutes): policy needs `ignore = { comm = "..." }` entries for known short-lived daemons; rig ships one for classify_server in `50-agents.toml`.
+- Tree accounting by RSS double-counts shared pages of omp + its subagents (7.5 GB for a tree whose top-3 sum to 0.7 GB): use PSS (`/proc/<pid>/smaps_rollup`) for process trees; cgroups use the `memory.stat` footprint (not `memory.current`, agent-tools#884).
+- The 2.4 GB spike was `tasklib.classify_server` (task-cli local model, on-demand, lives ~minutes): policy needs `ignore = { comm = "..." }` entries for known short-lived daemons; agent-tools' `50-agents.toml` (dropped by rig) carries one for classify_server.
 
 ### 2026-10-13 22:04 critical: headless sessions are unreachable by steer
 
