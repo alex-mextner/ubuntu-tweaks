@@ -26,6 +26,10 @@ import memguard_swap as ms  # noqa: E402
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_SKIP, EXIT_BUSY, EXIT_ABORTED = 0, 1, 2, 10, 11, 12
 KILL_AFTER_S = 30          # swapoff that ignores SIGTERM this long gets SIGKILL (also stops it)
+SWAPON_TRIES, SWAPON_RETRY_S = 5, 2.0   # a failed swapon is retried: a device left off loses swap
+# Worst case after a stop: KILL_AFTER_S + tries x timeout + pauses = 30 + 40 + 8 = 78 s, inside the
+# unit's TimeoutStopSec=90, so systemd never kills the drain mid-recovery with swap left off.
+SWAPON_TIMEOUT_S = 8
 STOP = []                  # set by SIGTERM (systemctl stop swap-drain): abort like the watchdog
 
 # Runs as the desktop user (never as root: the gate is a user-writable file) and prints the
@@ -51,17 +55,23 @@ def user_home(user):
         return f"/home/{user}"
 
 
+def expand_home(path, home):
+    return home + path[1:] if path.startswith("~/") else path
+
+
 def heavy_gate_path(cfg):
     gate = cfg["heavy_gate"]
     if not gate:
         return None
     home = user_home(cfg["user"])
     if gate != "auto":
-        return gate.replace("~", home, 1) if gate.startswith("~/") else gate
-    hook = cfg["heavy_hook"]
-    hook = hook.replace("~", home, 1) if hook.startswith("~/") else hook
-    with open(hook) as f:
+        return expand_home(gate, home)
+    with open(expand_home(cfg["heavy_hook"], home)) as f:
         return json.load(f)["cmd"]
+
+
+class HeavyScanError(Exception):
+    pass
 
 
 def heavy_runners(cfg):
@@ -90,27 +100,29 @@ def heavy_runners(cfg):
         raise HeavyScanError(f"rc={r.returncode} {e.__class__.__name__}: {e}; {err}") from e
 
 
-class HeavyScanError(Exception):
-    pass
-
-
 def take_heavy_locks(cfg):
-    """Shared non-blocking flock on every heavy lock: (fds, None) or (None, busy path). Heavy runs
-    take these exclusively, so while we hold them a queued run waits for the drain to finish."""
+    """Shared non-blocking flock on every heavy lock: (fds, None) or (None, why it is busy).
+    Heavy runs take these exclusively, so while we hold them a queued run waits for the drain.
+    A missing file means no heavy run is queued; any other failure to open (a symlink, not a
+    regular file, no permission) means we cannot see the lock, so the drain skips."""
     fds = []
+    busy = None
     for path in cfg["heavy_locks"]:
         try:
             fd = ms.try_lock(path, shared=True)
         except FileNotFoundError:
             continue
         except OSError as e:
-            log(f"heavy lock {path}: {e}; ignored")
-            continue
+            busy = f"{path} cannot be checked ({e.strerror or e})"
+            break
         if fd is None:
-            for held in fds:
-                os.close(held)
-            return None, path
+            busy = f"{path} is held by a heavy run"
+            break
         fds.append(fd)
+    if busy:
+        for held in fds:
+            os.close(held)
+        return None, busy
     return fds, None
 
 
@@ -166,7 +178,7 @@ class Drain:
         total = sum(d.size_kb for d in others) + dev.size_kb
         return total, total - sum(d.used_kb for d in others)
 
-    def device(self, dev):
+    def drain_device(self, dev):
         """Drain one device; returns "done", "aborted" or "error". The device is on afterwards."""
         cfg, src = self.cfg, self.src
         started = time.time()
@@ -202,9 +214,23 @@ class Drain:
         on = any(d.name == dev.name for d in src.snapshot().devices)
         if not on:
             argv = [self.args.swapon] + (["-p", str(dev.prio)] if dev.prio >= 0 else []) + [dev.name]
-            r = subprocess.run(argv, capture_output=True, text=True)
-            if r.returncode != 0:
-                log(f"ERROR swapon {dev.name} failed rc={r.returncode}: {(r.stderr or r.stdout).strip()}")
+            for attempt in range(1, SWAPON_TRIES + 1):
+                # the device is off, so nothing is left to swap in; heartbeat: active_drain()
+                # treats >30 s without an update as a dead drain
+                self.save(updated=time.time(), left_kb=0)
+                try:
+                    r = subprocess.run(argv, capture_output=True, text=True, timeout=SWAPON_TIMEOUT_S)
+                    on_rc, why = r.returncode, (r.stderr or r.stdout).strip()
+                except subprocess.TimeoutExpired:
+                    on_rc, why = None, f"no answer in {SWAPON_TIMEOUT_S} s"
+                # a swapon that timed out (or raced) may still have put the device back
+                if on_rc == 0 or any(d.name == dev.name for d in src.snapshot().devices):
+                    break
+                log(f"ERROR swapon {dev.name} failed rc={on_rc} (try {attempt}/{SWAPON_TRIES}): {why}")
+                if attempt < SWAPON_TRIES:
+                    time.sleep(self.args.swapon_retry_s)
+            else:
+                log(f"ERROR {dev.name} left OFF: run `swapon {dev.name}` by hand")
                 return "error"
             log(f"swapon {dev.name}: back on")
         if rc == 0 and not on:
@@ -235,7 +261,7 @@ class Drain:
                 log(f"skip {dev.name} headroom: avail {ms.mb(snap.avail_kb)} - swap {ms.mb(dev.used_kb)} "
                     f"< headroom {ms.mb(need)}")
                 continue
-            result = self.device(dev)
+            result = self.drain_device(dev)
             done.append(dev.name)
             if result != "done":
                 break
@@ -253,6 +279,8 @@ def decide(args, cfg, src, state, wall):
     """(devices, None) when a drain should run, else (None, (reason, detail))."""
     snap = src.snapshot()
     fixture = args.meminfo is not None
+    # Judged twice: the cheap checks first with no fall rate, so a clear skip does not cost the
+    # fall_window_s sampling sleep; then again on the fresh snapshot with the sampled rate.
     devices, skip = ms.memory_decision(snap, cfg, 0.0, state, wall)
     if skip:
         return snap, None, skip
@@ -295,6 +323,7 @@ def parse_args(argv):
     p.add_argument("--swapoff", default="/usr/sbin/swapoff", help=argparse.SUPPRESS)
     p.add_argument("--swapon", default="/usr/sbin/swapon", help=argparse.SUPPRESS)
     p.add_argument("--tick", type=float, default=1.0, help=argparse.SUPPRESS)
+    p.add_argument("--swapon-retry-s", type=float, default=SWAPON_RETRY_S, help=argparse.SUPPRESS)
     return p.parse_args(argv)
 
 
@@ -330,7 +359,7 @@ def main(argv=None):
     if not skip:
         heavy_fds, busy = take_heavy_locks(cfg)
         if busy:
-            skip = ("heavy-lock", f"{busy} is held by a heavy run")
+            skip = ("heavy-lock", busy)
     prefix = "dry-run: " if args.dry_run else ""
     if skip:
         log(f"{prefix}skip {skip[0]}: {skip[1]} ({ms.describe(snap)})")

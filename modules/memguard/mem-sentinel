@@ -36,6 +36,7 @@ import time
 from collections import deque
 
 sys.path[:0] = [os.path.dirname(os.path.realpath(__file__)), "/usr/local/lib/memguard"]
+MS_IMPORT_ERROR = None
 try:
     import memguard_swap as ms
 except ImportError as _e:      # the watchdog must run even without the swap module

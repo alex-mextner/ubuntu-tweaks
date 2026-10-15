@@ -179,6 +179,19 @@ class DryRunDecisions(Case):
         self.assertIn(f"skip heavy-lock: {lock} is held by a heavy run", r.stdout)
         self.assertFalse(os.path.exists(self.path("absent.lock")), "heavy locks must never be created")
 
+    def test_unopenable_heavy_lock_skips(self):
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        target = self.put("real.lock", "")
+        link = self.path("link.lock")
+        os.symlink(target, link)
+        fifo = self.path("fifo.lock")
+        os.mkfifo(fifo)
+        for lock in (link, fifo):
+            self.config(heavy_gate="", heavy_locks=[lock])
+            r = self.run_drain()
+            self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+            self.assertIn(f"skip heavy-lock: {lock} cannot be checked", r.stdout)
+
     def fake_gate(self, runners):
         # one file per variant: a rewrite in the same second would be served from a stale .pyc
         return self.put(f"gate{runners}.py", textwrap.dedent(f"""\
@@ -306,6 +319,56 @@ class Watchdog(Case):
         self.assertIn("ERROR swapoff /swap_new.img rc=255: swapoff: /swap_new.img: swapoff failed", r.stdout)
         self.assertEqual(self.state()["last"]["result"], "error")
 
+    def test_swapon_failure_is_retried(self):
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        stub = self.stubs("printf 'Filename Type Size Used Priority\\n' >\"$SWAPS\"")
+        on = stub[stub.index("--swapon") + 1]
+        with open(on) as f:
+            body = f.read()
+        count = self.path("swapon.count")                       # fails twice, then works
+        with open(on, "w") as f:
+            f.write(body.replace("grep -q", f'n=$(cat "{count}" 2>/dev/null || echo 0); echo $((n+1)) >"{count}"\n'
+                                            f'[ "$n" -lt 2 ] && {{ echo busy >&2; exit 1; }}\ngrep -q', 1))
+        r = self.run_drain(*stub, "--swapon-retry-s", "0", dry=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("swapon /swap_new.img failed rc=1 (try 1/5): busy", r.stdout)
+        self.assertEqual(self.calls().count("swapon /swap_new.img"), 3)
+
+    def test_swapon_failure_left_off_is_error(self):
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        stub = self.stubs("printf 'Filename Type Size Used Priority\\n' >\"$SWAPS\"")
+        on = stub[stub.index("--swapon") + 1]
+        with open(on, "w") as f:
+            f.write(f"#!/bin/bash\necho \"swapon $*\" >>\"{self.path('calls.log')}\"\necho nope >&2\nexit 1\n")
+        r = self.run_drain(*stub, "--swapon-retry-s", "0", dry=False)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.calls().count("swapon /swap_new.img"), 5)
+        self.assertIn("ERROR /swap_new.img left OFF: run `swapon /swap_new.img` by hand", r.stdout)
+        self.assertEqual(self.state()["last"]["result"], "error")
+
+    def test_failed_swapoff_stays_failed_after_swapon_recovery(self):
+        # swapoff took the device off, then failed: swapon puts it back, but the drain is not "done"
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        stub = self.stubs("printf 'Filename Type Size Used Priority\\n' >\"$SWAPS\"; exit 255")
+        r = self.run_drain(*stub, dry=False)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("swapon /swap_new.img: back on", r.stdout)
+        self.assertIn("ERROR swapoff /swap_new.img rc=255", r.stdout)
+        self.assertEqual(self.state()["last"]["result"], "error")
+
+    def test_swapon_that_enabled_the_device_but_failed_is_not_retried(self):
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        stub = self.stubs("printf 'Filename Type Size Used Priority\\n' >\"$SWAPS\"")
+        on = stub[stub.index("--swapon") + 1]
+        with open(on) as f:
+            body = f.read()
+        with open(on, "w") as f:
+            f.write(body + "exit 1\n")                         # device back in /proc/swaps, rc 1
+        r = self.run_drain(*stub, "--swapon-retry-s", "0", dry=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls().count("swapon /swap_new.img"), 1)
+        self.assertEqual(self.state()["last"]["result"], "done")
+
 
 class Config(unittest.TestCase):
     def test_shipped_toml_equals_defaults(self):
@@ -323,6 +386,13 @@ class Config(unittest.TestCase):
             f.write("[swap]\ndrain_headrom_gb = 8\n")
             f.flush()
             with self.assertRaisesRegex(ValueError, "unknown"):
+                ms.load_config(f.name)
+
+    def test_swap_not_a_table_is_an_error(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml") as f:
+            f.write("swap = 1\n")
+            f.flush()
+            with self.assertRaisesRegex(ValueError, r"\[swap\] must be a table, got int"):
                 ms.load_config(f.name)
 
     def test_missing_file_is_defaults(self):

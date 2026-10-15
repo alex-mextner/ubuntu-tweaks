@@ -34,6 +34,20 @@ def started_line(drain):
     return f"started {started}, {ms.mb(drain.get('left_kb', 0))} left on {drain.get('device', '?')}"
 
 
+def lock_held(path, proc_locks="/proc/locks"):
+    """Whether a flock is held on `path`, read from /proc/locks without taking one: a probe
+    that took the lock, even shared, could make a concurrent swap-drain see it busy and quit."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+        with open(proc_locks) as f:
+            rows = f.read().splitlines()
+    except OSError:                  # never ran (no file) or unreadable: not ours to judge here
+        return False
+    key = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+    return any(len(cols) > 5 and cols[1] == "FLOCK" and cols[5] == key
+               for cols in (row.split() for row in rows))
+
+
 def swap_drain(args, extra):
     if args.dry_run:
         return subprocess.run([sys.executable, swap_drain_bin(), "--dry-run", "--state-dir", args.state_dir,
@@ -44,6 +58,12 @@ def swap_drain(args, extra):
     drain = ms.active_drain(ms.read_state(args.state_dir))
     if drain:
         print(f"drain already in progress ({started_line(drain)})")
+        return 11
+    # The state file says "draining" only once a device is being drained; a run still deciding
+    # (fall sampling, heavy scan) shows only as the held lock. Starting the unit then would make
+    # our decision wait look at the other run's outcome.
+    if lock_held(os.path.join(args.state_dir, ms.LOCK_NAME)):
+        print("drain already in progress (lock held)")
         return 11
     t0 = time.time()
     r = subprocess.run(["systemctl", "start", "--no-block", "--no-ask-password", UNIT],

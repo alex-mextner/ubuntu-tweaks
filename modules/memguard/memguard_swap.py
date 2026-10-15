@@ -17,14 +17,15 @@ State file contract (`/run/memguard/swap-drain.json`, written atomically by the 
   last_drain_finished  epoch s of the latest drain that ran (done or aborted): the cooldown
 A reader trusts "draining" only when `active_drain()` agrees (pid alive, updated recently).
 """
+import errno
 import fcntl
 import json
 import os
+import stat
 import time
 import tomllib
 from dataclasses import dataclass, field
 
-KB = 1024
 MB_KB = 1024              # kB per MiB
 GB_KB = 1024 * 1024       # kB per GiB
 
@@ -78,6 +79,8 @@ def load_config(path=None):
     except FileNotFoundError:
         return cfg
     swap = data.get("swap", {})
+    if not isinstance(swap, dict):
+        raise ValueError(f"{path}: [swap] must be a table, got {type(swap).__name__}")
     for key, value in swap.items():
         if key not in DEFAULTS:
             raise ValueError(f"{path}: unknown [swap] key {key!r}")
@@ -341,14 +344,20 @@ def effective_swap_kb(swap_total_kb, swap_free_kb, drain):
 def try_lock(path, shared=False, create=False):
     """Non-blocking flock; the open fd on success, None when held elsewhere. Heavy locks are
     user files in sticky /tmp: never created (fs.protected_regular would then lock the owner
-    out of O_CREAT opens), never followed through a symlink, never opened blocking (a FIFO)."""
+    out of O_CREAT opens), never followed through a symlink, never opened blocking (a FIFO), and
+    must be regular files."""
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     if create:
         flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
     fd = os.open(path, flags, 0o644)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
         fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
         return None
+    except OSError:
+        os.close(fd)
+        raise
     return fd

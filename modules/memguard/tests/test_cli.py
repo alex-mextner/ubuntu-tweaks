@@ -78,6 +78,14 @@ class SwapDrainCommand(Case):
                       "4096M left on /swap_new.img)", r.stdout)
         self.assertEqual(self.systemctl_calls(), [])
 
+    def test_deciding_drain_lock_held_is_reported_without_starting_another(self):
+        fd = ms.try_lock(os.path.join(self.state_dir, ms.LOCK_NAME), create=True)
+        self.addCleanup(os.close, fd)
+        r = self.memguard()
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("drain already in progress (lock held)", r.stdout)
+        self.assertEqual(self.systemctl_calls(), [])
+
     def test_polkit_refusal_is_an_error_naming_the_rule(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
         r = self.memguard(rc=1)
