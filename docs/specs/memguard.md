@@ -374,9 +374,10 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
     one-line skip. It replaces the hand-installed hourly timer under the same unit name.
   - The after-spike trigger (start once the conditions have held for a while after a spike)
     belongs to the memguard daemon, not to this module. An interim version that ran inside a
-    copy of mem-sentinel is kept in history at commit 7c019fb (`DrainTrigger`, the sentinel's
-    drain awareness and its `Type=notify` watchdog) for the daemon port; the branch ships no
-    mem-sentinel, since the interim agent-tools `ops/mem-sentinel` stays installed until then.
+    copy of mem-sentinel is kept at tag `memguard-sentinel-trigger` (commit 6acc8de:
+    `DrainTrigger`, the sentinel's drain awareness and its `Type=notify` watchdog) for the
+    daemon port; the branch ships no mem-sentinel, since the interim agent-tools
+    `ops/mem-sentinel` stays installed until then.
   - **On demand**: `memguard swap-drain [--dry-run] [--wait]` (`/usr/local/bin/memguard`)
     starts the unit and prints the decision (`--wait`: also the result). The polkit rule
     `/etc/polkit-1/rules.d/50-memguard-swap-drain.rules` lets the desktop user (`user`) start
