@@ -1,0 +1,14 @@
+# installed by ubuntu-tweaks/memguard -> /etc/systemd/system/swap-drain.timer
+# Every 10 min swap-drain decides; it drains only when its conditions hold (and the 20 min
+# cooldown is over), so most runs are a one-line skip. On demand: `memguard swap-drain`.
+[Unit]
+Description=memguard swap-drain every 10 min (gated: most runs skip)
+Documentation=https://github.com/alex-mextner/ubuntu-tweaks/blob/main/docs/specs/memguard.md
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

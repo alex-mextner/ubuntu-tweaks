@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# installed by ubuntu-tweaks/memguard -> /usr/local/bin/memguard
+"""memguard: desktop-user CLI of the memguard module.
+
+  memguard swap-drain [--dry-run] [--wait]
+
+swap-drain starts swap-drain.service (a polkit rule lets the desktop user start/stop exactly
+that unit, so no sudo and no password) and prints the drain's decision; --wait also waits for
+the drain to finish and prints its result. --dry-run runs the decision here and executes
+nothing (extra arguments go to swap-drain, e.g. --meminfo FILE). Exit codes as swap-drain:
+0 drained/started, 1 error, 2 usage, 10 skipped, 11 already in progress, 12 aborted.
+"""
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path[:0] = [HERE, "/usr/local/lib/memguard"]
+import memguard_swap as ms  # noqa: E402
+
+UNIT = "swap-drain.service"
+DECISION_TIMEOUT_S = 120     # fall sampling + heavy scan take ~20 s; a start queued behind a job longer
+
+
+def swap_drain_bin():
+    local = os.path.join(HERE, "swap-drain")
+    return local if os.path.exists(local) else "/usr/local/sbin/swap-drain"
+
+
+def started_line(drain):
+    started = time.strftime("%H:%M", time.localtime(drain["started"]))
+    return f"started {started}, {ms.mb(drain.get('left_kb', 0))} left on {drain.get('device', '?')}"
+
+
+def lock_held(path, proc_locks="/proc/locks"):
+    """Whether a flock is held on `path`, read from /proc/locks without taking one: a probe
+    that took the lock, even shared, could make a concurrent swap-drain see it busy and quit."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+        with open(proc_locks) as f:
+            rows = f.read().splitlines()
+    except OSError:                  # never ran (no file) or unreadable: not ours to judge here
+        return False
+    key = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+    return any(len(cols) > 5 and cols[1] == "FLOCK" and cols[5] == key
+               for cols in (row.split() for row in rows))
+
+
+def swap_drain(args, extra):
+    if args.dry_run:
+        return subprocess.run([sys.executable, swap_drain_bin(), "--dry-run", "--state-dir", args.state_dir,
+                               *extra]).returncode
+    if extra:
+        print(f"memguard: unexpected arguments {' '.join(extra)}", file=sys.stderr)
+        return 2
+    drain = ms.active_drain(ms.read_state(args.state_dir))
+    if drain:
+        print(f"drain already in progress ({started_line(drain)})")
+        return 11
+    # The state file says "draining" only once a device is being drained; a run still deciding
+    # (fall sampling, heavy scan) shows only as the held lock. Starting the unit then would make
+    # our decision wait look at the other run's outcome.
+    if lock_held(os.path.join(args.state_dir, ms.LOCK_NAME)):
+        print("drain already in progress (lock held)")
+        return 11
+    t0 = time.time()
+    r = subprocess.run(["systemctl", "start", "--no-block", "--no-ask-password", UNIT],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"memguard: systemctl start {UNIT} failed: {r.stderr.strip()}\n"
+              "  (the polkit rule /etc/polkit-1/rules.d/50-memguard-swap-drain.rules is installed by "
+              "ubuntu-tweaks modules/memguard/install.sh)", file=sys.stderr)
+        return 1
+    deadline = time.time() + DECISION_TIMEOUT_S
+    while True:
+        state = ms.read_state(args.state_dir)
+        decision = state.get("last_decision") or {}
+        if decision.get("at", 0) >= t0:
+            break
+        drain = ms.active_drain(state)
+        if drain and drain.get("started", 0) < t0:
+            print(f"drain already in progress ({started_line(drain)})")
+            return 11
+        if time.time() > deadline:
+            print(f"memguard: no decision from {UNIT} after {DECISION_TIMEOUT_S} s; "
+                  "see journalctl -u swap-drain", file=sys.stderr)
+            return 1
+        time.sleep(0.5)
+    if decision["action"] == "skip":
+        print(f"skip {decision['reason']}: {decision['detail']}")
+        return 10
+    drain = ms.active_drain(ms.read_state(args.state_dir))
+    if not args.wait:
+        what = f" ({started_line(drain)})" if drain else ""
+        print(f"draining{what}; follow: journalctl -u swap-drain -f")
+        return 0
+    print(f"draining{f' ({started_line(drain)})' if drain else ''}; waiting")
+    while True:
+        state = ms.read_state(args.state_dir)
+        last = state.get("last") or {}
+        if last.get("finished", 0) >= t0 and state.get("state") != "draining":
+            print(f"drain {last.get('result')} in {last.get('duration_s', '?')} s: {last.get('detail', '')}")
+            return {"done": 0, "aborted": 12}.get(last.get("result"), 1)
+        if not ms.active_drain(state) and state.get("state") == "draining":
+            print("memguard: the drain process died; see journalctl -u swap-drain", file=sys.stderr)
+            return 1
+        time.sleep(1)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="memguard", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+    sd = sub.add_parser("swap-drain", help="drain stale swap back into RAM if it is safe now")
+    sd.add_argument("--dry-run", action="store_true", help="print the decision, execute nothing")
+    sd.add_argument("--wait", action="store_true", help="wait for the drain to finish")
+    sd.add_argument("--state-dir", default=ms.STATE_DIR, help=argparse.SUPPRESS)   # tests
+    args, extra = p.parse_known_args(argv)
+    return swap_drain(args, extra)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
