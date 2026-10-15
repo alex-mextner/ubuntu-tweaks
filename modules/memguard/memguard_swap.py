@@ -1,8 +1,9 @@
 """memguard swap hygiene: config, readers, the drain decision and the drain state file.
 
-One definition shared by `swap-drain` (the root oneshot that drains), `mem-sentinel` (fires
-the drain, and ignores the 0 % SwapFree the kernel reports while it runs) and the `memguard`
-CLI, so thresholds and the state-file contract cannot drift apart. Stdlib only.
+One definition shared by `swap-drain` (the root oneshot that drains, started by
+swap-drain.timer or the `memguard` CLI) and the `memguard` CLI, so thresholds and the
+state-file contract cannot drift apart. Readers of the state file (the heavy-op gate,
+rig-cli#693; the memguard daemon later) use `active_drain` and `effective_swap_kb`. Stdlib only.
 
 State file contract (`/run/memguard/swap-drain.json`, written atomically by the lock holder):
   state                "draining" while a swapoff runs, otherwise "idle"
@@ -55,16 +56,12 @@ DEFAULTS = {
     "heavy_gate": "auto",            # heavy_op_memory_gate.py for the live-runner scan; "auto" =
     "heavy_hook": "~/.omp/agent/hooks/heavy-op-memory-gate.pre-bash.json",  # its "cmd"; "" = off
     "heavy_max_live": 0,             # skip at this many live heavy runners; 0 = the gate's limit
-    "user": "ultra",                 # desktop user: heavy scan, polkit rule, mem-sentinel's user
+    "user": "ultra",                 # desktop user: runs the heavy scan, owns the polkit rule
     # watchdog: SIGTERM to swapoff when any of these trips
     "abort_avail_gb": 6.0,           # MemAvailable below the larger of these two
     "abort_avail_pct": 12.0,
     "abort_psi_full_avg10": 5.0,
     "abort_after_min": 15,           # a drain running longer than this is aborted
-    # trigger inside mem-sentinel (event-driven; there is no timer)
-    "trigger": True,
-    "trigger_stable_s": 300,         # the drain conditions must hold this long without a break
-    "trigger_retry_min": 10,         # at most one start per this many minutes
 }
 
 
@@ -255,37 +252,6 @@ def watchdog_trip(snap, cfg, elapsed_s):
     if elapsed_s > cfg["abort_after_min"] * 60:
         return f"running {elapsed_s / 60:.0f} min > {cfg['abort_after_min']:g} min"
     return None
-
-
-class DrainTrigger:
-    """mem-sentinel's event-driven trigger: fire once the drain conditions have held for
-    trigger_stable_s without a break (a spike, pressure or a fall resets the clock), no drain
-    runs, the drain's cooldown is over and the last start is trigger_retry_min old.
-    `now` is monotonic (stability), `wall` epoch (the state file's cooldown)."""
-
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.ok_since = None
-        self.last_fire = None
-
-    def update(self, now, wall, snap, fall_gb_per_min, state, draining):
-        cfg = self.cfg
-        if not cfg["trigger"] or draining:
-            self.ok_since = None
-            return None
-        devices, skip = memory_decision(snap, cfg, fall_gb_per_min, state, wall)
-        if skip:
-            self.ok_since = None
-            return None
-        if self.ok_since is None:
-            self.ok_since = now
-        if now - self.ok_since < cfg["trigger_stable_s"]:
-            return None
-        if self.last_fire is not None and now - self.last_fire < cfg["trigger_retry_min"] * 60:
-            return None
-        self.last_fire = now
-        return f"conditions held {now - self.ok_since:.0f} s: {describe(snap)}, would drain " + \
-               ", ".join(f"{d.name} {mb(d.used_kb)}" for d in devices)
 
 
 # ----------------------------------------------------------------------------- state file

@@ -24,16 +24,10 @@ heavy_locks = ["/tmp/3d-cli-heavy.lock"]
 heavy_gate = "auto"
 heavy_hook = "~/.omp/agent/hooks/heavy-op-memory-gate.pre-bash.json"
 heavy_max_live = 0               # 0 = the gate's own limit
-user = "ultra"                   # desktop user: runs the heavy scan, owns the polkit rule, and is
-                                 # mem-sentinel's session user (MEM_SENTINEL_USER overrides)
+user = "ultra"                   # desktop user: runs the heavy scan, owns the polkit rule
 
 # --- watchdog: SIGTERM to swapoff (the device stays on, nothing is lost) when any trips ---
 abort_avail_gb = 6.0             # MemAvailable below max(this GB,
 abort_avail_pct = 12.0           #   this % of MemTotal)
 abort_psi_full_avg10 = 5.0       # PSI full avg10 above this
 abort_after_min = 15             # the drain has run longer than this
-
-# --- trigger: mem-sentinel starts swap-drain.service (there is no timer) ---
-trigger = true
-trigger_stable_s = 300           # the drain conditions held this long without a break
-trigger_retry_min = 10           # at most one start per this many minutes

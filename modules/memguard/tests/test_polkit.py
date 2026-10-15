@@ -36,7 +36,7 @@ class PolkitRule(unittest.TestCase):
             ("ultra", "swap-drain.service", "stop", None),
             ("ultra", "swap-drain.service", "restart", None),
             ("ultra", "swap-drain.service", "start", "org.freedesktop.systemd1.manage-unit-files"),
-            ("ultra", "mem-sentinel.service", "start", None),
+            ("ultra", "swap-drain.timer", "stop", None),
             ("ultra", "ssh.service", "stop", None),
             ("guest", "swap-drain.service", "start", None),
         ]

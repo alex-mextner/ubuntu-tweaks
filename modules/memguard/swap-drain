@@ -6,8 +6,8 @@ Linux never swaps pages back in on its own; `swapoff <dev>` forces them in and `
 puts the device straight back. Each run decides first (every skip names the failing
 condition), then drains under a watchdog that SIGTERMs swapoff when MemAvailable or PSI turn
 bad: the kernel's try_to_unuse stops on the pending signal and reinserts the device with the
-rest of its pages still in swap, so an abort loses nothing. Started by mem-sentinel (event
-trigger) or `memguard swap-drain`; there is no timer. Spec: docs/specs/memguard.md § Swap hygiene.
+rest of its pages still in swap, so an abort loses nothing. Started by swap-drain.timer (every
+10 min) or `memguard swap-drain`. Spec: docs/specs/memguard.md § Swap hygiene.
 
 Exit codes: 0 drained (or --dry-run: would drain), 1 error, 2 usage/config, 10 skipped by a
 condition, 11 another drain is in progress, 12 aborted by the watchdog.

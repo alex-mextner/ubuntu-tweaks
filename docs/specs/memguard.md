@@ -369,13 +369,14 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   NVMe queue scheduler is `none`). Before a drain it logs used/avail/PSI and the top five
   leaf cgroups by `memory.swap.current`; after it, result, duration and the same figures.
 
-  Triggers (no timer; the old `swap-drain.timer` is disabled and removed by the install):
-  - **mem-sentinel**, which already samples every 2 s: once the conditions above (minus the
-    heavy checks, which the oneshot runs) have held for `trigger_stable_s` (300 s) without a
-    break — a spike, pressure or a fall resets the clock — and no drain runs, it starts
-    `swap-drain.service`, at most once per `trigger_retry_min` (10). The sentinel unit is
-    `Type=notify` with `WatchdogSec=30`: the loop sends `WATCHDOG=1` every tick, so systemd
-    restarts a hung sentinel as well as a dead one (`Restart=always`).
+  Triggers:
+  - **`swap-drain.timer`** every 10 min (`OnBootSec`/`OnUnitActiveSec=10min`); most runs are a
+    one-line skip. It replaces the hand-installed hourly timer under the same unit name.
+  - The after-spike trigger (start once the conditions have held for a while after a spike)
+    belongs to the memguard daemon, not to this module. An interim version that ran inside a
+    copy of mem-sentinel is kept in history at commit 7c019fb (`DrainTrigger`, the sentinel's
+    drain awareness and its `Type=notify` watchdog) for the daemon port; the branch ships no
+    mem-sentinel, since the interim agent-tools `ops/mem-sentinel` stays installed until then.
   - **On demand**: `memguard swap-drain [--dry-run] [--wait]` (`/usr/local/bin/memguard`)
     starts the unit and prints the decision (`--wait`: also the result). The polkit rule
     `/etc/polkit-1/rules.d/50-memguard-swap-drain.rules` lets the desktop user (`user`) start
@@ -404,12 +405,12 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   | `last_decision` | `{at, action, reason, detail}` of the latest run |
   | `last`, `last_drain_finished` | `{result, devices, duration_s, finished, detail}`; the cooldown's clock |
 
-  A reader trusts `draining` only while `pid` is alive and `updated` is under 30 s old.
-  mem-sentinel then judges (d) on `swap_*_after_kb`, and keeps MemAvailable − the device's
-  pages still in swap (`/proc/swaps` Used) in its fall ring, so the swap-in (which lowers both
-  equally) does not count, and resets the ring when a drain starts or ends. The heavy-op gate
-  gets the same rule in [rig-cli#693](https://git.hyperide.ai/ultrabricks/rig-cli/issues/693)
-  (the gate lives in agent-tools, rig installs it); the ticket carries this contract.
+  A reader trusts `draining` only while `pid` is alive and `updated` is under 30 s old
+  (`memguard_swap.active_drain`), then judges swap on `swap_*_after_kb`
+  (`memguard_swap.effective_swap_kb`) and leaves the device's pages still in swap out of any
+  MemAvailable fall rate (the swap-in lowers both equally). Consumers: the heavy-op gate
+  ([rig-cli#693](https://git.hyperide.ai/ultrabricks/rig-cli/issues/693); the gate lives in
+  agent-tools, rig installs it) and the memguard daemon's (d) check.
 - **Alternatives**: no `/proc/sys/vm` knob swaps pages back in (`drop_caches` drops clean page
   cache, `compact_memory` defragments, `swappiness`/`watermark_scale_factor` shape future
   reclaim only). `vm.swappiness` stays 10: lowering it does not return swapped pages and does
@@ -423,21 +424,18 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   `swap-drain --dry-run --meminfo/--psi/--swaps/--now/--state-dir` (the 2026-10-14 19:27 state
   drains; 1507 MB used, headroom, PSI, fall, cooldown, lock held, heavy lock held, heavy
   runners at the limit skip), the watchdog with stub `swapoff`/`swapon` (low avail, PSI,
-  SIGTERM → `aborted`, device still on), mem-sentinel with a live/stale drain state, the
-  trigger's stability/retry/cooldown, sd_notify, `memguard swap-drain` against a fake
-  `systemctl` (skip reason, `--wait` result, in progress, polkit refusal), and the polkit rule
-  under node.
+  SIGTERM → `aborted`, device still on; swapon retried, a failed swapoff stays failed),
+  `memguard swap-drain` against a fake `systemctl` (skip reason, `--wait` result, in progress,
+  polkit refusal), and the polkit rule under node.
 - **Verify after install** (`sudo modules/memguard/install.sh`; `--dry-run` shows the diff and
   exits 3 while changes are pending, 0 when none):
-  - `systemctl is-enabled swap-drain.timer` → not found; `systemctl show -p Type,WatchdogUSec
-    mem-sentinel` → `notify`, `30s`.
-  - `journalctl -t mem-sentinel --since -5min | grep start` shows `swap_trigger=True`.
+  - `systemctl is-enabled swap-drain.timer` → `enabled`; `systemctl list-timers swap-drain`
+    shows the next run within 10 min.
   - As the desktop user, `memguard swap-drain` prints a decision with no password prompt;
     `systemctl start --no-ask-password ssh.service` is still refused (`Interactive
     authentication required`).
   - `journalctl -t swap-drain` has one line per decision (`skip <reason>: …` or
-    `drain start: …`, then `drain done|aborted in Ns …`); `journalctl -t mem-sentinel | grep
-    'swap-drain start'` shows each event trigger.
+    `drain start: …`, then `drain done|aborted in Ns …`).
 
 ### Per-machine profile: `machines/msi-pulse-gl66/`
 

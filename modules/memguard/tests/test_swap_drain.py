@@ -399,44 +399,6 @@ class Config(unittest.TestCase):
         self.assertEqual(ms.load_config("/nonexistent/memguard.toml"), ms.DEFAULTS)
 
 
-class Trigger(unittest.TestCase):
-    def snap(self, avail_mb=27974, used_mb=15869, full10=0.0):
-        return ms.Snapshot(MEM_TOTAL_KB, avail_mb * 1024, SWAP_KB, SWAP_KB - used_mb * 1024,
-                           ms.parse_psi(psi(full10=full10)), ms.parse_swaps(swaps(used_mb)))
-
-    def test_fires_after_stable_period_then_waits_retry(self):
-        t = ms.DrainTrigger(ms.DEFAULTS)
-        wall = 1_800_000_000
-        self.assertIsNone(t.update(0, wall, self.snap(), 0.0, {}, False))
-        self.assertIsNone(t.update(299, wall, self.snap(), 0.0, {}, False))
-        self.assertIn("conditions held 300 s", t.update(300, wall, self.snap(), 0.0, {}, False))
-        self.assertIsNone(t.update(302, wall, self.snap(), 0.0, {}, False))        # retry interval
-        self.assertIsNotNone(t.update(300 + 600, wall, self.snap(), 0.0, {}, False))
-
-    def test_spike_resets_the_clock(self):
-        t = ms.DrainTrigger(ms.DEFAULTS)
-        wall = 1_800_000_000
-        t.update(0, wall, self.snap(), 0.0, {}, False)
-        t.update(200, wall, self.snap(full10=3.0), 0.0, {}, False)           # pressure spike
-        self.assertIsNone(t.update(300, wall, self.snap(), 0.0, {}, False))
-        self.assertIsNone(t.update(499, wall, self.snap(), 0.0, {}, False))
-        self.assertIsNotNone(t.update(600, wall, self.snap(), 0.0, {}, False))
-
-    def test_never_while_draining_falling_or_cooling_down(self):
-        wall = 1_800_000_000
-        for kwargs in ({"draining": True}, {"fall": 2.0},
-                       {"state": {"last_drain_finished": wall - 300}}):
-            t = ms.DrainTrigger(ms.DEFAULTS)
-            for now in (0, 400, 800):
-                self.assertIsNone(t.update(now, wall, self.snap(), kwargs.get("fall", 0.0),
-                                           kwargs.get("state", {}), kwargs.get("draining", False)), kwargs)
-
-    def test_off_switch(self):
-        t = ms.DrainTrigger({**ms.DEFAULTS, "trigger": False})
-        for now in (0, 400, 800):
-            self.assertIsNone(t.update(now, 0, self.snap(), 0.0, {}, False))
-
-
 class StateContract(unittest.TestCase):
     def test_active_drain_ignores_dead_or_stale(self):
         now = time.time()

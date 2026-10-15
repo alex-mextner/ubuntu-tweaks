@@ -1,6 +1,6 @@
 # installed by ubuntu-tweaks/memguard -> /etc/systemd/system/swap-drain.service
-# No timer: started by mem-sentinel when the drain conditions hold, or by `memguard swap-drain`
-# (polkit rule 50-memguard-swap-drain.rules).
+# Started by swap-drain.timer (every 10 min) or by `memguard swap-drain` (polkit rule
+# 50-memguard-swap-drain.rules).
 [Unit]
 Description=memguard swap-drain: gated, abortable swap-to-RAM drain
 Documentation=https://github.com/alex-mextner/ubuntu-tweaks/blob/main/docs/specs/memguard.md
