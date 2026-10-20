@@ -431,6 +431,14 @@ class PendingExtensionSchemaTests(SettingsPlannerCase):
                 self.assertEqual(planner.build(self.context(), backend), [])
                 self.assertIn("no settings schema", planner.warnings(self.context(), backend)[0])
 
+    def test_a_metadata_file_that_is_not_utf8_skips_the_module(self) -> None:
+        self.extension_module()
+        (self.repo / "gnome-extensions/ext@x/metadata.json").write_bytes(b'{"uuid": "ext@x", "name": "caf\xe9"}')
+        backend = FakeBackend(SCHEMAS)
+
+        self.assertEqual(planner.build(self.context(), backend), [])
+        self.assertIn("no settings schema", planner.warnings(self.context(), backend)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

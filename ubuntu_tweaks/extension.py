@@ -66,6 +66,8 @@ class ExtensionModule:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
+        except UnicodeDecodeError as error:
+            raise ConfigError(f"{path}: not valid UTF-8: {error}") from error
         except OSError as error:
             raise ConfigError(f"{path}: cannot read: {error.strerror or error}") from error
         try:
