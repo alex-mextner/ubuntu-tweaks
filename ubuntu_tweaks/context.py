@@ -9,13 +9,16 @@ Public API:
 - ``Context(repo_root, profile, only)``: ``repo_root`` is the umbrella checkout, ``profile`` a
   ``Profile`` (already resolved from ``--profile`` / ``--machine``), ``only`` the frozenset
   from ``--only a,b`` (empty = everything); ``modules_dir`` is ``repo_root / "modules"``;
-  ``selects(name)`` is True when ``only`` is empty or contains ``name``.
+  ``selects(name)`` is True when ``only`` is empty or contains ``name``;
+  ``require_modules(known)`` raises ``UnknownModuleError`` for a ``--only`` name not in ``known``.
 - ``REPO_ROOT``: the checkout this package runs from.
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
+from ubuntu_tweaks.errors import UnknownModuleError
 from ubuntu_tweaks.profile import Profile
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -33,3 +36,9 @@ class Context:
 
     def selects(self, name: str) -> bool:
         return not self.only or name in self.only
+
+    def require_modules(self, known: Collection[str]) -> None:
+        """Raise ``UnknownModuleError`` (exit 4) for a ``--only`` name that is not in ``known``."""
+        unknown = sorted(self.only - set(known))
+        if unknown:
+            raise UnknownModuleError(f"unknown module(s): {', '.join(unknown)}")

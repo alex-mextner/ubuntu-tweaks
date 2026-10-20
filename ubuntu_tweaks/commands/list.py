@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.errors import UnknownModuleError
 from ubuntu_tweaks.manifest import Manifest, SourceKind, discover_modules, module_defaults
 
 
@@ -30,9 +29,7 @@ def _source_label(manifest: Manifest) -> str:
 
 def render(ctx: Context) -> str:
     manifests = discover_modules(ctx.modules_dir)
-    unknown = sorted(ctx.only - {manifest.name for manifest in manifests})
-    if unknown:
-        raise UnknownModuleError(f"unknown module(s): {', '.join(unknown)}")
+    ctx.require_modules({manifest.name for manifest in manifests})
     config = ctx.profile.load_config(module_defaults(manifests))
     rows = [
         (

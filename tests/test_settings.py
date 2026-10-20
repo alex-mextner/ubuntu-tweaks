@@ -74,6 +74,7 @@ def fake_backend() -> FakeBackend:
                 {
                     "count": FakeKey("u", "3"),
                     "names": FakeKey("as", "['a']"),
+                    "limited": FakeKey("i", "1", minimum="0", maximum="10"),
                 },
                 path=FIXED_PATH,
             ),
@@ -106,6 +107,14 @@ class FakeBackendTests(unittest.TestCase):
     def test_wrong_type_is_refused(self) -> None:
         with self.assertRaisesRegex(SettingsError, "expected type 'u'"):
             fake_backend().write(FIXED, None, "count", GLib.Variant("s", "5"))
+
+    def test_range_is_enforced_like_the_real_backend(self) -> None:
+        backend = fake_backend()
+        backend.write(FIXED, None, "limited", GLib.Variant("i", 10))
+        for outside in (-1, 11):
+            with self.subTest(value=outside), self.assertRaisesRegex(SettingsError, "outside the allowed range"):
+                backend.write(FIXED, None, "limited", GLib.Variant("i", outside))
+        self.assertEqual(backend.user_value(FIXED, None, "limited").unpack(), 10)
 
     def test_relocatable_schema_needs_a_path_and_keeps_values_per_path(self) -> None:
         backend = fake_backend()

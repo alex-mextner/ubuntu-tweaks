@@ -1,6 +1,5 @@
 """Profile resolution, machine detection and the module < shared < overlay merge."""
 
-import unittest
 from pathlib import PurePosixPath
 from unittest import mock
 
@@ -216,8 +215,9 @@ class OverlayInventoryTests(ProfileCase):
         self.assertEqual(list(found), [".config/a.conf", ".config/b.conf", ".config/c.conf"])
         self.assertEqual(found[".config/a.conf"].origin, "shared")
         self.assertEqual((found[".config/b.conf"].origin, found[".config/b.conf"].source), ("overlay", overlay_b))
-        self.assertEqual(found[".config/b.conf"].shadows, shared_b)
-        self.assertIsNone(found[".config/c.conf"].shadows)
+        self.assertEqual(found[".config/b.conf"].shadows, (shared_b,))
+        self.assertEqual(found[".config/c.conf"].shadows, ())
+        self.assertEqual(found[".config/a.conf"].shadows, ())
         self.assertEqual(found[".config/a.conf"].rel, PurePosixPath(".config/a.conf"))
 
     def test_overlay_entry_that_contains_or_is_contained_by_a_shared_one_replaces_it(self) -> None:
@@ -238,6 +238,10 @@ class OverlayInventoryTests(ProfileCase):
                 (".config/keep/y.conf", "overlay"),
             ],
         )
+        found = {str(entry.rel): entry for entry in profile.files()}
+        self.assertEqual(found[".config/foo"].shadows, (profile.files_dir / ".config/foo/a.conf",))
+        self.assertEqual(found[".config/bar/inner.conf"].shadows, (profile.files_dir / ".config/bar",))
+        self.assertEqual(found[".config/keep/y.conf"].shadows, ())
 
     def test_symlinked_directory_is_a_leaf_not_followed(self) -> None:
         profile = self.profile()

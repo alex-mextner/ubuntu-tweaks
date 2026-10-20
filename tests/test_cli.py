@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tests.util import TempDirCase, write
 from ubuntu_tweaks import commands
-from ubuntu_tweaks.cli import build_parser, main
+from ubuntu_tweaks.cli import build_parser, discover_commands, main
 from ubuntu_tweaks.commands import list as list_command
 from ubuntu_tweaks.commands import machine as machine_command
 from ubuntu_tweaks.context import REPO_ROOT, Context
@@ -27,6 +27,12 @@ def register(subparsers):
 
 def run(ctx, args):
     return 7
+"""
+
+ALIASED_COMMAND = """
+def register(subparsers):
+    parser = subparsers.add_parser("aliased", aliases=["aka"])
+    parser.set_defaults(handler=lambda ctx, args: 7)
 """
 
 FAILING_COMMANDS = """
@@ -89,8 +95,11 @@ class DispatchTests(TempDirCase):
         self.assertIn("machine:  m1 (from --machine)", before[1])
 
     def test_only_is_a_global_flag_of_every_command(self) -> None:
-        namespace = build_parser().parse_args(["list", "--only", "a,b"])
-        self.assertEqual(namespace.only, "a,b")
+        names = [module.__name__.rsplit(".", 1)[1] for module in discover_commands()]
+        self.assertGreaterEqual(len(names), 2)
+        for name in names:
+            with self.subTest(command=name):
+                self.assertEqual(build_parser().parse_args([name, "--only", "a,b"]).only, "a,b")
 
     def test_expected_errors_map_to_their_exit_codes(self) -> None:
         self.drop_commands(failing=FAILING_COMMANDS)
@@ -102,6 +111,16 @@ class DispatchTests(TempDirCase):
         code, _, err = run_main("crash")
         self.assertEqual(code, 1)
         self.assertIn("RuntimeError: bug", err)
+
+    def test_a_command_module_without_register_is_invalid_config(self) -> None:
+        self.drop_commands(broken="x = 1\n")
+        code, _, err = run_main("list")
+        self.assertEqual(code, 2)
+        self.assertIn("has no register(subparsers)", err)
+
+    def test_a_command_with_aliases_still_gets_the_global_flags(self) -> None:
+        self.drop_commands(aliased=ALIASED_COMMAND)
+        self.assertEqual(run_main("aka", "--machine", "m1")[0], 7)
 
     def test_explicit_missing_profile_is_invalid_config(self) -> None:
         code, _, err = run_main("--profile", str(self.tmp / "absent"), "list")
@@ -116,7 +135,7 @@ class ListCommandTests(TempDirCase):
         write(repo / "modules/memguard/module.toml", SYSTEM_MODULE)
         write(repo / "modules/legacy/readme.txt")
         profile = Profile(self.tmp / "profile", "home")
-        profile.root.mkdir()
+        profile.root.mkdir(exist_ok=True)
         return Context(repo, profile, only)
 
     def test_table_has_kind_enabled_and_source(self) -> None:
@@ -178,6 +197,21 @@ class MachineCommandTests(TempDirCase):
             "system.toml:   none",
         ):
             self.assertIn(line, report)
+
+    def test_only_rejects_unknown_modules_like_list_does(self) -> None:
+        repo = self.tmp / "repo"
+        write(repo / "modules/memguard/module.toml", SYSTEM_MODULE)
+        ctx = Context(repo, Profile(self.tmp / "profile", "home"), frozenset({"memgaurd"}))
+        with self.assertRaisesRegex(UnknownModuleError, "unknown module.*memgaurd"):
+            machine_command.render(ctx)
+        known = Context(repo, Profile(self.tmp / "profile", "home"), frozenset({"memguard"}))
+        self.assertIn("  memguard: disabled (module default)", machine_command.render(known))
+
+    def test_non_ascii_settings_are_printed_readably(self) -> None:
+        profile = Profile(self.tmp / "profile", "home")
+        write(profile.profile_toml, '[modules.hyperdock.settings]\nlabel = "Обзор"\n')
+        report = machine_command.render(Context(self.tmp / "repo", profile))
+        self.assertIn('settings.label = "Обзор" (shared)', report)
 
     def test_absent_overlay_and_profile_are_said_plainly(self) -> None:
         profile = Profile(self.tmp / "missing", "home")

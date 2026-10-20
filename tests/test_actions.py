@@ -206,6 +206,12 @@ class ExecuteTests(unittest.TestCase):
 
         self.assertEqual((log, result.changed), (["first"], 1))
 
+    def test_root_action_satisfied_since_build_is_not_reported_as_skipped(self) -> None:
+        root = FakeAction("system:tz", Phase.SYSTEM, needs_root=True)
+        plan = Plan.build([root])
+        root.satisfied = True
+        self.assertEqual(plan.execute(no_sudo=True).skipped, ())
+
     def test_action_that_does_not_converge_fails_loudly(self) -> None:
         plan = Plan.build([FakeAction("liar", Phase.LINK, broken=True)])
         with self.assertRaisesRegex(ActionFailed, r"\[liar\] do liar: still not satisfied"):

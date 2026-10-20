@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
     for module in discover_commands():
         module.register(subparsers)
-    for subparser in subparsers.choices.values():
+    for subparser in {id(choice): choice for choice in subparsers.choices.values()}.values():  # aliases share one
         _add_global_flags(subparser, default=argparse.SUPPRESS)
     return parser
 
@@ -86,8 +86,8 @@ def _only(value: str | None) -> frozenset[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
     try:
+        args = build_parser().parse_args(argv)
         context = Context(
             repo_root=REPO_ROOT,
             profile=Profile.resolve(args.profile, args.machine),

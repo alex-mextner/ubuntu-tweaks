@@ -146,6 +146,8 @@ class ValidationTests(unittest.TestCase):
         self.assertInvalid('[source]\nkind = "submodule"\n', "missing required key 'path'")
         self.assertInvalid('[source]\nkind = "local"\npath = "/etc/x"\n', "relative path")
         self.assertInvalid('[source]\nkind = "local"\npath = "a/../../x"\n', "without '..'")
+        for dot in (".", "./"):
+            self.assertInvalid(f'[source]\nkind = "local"\npath = "{dot}"\n', "inside the module")
 
     def test_system_needs_install_and_check_inside_the_module(self) -> None:
         self.assertInvalid('[source]\nkind = "system"\ninstall = "install.sh"\n', "missing required key 'check'")
@@ -171,7 +173,8 @@ class ValidationTests(unittest.TestCase):
         self.assertInvalid(code + '[[settings]]\nfile = "a.ini"\nmode = "force"\n', "unknown mode 'force'")
         self.assertInvalid(code + '[[seeds]]\nkey = "k"\n', "missing required key 'provider'")
         self.assertInvalid(code + "[[migrations]]\n", "needs 'from_uuid' or 'from_path'")
-        self.assertInvalid(code + '[[migrations]]\nfrom_path = "org/x"\n', "dconf path")
+        for bad in ("org/x", "/", "//", "/a//b/", "/a/../b/"):
+            self.assertInvalid(code + f'[[migrations]]\nfrom_path = "{bad}"\n', "dconf path")
 
     def test_wrong_types(self) -> None:
         code = '[source]\nkind = "local"\npath = "p"\n'

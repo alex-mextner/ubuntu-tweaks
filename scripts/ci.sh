@@ -59,7 +59,9 @@ done
 echo "== ruff format (ubuntu_tweaks, tests, bin)"
 ruff format --check ubuntu_tweaks tests bin/ubuntu-tweak || status=1
 tweak_python=python3
-if /usr/bin/python3 -c 'import gi' 2>/dev/null; then tweak_python=/usr/bin/python3; fi
+if /usr/bin/python3 -c 'import gi, sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null; then
+  tweak_python=/usr/bin/python3
+fi
 echo "== unittest tests ($tweak_python)"
 "$tweak_python" -B -m unittest discover -s tests -t . || status=1
 exit $status

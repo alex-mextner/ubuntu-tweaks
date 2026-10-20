@@ -35,7 +35,8 @@ Public API:
 - ``extension_schema_dirs(roots) -> tuple[Path, ...]`` (in ``roots`` order) and
   ``default_extension_roots(home)`` (ascending precedence). A dconf path must look like
   ``/a/b/`` (leading and trailing slash, no ``//``) or ``SettingsError`` is raised.
-- ``FakeSchema(id, keys, path=None)``, ``FakeKey(type, default)`` and ``FakeBackend(schemas)``
+- ``FakeSchema(id, keys, path=None)``, ``FakeKey(type, default, minimum=None, maximum=None)`` and
+  ``FakeBackend(schemas)``
   for tests (``set_user(schema, path, key, text)`` seeds a user value; ``writes`` records
   ``write`` calls as ``(schema, path, key, value)`` and ``resets`` the ``reset`` calls).
 - ``parse_value(backend, schema, key, text) -> Variant`` and ``format_value(value) -> str``
@@ -65,6 +66,7 @@ gi.require_version("Gio", "2.0")
 
 from gi.repository import Gio, GLib  # noqa: E402
 
+from ubuntu_tweaks.dconf_path import is_dconf_dir_path  # noqa: E402
 from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError  # noqa: E402
 
 type Variant = GLib.Variant
@@ -151,8 +153,7 @@ def _resolve_dconf_path(schema: str, fixed: str | None, path: str | None) -> str
         return fixed
     if path is None:
         raise SettingsError(f"schema {schema} is relocatable: a dconf path is required")
-    components = path.strip("/").split("/")
-    if not path.startswith("/") or not path.endswith("/") or any(c in {"", ".", ".."} for c in components):
+    if not is_dconf_dir_path(path):
         raise SettingsError(
             f"{path!r} is not a dconf directory path (/a/b/: slashes around, no empty, '.' or '..' part)"
         )
@@ -282,6 +283,8 @@ def extension_schema_dirs(roots: Sequence[Path]) -> tuple[Path, ...]:
 class FakeKey:
     type: str
     default: str
+    minimum: str | None = None  # GVariant text, like ``default``; a key's <range min max>
+    maximum: str | None = None
 
 
 @dataclass(frozen=True)
@@ -340,6 +343,15 @@ class FakeBackend(SettingsBackend):
     def write(self, schema: str, path: str | None, key: str, value: Variant) -> None:
         location = self._location(schema, path, key)
         _check_value_type(schema, key, self.key_type(schema, key), value)
+        definition = self._key(schema, key)
+        for bound, text, outside in (
+            ("minimum", definition.minimum, lambda low: value.unpack() < low),
+            ("maximum", definition.maximum, lambda high: value.unpack() > high),
+        ):
+            if text is not None and outside(parse_value(self, schema, key, text).unpack()):
+                raise SettingsError(
+                    f"{schema} {key}: {format_value(value)} is outside the allowed range ({bound} {text})"
+                )
         self._user[location] = value
         self.writes.append((schema, path, key, value))
 

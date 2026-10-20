@@ -142,10 +142,10 @@ class Plan:
         changed = 0
         skipped: list[Action] = []
         for action in self.actions:
+            if action.check():
+                continue
             if action.needs_root and no_sudo:
                 skipped.append(action)
-                continue
-            if action.check():
                 continue
             if on_start is not None:
                 on_start(action)

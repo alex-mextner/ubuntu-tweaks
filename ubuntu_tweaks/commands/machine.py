@@ -42,6 +42,7 @@ def _header(profile: Profile) -> list[str]:
 def _module_lines(ctx: Context, config: Config) -> list[str]:
     manifests = {manifest.name: manifest for manifest in discover_modules(ctx.modules_dir)}
     configured = {path[1] for path in config.origins if len(path) > 2 and path[0] == "modules"}
+    ctx.require_modules(manifests.keys() | configured)
     lines = ["", "modules:"]
     for name in sorted(manifests.keys() | configured):
         if not ctx.selects(name):
@@ -56,7 +57,7 @@ def _module_lines(ctx: Context, config: Config) -> list[str]:
 
 
 def _format(value: TomlValue | None) -> str:
-    return json.dumps(value, default=str)
+    return json.dumps(value, default=str, ensure_ascii=False)
 
 
 def _panel_lines(profile: Profile) -> list[str]:

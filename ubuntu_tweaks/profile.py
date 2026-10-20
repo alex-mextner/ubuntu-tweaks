@@ -36,7 +36,8 @@ Public API:
   ``[(Layer, table), ...]``, last wins; tables merge, scalars replace, lists replace (or union
   with ``union_lists=True``, shared order first).
 - ``Layer`` = ``"module"`` | ``"shared"`` | ``"overlay"``; ``Origin`` = ``"shared"`` | ``"overlay"``.
-- ``PanelFiles(panel, shared, overlay)`` and ``ProfileFile(rel, source, origin, shadows)``.
+- ``PanelFiles(panel, shared, overlay)`` and ``ProfileFile(rel, source, origin, shadows)``
+  (``shadows``: tuple of the shared files an overlay entry replaces).
 - ``Packages(apt, snap, flatpak)``, ``Keyboard(model, layout, variant, options)``,
   ``SystemConfig(timezone, locale, keyboard)``: typed views of ``packages.toml`` and
   ``system.toml`` after the shared + overlay union-merge.
@@ -183,13 +184,14 @@ class PanelFiles:
 class ProfileFile:
     """A leaf under ``files/`` (shared or overlay) and the ``$HOME``-relative path it maps to.
 
-    ``shadows`` is the shared file an overlay file replaces, if any.
+    ``shadows`` lists the shared files an overlay entry replaces: the one at the same path, or any
+    inside or above it (empty for shared entries).
     """
 
     rel: PurePosixPath
     source: Path
     origin: Origin
-    shadows: Path | None
+    shadows: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -398,11 +400,19 @@ class Profile:
         shared = _leaves(self.files_dir)
         overlay = _leaves(self.overlay_files_dir)
         result = [
-            ProfileFile(rel, path, "shared", None)
+            ProfileFile(rel, path, "shared", ())
             for rel, path in shared.items()
             if not any(_overlaps(rel, other) for other in overlay)
         ]
-        result += [ProfileFile(rel, path, "overlay", shared.get(rel)) for rel, path in overlay.items()]
+        result += [
+            ProfileFile(
+                rel,
+                path,
+                "overlay",
+                tuple(source for shared_rel, source in shared.items() if _overlaps(shared_rel, rel)),
+            )
+            for rel, path in overlay.items()
+        ]
         return tuple(sorted(result, key=lambda entry: entry.rel))
 
     def load_config(self, module_defaults: Mapping[str, TomlValue] | None = None) -> Config:

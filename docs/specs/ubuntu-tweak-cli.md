@@ -103,7 +103,9 @@ Global flags, accepted before or after the command: `--profile DIR`, `--machine 
 
 Exit codes: 0 ok, 1 internal error, 2 invalid config, 3 drift, 4 unknown module, 5 refused
 (secret finding or unsafe path). The constants live in one place,
-`ubuntu_tweaks/errors.py`, and top-level errors map to them.
+`ubuntu_tweaks/errors.py`, and top-level errors map to them. A command-line usage error
+(unknown command or flag) is argparse's own exit 2. A name in `--only` that no module
+declares is exit 4.
 
 After any action that adds or changes extension code, the CLI says that a re-login is
 needed: Shell on Wayland loads extension code only at login.

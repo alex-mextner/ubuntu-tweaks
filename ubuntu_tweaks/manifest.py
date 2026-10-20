@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
+from ubuntu_tweaks.dconf_path import is_dconf_dir_path
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.profile import TomlTable, TomlValue
 
@@ -175,8 +176,8 @@ class _Reader:
 
 def _relative_path(reader: _Reader, value: str, key: str) -> None:
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts:
-        raise reader.fail(f"'{key}' must be a relative path without '..', got {value!r}")
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise reader.fail(f"'{key}' must be a relative path inside the module, without '..', got {value!r}")
 
 
 def _command(reader: _Reader, key: str) -> tuple[str, ...]:
@@ -244,7 +245,7 @@ def _parse_migration(reader: _Reader) -> Migration:
     from_path = reader.string("from_path")
     if from_uuid is None and from_path is None:
         raise reader.fail("needs 'from_uuid' or 'from_path'")
-    if from_path is not None and not (from_path.startswith("/") and from_path.endswith("/")):
+    if from_path is not None and not is_dconf_dir_path(from_path):
         raise reader.fail(f"'from_path' must be a dconf path like /org/gnome/x/, got {from_path!r}")
     return Migration(from_uuid, from_path)
 
