@@ -179,11 +179,22 @@ that is absolute or contains `..` are invalid config (exit 2).
 - **Settings files** use `dconf dump` keyfile syntax, so a preset is made with
   `dconf dump /org/gnome/shell/extensions/<x>/ > modules/<x>/<x>.ini` and trimmed.
 - **Seeds** are values computed on the machine (the Screenshots folder is localized), written
-  only while the key is at its default, never drift-checked.
+  only while the key is at its default, never drift-checked. A seed belongs to the module's
+  settings schema (the first `[[settings]]` entry's `schema`, else the extension's
+  `metadata.json` `settings-schema`); its provider is a function in `ubuntu_tweaks/seeds.py`
+  returning GVariant text plus the directories to create. Its check is "the key has a user
+  value" (a value that a defaults database or override already supplies counts as "at its
+  default", as Gio reports it), so it is never drift-checked. An unknown provider name is
+  invalid config.
 - **Migrations** run before settings: when `from_uuid` is still installed or `from_path`
   has user values and the module's current schema path has none, user values are copied
   to the new path, the old uuid is removed from `enabled-extensions`, and its symlink is
-  removed if it points into this repo.
+  removed if it points into this repo. The copy is raw GVariant text (`dconf dump` of the old
+  path, `dconf load` into the new one: the old schema may be gone), limited to keys the new
+  schema has; the old path is left as it is. The uuid is removed as a single-item edit of
+  the *user value* of `enabled-extensions` (an override-provided value is never frozen). A
+  symlink that does not point into this repo is not touched. A migration is one `migrate`
+  action, satisfied when none of the three steps is pending.
 
 ### Modules at cutover
 
@@ -248,6 +259,32 @@ actions* on `enabled-extensions`), and `capture` reports keys whose effective va
 from the override rather than from the dconf user value. That file is itself a capturable
 `files/` entry.
 
+Details of the planner (`ubuntu_tweaks/planners/settings.py`, helpers in `setkey.py`):
+
+- **Layers**, lowest first: module presets (an enabled module's `[[settings]]` files, section
+  `[/]` meaning the module's schema at its own path), the shared `settings/<panel>.ini`, the
+  machine overlay's. A key set in several layers is planned **once**, with the highest layer's
+  value: otherwise a satisfied lower layer could be dropped from the plan while a higher one
+  is kept, or the reverse. `[modules.<m>.settings]` in `profile.toml` / `machine.toml`
+  replaces the preset entry with that key name (a key the preset does not set is looked up in
+  the schemas of the module's `[[settings]]` files, else in its `metadata.json` schema, first
+  match; a name set in two preset directories is ambiguous and skipped with a warning); it
+  keeps that entry's `mode`, beats every module's preset, and stays in the module layer, so
+  panel files still win over it. A value there must be a string of GVariant text.
+- **Preview**: each action reads `<path><key> = <value> (now <effective>) <- <source file>`.
+  A key that cannot be placed is not an action; it is a `skipped …` warning printed with the
+  plan: no installed schema at that directory, or no such key in the schema. A value that does
+  not parse as the key's type is invalid config (exit 2).
+- **Relocatable schemas** have no path of their own, so a small table in `setkey.py` maps
+  known path patterns to schemas: custom keybindings, per-app notification settings, app
+  folders, Terminal and Ptyxis profiles.
+- `enabled-extensions` and `disabled-extensions` in a panel file are skipped with a warning:
+  the extension toggles own them as single-item edits of the user value.
+- A module whose extension schema is not installed yet (its link and schema compilation run
+  earlier in the same plan) has its keys planned as unsatisfied, typed only when run; the
+  directory and key names then come from the extension's `schemas/*.gschema.xml`. Panel
+  keys for such a schema wait for the next planning pass.
+
 #### `files/`
 
 A mirror of `$HOME`. Each *leaf file* under `files/` becomes a symlink in `$HOME` pointing at
@@ -264,6 +301,18 @@ the real file lives in the profile.
   showing the diff.
 - Capturable files are an explicit allow-list only (see *capture*), never a recursive grab of
   `~/.config`.
+- Destination states and plan kinds: nothing there → `link`; a real file or a symlink that
+  points elsewhere → `link-replace`, shown as `adopt` (identical content) or `backup+replace`
+  (with sizes and `+added/-removed` line counts; binary or large files are not diffed); a
+  real directory, a non-regular file, or a regular file where a parent directory should be →
+  shown as `REFUSED` and `run()` raises (exit 5), nothing is touched. The destination is
+  re-checked against `$HOME` right before it is replaced. The original always goes through
+  `ubuntu_tweaks/backup.py` first.
+- Refused before any plan exists (exit 5): a path containing `..`, and a destination whose
+  nearest existing parent resolves outside `$HOME` (for example a symlinked `~/.config`).
+- Extras: dangling symlinks into the profile (their file was removed from it). Found in the
+  directories the profile manages plus `$HOME`, `~/.config` and the first level below
+  `~/.config`; deeper orphans are not found. Reported, never removed.
 
 #### `profile.toml` / `machine.toml`
 
@@ -305,6 +354,15 @@ Checks are read-only (`timedatectl show`, `localectl status`, parsing
 `/etc/default/keyboard`). The plan marks root actions `[sudo]`; `--no-sudo` skips them and
 says so.
 
+`locale` sets `LANG` and passes the other `LC_*` assignments of the current system locale
+through (`localectl set-locale` replaces the whole set); the locale must already be generated.
+Keyboard values containing quotes, `$`, backticks, backslashes or control characters are
+invalid config. Only the keyboard fields
+listed are compared and written; the other lines of `/etc/default/keyboard` are kept, and
+the new file is installed with `install -m 644` through sudo/pkexec. A failing check command
+counts as "not satisfied". Timezone, locale and keyboard are three `system` actions with
+`needs_root`.
+
 #### `packages.toml`
 
 ```toml
@@ -317,6 +375,12 @@ flatpak = ["org.gnome.Extensions"]
 `apt-mark showmanual` minus the installer baseline (`/var/log/installer/initial-status.gz`
 when present, else minus the packages the `ubuntu-desktop` metapackage pulls in), so only
 deliberate installs show up.
+
+One `package` action per manager that has names, listing what is missing right now. apt and
+snap run as one batch through sudo (`apt-get install -y …`, `snap install …`); flatpak runs
+as the user from the `flathub` remote. Installed means: `dpkg-query` status `ii`, a
+`snap list` row, a `flatpak list` row. The package lists are not refreshed
+(`apt-get update` is not run) and a manager that is not on the machine means "not installed".
 
 ### Panel coverage
 
