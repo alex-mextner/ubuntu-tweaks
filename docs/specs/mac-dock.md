@@ -37,12 +37,13 @@ in the same commit as any behavior change.
 
 ### Base and openness
 - Built on an existing open-source dock: **Dash2Dock Animated** (GPL-3.0), chosen after a
-  side-by-side comparison on GNOME Shell 50.1 (see *Decisions*). Changes live in the fork
-  `alex-mextner/dash2dock-lite`, branch `mac-tahoe`, vendored here as a git submodule and
+  side-by-side comparison on GNOME Shell 50.1 (see *Decisions*). Changes live in
+  `alex-mextner/hyperdock`, branch `mac-tahoe`, vendored here as a git submodule and
   written so they can go upstream.
 - Flexible: every behavior below is a setting in the extension's preferences; the macOS
-  look is only the preset in `dconf/dock.ini`.
-- Replaces Ubuntu Dock (`ubuntu-dock@ubuntu.com` is disabled by `install.sh`).
+  look is only the preset in `modules/hyperdock/dock.ini`.
+- Replaces Ubuntu Dock (`ubuntu-dock@ubuntu.com` is disabled by the `hyperdock` module,
+  `[extension] conflicts`).
 
 ### macOS 26 (Tahoe) behavior
 - Bottom, centered, floating a few px above the screen edge, not full width.
@@ -208,7 +209,8 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
   draws nothing inside the dock's offscreen-redirected actor and has square corners on
   GNOME 50; a clone of `global.window_group` is 0×0, so its children are cloned instead.
 - Magic Lamp dropped: `Clutter.DeformEffect` paints nothing on Mutter 50; the dock has its
-  own GPU genie (`minimize-effect=1`). `install.sh` disables the lamp if enabled.
+  own GPU genie (`minimize-effect=1`). The `hyperdock` module drops the lamp from
+  `enabled-extensions` (`[extension] retire`).
 - Live-windows glass backdrop is optional (`glass-backdrop`); wallpaper is cheaper.
 - `minimized-window-tiles` on in the preset: macOS's default ("Minimize windows into
   application icon" off). The window minimizes into its tile and restores out of it; the

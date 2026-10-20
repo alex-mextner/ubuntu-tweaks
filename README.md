@@ -4,15 +4,28 @@ My personal Ubuntu (GNOME, Wayland) tweaks.
 
 ## Install
 
+Fresh machine:
+
 ```sh
-git clone https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/install.sh
+gh repo clone alex-mextner/.files ~/.files        # your private profile (optional)
+git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
+~/xp/ubuntu-tweaks/bin/ubuntu-tweak init           # preview: doctor, submodules, CLI link, plan
+~/xp/ubuntu-tweaks/bin/ubuntu-tweak init --commit  # do it
 ```
 
-Then log out and back in. Repo extensions (including the dock submodule) are
-symlinked into `~/.local/share/gnome-shell/extensions`, so the repo stays the
-source of truth. Re-running `install.sh` is safe; it re-applies
-`dconf/dock.ini` (change dock defaults there) but keeps your folder stacks.
+Then log out and back in (the Shell on Wayland loads extension code only at login). Repo
+extensions, including the dock submodule, are symlinked into
+`~/.local/share/gnome-shell/extensions`, so the repo stays the source of truth. Re-running is safe.
+`./install.sh` still works: it is `bin/ubuntu-tweak init --commit`; a non-interactive run needs
+`--yes` to install missing apt packages (`./install.sh --yes`).
+
+Upgrading a clone from before the dock rename (submodule path
+`gnome-extensions/dash2dock-lite@icedman.github.com` → `gnome-extensions/hyperdock`):
+`git pull && ubuntu-tweak apply --commit`. `apply` initializes the submodule at its new path and
+replaces the old extension link. Git leaves the old submodule directory behind; remove it once
+nothing unpushed is left in it. `status` reports the old
+`dash2dock-lite@icedman.github.com` extension as an *Extra* until the hyperdock migration has
+moved its settings.
 
 ## `ubuntu-tweak` CLI
 
@@ -20,23 +33,28 @@ source of truth. Re-running `install.sh` is safe; it re-applies
 [`docs/specs/ubuntu-tweak-cli.md`](docs/specs/ubuntu-tweak-cli.md): the modules of this repo plus a
 private settings profile (default `~/.files/ubuntu`, override with `--profile DIR` or
 `$UBUNTU_TWEAK_PROFILE`; per-machine overlay named by `/etc/hostname` or `--machine`). Every
-mutating command previews first and changes nothing without `--commit`. Available now, both
-read-only:
+mutating command previews first and changes nothing without `--commit`.
 
-```sh
-bin/ubuntu-tweak list      # modules: kind, enabled, source
-bin/ubuntu-tweak machine   # machine name, overlay, where each setting comes from
-```
+| Command | What it does |
+|---|---|
+| `init [--commit]` | fresh system: `doctor`, submodules, CLI link in `~/.local/bin`, then `apply`; preview without `--commit` |
+| `apply [--commit] [--no-sudo]` | print the plan (what would change), or run it; a second run says `0 changed` |
+| `status` | Missing / Modified / Extra; exit 3 when anything declared is missing or modified |
+| `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
+| `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them |
+| `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
+| `capture` | specified in the spec, tracked in [#25](https://github.com/alex-mextner/ubuntu-tweaks/issues/25) |
 
-`apply`, `status`, `init`, `update`, `doctor` and `capture` are specified there and tracked in
-[#25](https://github.com/alex-mextner/ubuntu-tweaks/issues/25). Tests: `scripts/ci.sh`.
+Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
+(local extension); `memguard` and `apple-hid-battery` are root-level `system` modules.
+Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf is `scripts/integration.sh`.
 
 ## Tweaks
 
 | Tweak | Path | What it does |
 |---|---|---|
 | English in Overview | `gnome-extensions/english-in-overview@ultra` | Switches the keyboard layout to `us` whenever the launcher (Super / Activities) opens. GNOME Shell 50. |
-| macOS dock | `gnome-extensions/dash2dock-lite@icedman.github.com` (submodule), `dconf/dock.ini` | macOS 26-style dock replacing Ubuntu Dock: Liquid Glass with adaptive contrast, glass Trash showing its contents, stacks, badges, genie minimize, drag and drop. Spec: [`docs/specs/mac-dock.md`](docs/specs/mac-dock.md). |
+| macOS dock (`hyperdock`) | `gnome-extensions/hyperdock` (submodule), `modules/hyperdock/` | macOS 26-style dock replacing Ubuntu Dock: Liquid Glass with adaptive contrast, glass Trash showing its contents, stacks, badges, genie minimize, drag and drop. Spec: [`docs/specs/mac-dock.md`](docs/specs/mac-dock.md). Presets in `modules/hyperdock/dock.ini` (enforced by `apply`); the Screenshots stack is seeded once. |
 | memguard swap drain | `modules/memguard/` (root: `sudo modules/memguard/install.sh`, `--dry-run` shows the diff) | Folds stale swap back into RAM when RAM can take it: one device at a time, aborted if memory turns tight. A 10-min timer decides (most runs skip with a logged reason); on demand: `memguard swap-drain` (no password). Publishes `/run/memguard/swap-drain.json` so gates can ignore a drain's 0 % SwapFree. Spec: [`docs/specs/memguard.md`](docs/specs/memguard.md) § Swap hygiene. |
 
 ## macOS dock
@@ -70,15 +88,17 @@ macOS 26 Tahoe (top) and this dock (bottom):
   magnification, position and settings.
 - **Show All Windows** of an app from its menu; **recent apps** after the running ones.
 
-Built on [Dash2Dock Animated](https://github.com/icedman/dash2dock-lite); the changes are on the
-[`mac-tahoe` branch of the fork](https://github.com/alex-mextner/dash2dock-lite/tree/mac-tahoe).
-Everything is a setting: open *Extensions → Dash2Dock Animated → Settings*.
+Built on [Dash2Dock Animated](https://github.com/icedman/dash2dock-lite); the code lives in
+[`alex-mextner/hyperdock`](https://github.com/alex-mextner/hyperdock) (branch `mac-tahoe`).
+Everything is a setting: open the extension's *Settings* in the Extensions app.
 
 - **Folder stacks:** *Others → Folder Stacks* adds any folder next to Downloads, or set
   it directly:
   `dconf write /org/gnome/shell/extensions/dash2dock-lite/folder-stacks "'[\"~/Projects\", {\"path\": \"~/Pictures/Screenshots\", \"icon\": \"folder-pictures\"}]'"`
-- **Back to Ubuntu Dock:** `gnome-extensions disable dash2dock-lite@icedman.github.com`
-  and remove `ubuntu-dock@ubuntu.com` from `/org/gnome/shell/disabled-extensions`.
+- **Back to Ubuntu Dock:** `gnome-extensions disable <hyperdock uuid>` (the uuid is in
+  `gnome-extensions/hyperdock/metadata.json`) and remove `ubuntu-dock@ubuntu.com` from
+  `/org/gnome/shell/disabled-extensions`; set `[modules.hyperdock] enabled = false` in your profile
+  so `ubuntu-tweak apply` stops managing it.
 
 ## Uninstall a GNOME extension
 

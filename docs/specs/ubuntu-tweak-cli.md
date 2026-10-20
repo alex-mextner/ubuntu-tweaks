@@ -88,12 +88,12 @@ Commands self-register: `ubuntu_tweaks/commands/<name>.py` exposes
 
 | Command | What it does |
 |---|---|
-| `init` | Fresh system: `doctor` (offers to install missing packages), `git submodule update --init --recursive`, symlinks itself into `~/.local/bin`, then `apply --commit`. Re-running is safe. |
-| `apply` | Prints the plan: every action needed to make the system match modules + profile. Changes nothing. |
-| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. |
-| `status` | Drift both ways (see *Drift*). Exit 3 when anything declared is missing or modified. |
-| `update` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply --commit`. Channel and schedule come from #19. |
-| `doctor [--yes]` | Checks required packages and binaries; `--yes` installs the missing ones with apt. |
+| `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` prints the exact `gh repo clone alex-mextner/.files ~/.files` command and continues with the module-only plan. Re-running is safe. |
+| `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing. |
+| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
+| `status` | Drift both ways (see *Drift*), grouped as Missing / Modified / Extra. Exit 3 when anything declared is Missing or Modified; extras alone exit 0. |
+| `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
+| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
 | `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, panel file and linked file whether it comes from the shared profile or the machine overlay. |
 | `capture [--commit] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive (see *capture*). |
@@ -413,16 +413,18 @@ Order: submodules → migrations → schemas → **packages** → **system (root
 (extensions) → **files (links)** → enable/disable → settings (module presets, then profile
 panel files, then machine overlay) → seeds.
 
-| Action | Check | Run |
+| Action (`kind`) | Check | Run |
 |---|---|---|
-| `submodule` | submodule is initialized | `git submodule update --init`; a submodule checked out at another commit (dev work) is reported by `status`, never reset — only `update` moves it |
+| `submodule` | submodule is initialized (`<path>/.git` exists) | `git submodule update --init --recursive -- <path>`; a submodule checked out at another commit (dev work) is reported by `status` as an extra, never reset — only `update` moves it |
 | `migrate` | see *Migrations* | copy values, retire old uuid |
-| `compile-schemas` | `gschemas.compiled` newer than every `*.gschema.xml` | `glib-compile-schemas` |
-| `packages` | apt / snap / flatpak name is installed | install the missing names; never remove |
-| `system` (root) | `timedatectl`, `localectl`, `/etc/default/keyboard` or a `system` module's checker | the same through sudo; a `system` module runs its installer |
-| `link` | `~/.local/share/gnome-shell/extensions/<uuid>` is a symlink to the source | `ln -sfnT`; an existing real directory is moved to `~/.local/state/ubuntu-tweaks/backup/<timestamp>/` first |
-| `file-link` | `~/<path>` is a symlink to the profile file | back up a real file, then `ln -sfnT` |
-| `enable` / `disable` | uuid in / not in the user value of `enabled-extensions` and `disabled-extensions` | add / remove the one item |
+| `compile-schemas` | `gschemas.compiled` newer than every `*.gschema.xml` (satisfied when the extension has no schema) | `glib-compile-schemas` |
+| `package` | apt / snap / flatpak name is installed | install the missing names; never remove |
+| `system` (root) | `timedatectl`, `localectl` or `/etc/default/keyboard` matches | the same through sudo |
+| `system-module` (root) | a `system` module's checker exits 0 | its installer through sudo |
+| `link` | `~/.local/share/gnome-shell/extensions/<uuid>` (uuid from `metadata.json`) or `~/<path>` is a symlink to the source | `ln -sfnT` |
+| `link-replace` | same check; the destination exists as a real file/directory or a symlink elsewhere | move it to `~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>`, then `ln -sfnT`; the plan line says `backup+replace` and whether the content is identical |
+| `enable` | uuid is in the user value of `enabled-extensions` and not in `disabled-extensions` | add / remove the one item |
+| `disable` | a conflict is not in `enabled-extensions` and is in `disabled-extensions`; a retired uuid is not in `enabled-extensions` | remove / add the one item |
 | `set-key` | effective value (user value, else schema default) equals the wanted typed value | write it |
 | `seed-key` | key has a user value | write the provider's value |
 
@@ -437,32 +439,58 @@ Writes go through `Gio.Settings` from `python3-gi` (installed on every Ubuntu de
 `enabled-extensions` and `disabled-extensions` are edited as single-item additions and
 removals of the **user value** (`get_user_value`), never by writing back the effective
 value: on Ubuntu the effective value comes from the session's override and writing it back
-would freeze it (the reason `install.sh` used `dconf` directly).
+would freeze it (the reason `install.sh` used `dconf` directly). `enable` adds the uuid to
+`enabled-extensions` and drops it from `disabled-extensions`; for each `[extension]
+conflicts` uuid `disable` drops it from `enabled-extensions` and adds it to
+`disabled-extensions` (the Shell lets `disabled-extensions` win over a system default);
+`retire` only drops the uuid from `enabled-extensions`. A user value that is unset counts
+as an empty list, so the first single-item write creates it.
+
+Planner discovery: every `ubuntu_tweaks/planners/<name>.py` exposes `build(ctx, backend)`,
+returning all candidate actions (satisfied or not; `Plan.build` filters), and optionally
+`extras(ctx, backend)`, returning human-readable lines for the *Extra* drift section.
+`apply` and `status` discover all planners, so adding a planner is dropping a file. Actions
+of a submodule module resolve the extension's `metadata.json` lazily (at `check()`/`run()`
+time): before the submodule is initialized their `check()` is false and their description
+says the uuid is known after the submodule init, so one `apply --commit` converges.
 
 ### Drift
 
-`status` compares declared state with the machine, using the same `check()` as `apply`.
+`status` compares declared state with the machine, using the same `check()` as `apply`, and
+classifies each pending action by its `kind`: `set-key` and `link-replace` are **Modified**,
+every other kind is **Missing**. It prints a `machine:` line (the name, and whether an
+overlay directory exists or only the shared profile applies) and exits 3 when anything is
+Missing or Modified.
 
-- **Missing** (declared, not on disk): a symlink, an enabled uuid, a conflict still
-  enabled. `apply --commit` fixes it.
-- **Modified** (declared, different on disk): a key whose value differs, a linked file
-  replaced by a real file (`replaced`). Values are compared as typed `GLib.Variant`s read
-  through the schema, so `5`, `uint32 5` and an unset key at its default compare correctly;
-  a raw `dconf read` string diff would report every default-valued key. `apply --commit`
-  overwrites it; the user's own changes belong in the profile (`capture` brings them there).
-- **Extra** (on disk, not declared), reported only, never changed: extensions enabled by
-  the user that no module declares, symlinks into this repo for uuids no module declares
-  (e.g. the old dock uuid before the migration ran).
+- **Missing** (declared, not on disk): a symlink, an uninitialized submodule, stale
+  schemas, an enabled uuid, a conflict still enabled, an unwritten seed, a package.
+  `apply --commit` fixes it.
+- **Modified** (declared, different on disk): a key whose value differs, a linked file or
+  extension directory replaced by a real file or pointing elsewhere (`link-replace`).
+  Values are compared as typed `GLib.Variant`s read through the schema, so `5`,
+  `uint32 5` and an unset key at its default compare correctly; a raw `dconf read`
+  string diff would report every default-valued key. `apply --commit` overwrites it (after
+  a backup, for files); the user's own changes belong in the profile (`capture` brings
+  them there).
+- **Extra** (on disk, not declared), reported only, never changed, never an exit-3 reason:
+  extensions enabled by the user that no module declares, symlinks into this repo for
+  uuids no module declares (e.g. the old dock uuid before the migration ran), and a
+  submodule checked out at another commit than the umbrella records (dev work: only
+  `update` moves it, `apply` never resets it). Extras come from each planner's optional
+  `extras()`; `status` prints them only when `--only` is not given.
 
 ### Install
 
 ```sh
 git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init
+~/xp/ubuntu-tweaks/bin/ubuntu-tweak init            # preview: doctor, submodules, CLI link, apply plan
+~/xp/ubuntu-tweaks/bin/ubuntu-tweak init --commit   # do it
 ```
 
-`install.sh` stays as a two-line wrapper calling `bin/ubuntu-tweak init`, so the old
-instructions keep working. With a profile, clone `.files` first (see *Engine and profile*).
+`install.sh` stays as a two-line wrapper, `exec bin/ubuntu-tweak init --commit "$@"`: the old
+script always installed, so the old instructions keep working and keep meaning "install".
+With a profile, clone `.files` first (see *Engine and profile*); without one, `init` prints
+the exact clone command and applies the modules only.
 
 ### Testing
 
@@ -470,11 +498,18 @@ instructions keep working. With a profile, clone `.files` first (see *Engine and
   manifest parsing and validation, plan filtering, preview rendering and root skipping,
   keyfile round trip, plan building from a fake settings backend, drift classification,
   migrations, seed providers.
-- Integration: `dbus-run-session` with a scratch `DCONF_PROFILE` and a temporary `HOME`;
-  typed `GioBackend` reads and writes, then `apply --commit` on an empty profile, `status`
-  exits 0, a second `apply --commit` reports `0 changed`. Runs in CI
-  ([#18](https://github.com/alex-mextner/ubuntu-tweaks/issues/18)). Tests that need
-  PyGObject run under the distro interpreter, because `python3-gi` is an apt package.
+- Integration: `scripts/integration.sh` runs `dbus-run-session` with a scratch
+  `DCONF_PROFILE` and a temporary `HOME`/`XDG_*` (including `XDG_RUNTIME_DIR`), then
+  `apply --commit` on an empty profile (module `english-in-overview` only: the others need
+  network or root), `status` exits 0, a second `apply --commit` reports `0 changed`. The
+  scratch environment is exported **before** `dbus-run-session` starts, because the dconf
+  service is activated by the bus daemon and inherits the daemon's environment: variables set
+  only inside the session would let it write the user's real dconf database. The script
+  refuses to run unless it sees the scratch environment, and skips itself when the
+  `org.gnome.shell` schema is not installed. Wired into CI
+  ([#18](https://github.com/alex-mextner/ubuntu-tweaks/issues/18) for the rest of the
+  hardening). Tests that need PyGObject run under the distro interpreter, because
+  `python3-gi` is an apt package.
 
 ## Decisions
 

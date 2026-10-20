@@ -25,7 +25,11 @@ jobs:
         # dbus-run-session; scripts/ci.sh runs the ubuntu_tweaks tests under /usr/bin/python3, which has gi.
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck python3-gi gir1.2-glib-2.0 dbus dconf-cli dconf-service dconf-gsettings-backend libglib2.0-bin
+          sudo apt-get install -y shellcheck python3-gi gir1.2-glib-2.0 dbus dconf-cli dconf-service dconf-gsettings-backend libglib2.0-bin gnome-shell-common
           pip install ruff
       - name: Checks (scripts/ci.sh)
         run: scripts/ci.sh
+      - name: Integration (scripts/integration.sh)
+        # apply --commit / status / apply --commit against a scratch dconf in dbus-run-session; it
+        # skips itself (loudly) when the org.gnome.shell schema from gnome-shell-common is missing.
+        run: scripts/integration.sh

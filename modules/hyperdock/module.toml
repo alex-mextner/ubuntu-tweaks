@@ -1,0 +1,21 @@
+description = "macOS-style dock"
+
+[source]
+kind = "submodule"
+path = "gnome-extensions/hyperdock"
+
+[extension]
+conflicts = ["ubuntu-dock@ubuntu.com"]
+retire = ["compiz-alike-magic-lamp-effect@hermes83.github.com"]
+
+[[settings]]
+file = "dock.ini"
+mode = "enforce"
+
+[[seeds]]
+key = "folder-stacks"
+provider = "screenshots-stack"
+
+[[migrations]]
+from_uuid = "dash2dock-lite@icedman.github.com"
+from_path = "/org/gnome/shell/extensions/dash2dock-lite/"
