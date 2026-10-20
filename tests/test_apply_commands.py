@@ -16,7 +16,8 @@ try:
     from ubuntu_tweaks import planners, reconcile
     from ubuntu_tweaks.actions import Action, ActionFailed, Phase
     from ubuntu_tweaks.commands import _support, apply, doctor, init, status, update
-    from ubuntu_tweaks.proc import CommandError
+    from ubuntu_tweaks import process
+    from ubuntu_tweaks.process import CommandError
     from ubuntu_tweaks.context import Context
     from ubuntu_tweaks.errors import ExitCode, UnknownModuleError
     from ubuntu_tweaks.extension import RELOGIN_HINT
@@ -404,13 +405,14 @@ class DoctorTests(CommandScenario):
         ]
         with (
             mock.patch.object(doctor, "run_command") as run_command,
-            mock.patch.object(doctor.os, "geteuid", return_value=1000),
+            mock.patch.object(process.os, "geteuid", return_value=1000),
+            mock.patch.object(process.shutil, "which", return_value="/usr/bin/sudo"),
         ):
             doctor.install(absent)
-        run_command.assert_called_once_with(["sudo", "apt-get", "install", "-y", "git", "tmux"])
+        run_command.assert_called_once_with(["sudo", "--", "apt-get", "install", "-y", "git", "tmux"])
         with (
             mock.patch.object(doctor, "run_command") as run_command,
-            mock.patch.object(doctor.os, "geteuid", return_value=0),
+            mock.patch.object(process.os, "geteuid", return_value=0),
         ):
             doctor.install(absent)
         run_command.assert_called_once_with(["apt-get", "install", "-y", "git", "tmux"])

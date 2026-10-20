@@ -16,7 +16,7 @@ from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import extension_modules
 from ubuntu_tweaks.manifest import SourceKind
-from ubuntu_tweaks.proc import CommandError, run
+from ubuntu_tweaks.process import CommandError, run
 from ubuntu_tweaks.settings import SettingsBackend
 
 

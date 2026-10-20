@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import Literal
 
 from ubuntu_tweaks.capture.rules import Mark, Rules
-from ubuntu_tweaks.capture.schemas import ResolvedKey, SchemaCatalog, resolve
 from ubuntu_tweaks.capture.secrets import scan_text, scan_value
+from ubuntu_tweaks.setkey import ResolvedKey, SchemaIndex
 from ubuntu_tweaks.settings import (
     KeyFileData,
     SettingsBackend,
@@ -160,9 +160,14 @@ def _diff(
     return ("=", None) if same else ("~", text)
 
 
+def _resolve(index: SchemaIndex, directory: str, key: str) -> ResolvedKey | None:
+    resolved = index.resolve(directory, key)
+    return resolved if isinstance(resolved, ResolvedKey) else None
+
+
 def scan_settings(
     backend: SettingsBackend,
-    catalog: SchemaCatalog,
+    index: SchemaIndex,
     rules: Rules,
     existing: ExistingReader,
     override_file: Path,
@@ -176,7 +181,7 @@ def scan_settings(
         if only and panel not in only:
             continue  # out of scope: not counted anywhere, so the totals stay an exact account
         result.user_keys += 1
-        resolved = resolve(backend, catalog, rules, directory, key)
+        resolved = _resolve(index, directory, key)
         value: Variant | None = None
         if resolved is not None:
             value = backend.user_value(resolved.schema, resolved.path, key)
@@ -220,7 +225,7 @@ def scan_settings(
             target = "machine"  # the overlay wins at apply: a shared write would never take effect
         mark, previous = _diff(existing, target, panel, directory, key, value, resolved, backend)
         result.entries.append(KeyEntry(panel, target, directory, key, text, mark, previous, tuple(flags)))
-    _scan_overrides(result, backend, catalog, rules, override_file, only)
+    _scan_overrides(result, backend, index, rules, override_file, only)
     return result
 
 
@@ -238,7 +243,7 @@ def _override_masked(rules: Rules, full: str, key: str, override_value: Variant,
 def _scan_overrides(
     result: SettingsResult,
     backend: SettingsBackend,
-    catalog: SchemaCatalog,
+    index: SchemaIndex,
     rules: Rules,
     override_file: Path,
     only: frozenset[str],
@@ -250,7 +255,7 @@ def _scan_overrides(
     for section, items in sorted(data.items()):
         directory = section_to_path(section)
         for key, text in sorted(items.items()):
-            resolved = resolve(backend, catalog, rules, directory, key)
+            resolved = _resolve(index, directory, key)
             if resolved is None:
                 continue
             try:

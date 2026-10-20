@@ -26,7 +26,6 @@ from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 
 if TYPE_CHECKING:
-    from ubuntu_tweaks.capture.schemas import SchemaCatalog
     from ubuntu_tweaks.capture.system_scan import Runner
     from ubuntu_tweaks.settings import SettingsBackend
 
@@ -59,7 +58,6 @@ def execute(
     ctx: Context,
     args: argparse.Namespace,
     backend: SettingsBackend,
-    catalog: SchemaCatalog,
     *,
     home: Path,
     now: datetime,
@@ -73,7 +71,7 @@ def execute(
     from ubuntu_tweaks.capture.rules import load_rules
 
     rules = load_rules(_capture_table(ctx))
-    plan = build_plan(ctx.profile, rules, backend, catalog, home=home, only=ctx.only, run=run, **sources)
+    plan = build_plan(ctx.profile, rules, backend, home=home, only=ctx.only, run=run, **sources)
     document = build_document(plan, machine=ctx.profile.machine, commit=args.commit, verbose=args.verbose)
     print(render_text(document), end="")
     if args.report:
@@ -89,12 +87,9 @@ def execute(
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    from ubuntu_tweaks.capture.schemas import gio_catalog
     from ubuntu_tweaks.capture.system_scan import default_runner
     from ubuntu_tweaks.settings import GioBackend
 
     home = Path.home()
     backend = GioBackend.with_extensions(home)
-    return execute(
-        ctx, args, backend, gio_catalog(backend.schema_dirs), home=home, now=datetime.now(UTC), run=default_runner
-    )
+    return execute(ctx, args, backend, home=home, now=datetime.now(UTC), run=default_runner)

@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules, tilde
-from ubuntu_tweaks.proc import run
+from ubuntu_tweaks.process import run
 from ubuntu_tweaks.settings import SettingsBackend
 
 COMPILED = "gschemas.compiled"

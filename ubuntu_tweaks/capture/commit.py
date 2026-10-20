@@ -19,8 +19,6 @@ Order and guarantees:
 4. ``packages.toml`` / ``system.toml`` are updated for ``+``/``~`` items (the file is regenerated
    from its parsed content: comments are not preserved, ticket #29).
 
-``_backup`` is a local copy of what slice B's ``backup.py`` provides; integration dedupes it.
-
 Public API: ``commit(plan, *, email_exempt_keys, home, now) -> list[str]`` (human-readable lines
 for what was written).
 """
@@ -37,17 +35,11 @@ from pathlib import Path
 from ubuntu_tweaks.capture.plan import CapturePlan, refusals
 from ubuntu_tweaks.capture.secrets import scan_text
 from ubuntu_tweaks.capture.settings_scan import KeyEntry
-from ubuntu_tweaks.capture.toml_io import dump_toml, read_toml
+from ubuntu_tweaks.capture.toml_io import dump_toml
+from ubuntu_tweaks.backup import backup as backup_file
 from ubuntu_tweaks.errors import RefusedError
+from ubuntu_tweaks.profile import read_toml
 from ubuntu_tweaks.settings import KeyFileData, dump_keyfile, path_to_section, read_keyfile
-
-
-def _backup(path: Path, *, home: Path, now: datetime) -> Path:
-    stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    target = home / ".local/state/ubuntu-tweaks/backup" / stamp / path.absolute().as_posix().lstrip("/")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(path, target)
-    return target
 
 
 def _atomic_write(path: Path, data: bytes, mode_from: Path | None = None) -> None:
@@ -157,7 +149,7 @@ def commit(plan: CapturePlan, *, email_exempt_keys: Sequence[str], home: Path, n
     for a in adopted:
         if a.status != "identical":
             _atomic_write(a.dest, a.content, mode_from=a.source)
-        backup = _backup(a.source, home=home, now=now)
+        backup = backup_file(a.source, now=now, state_home=home / ".local/state")
         link = a.source.with_name(f".{a.source.name}.ubuntu-tweak-link")
         link.unlink(missing_ok=True)
         os.symlink(os.path.abspath(a.dest), link)

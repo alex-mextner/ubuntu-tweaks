@@ -17,7 +17,6 @@ from pathlib import Path
 
 from ubuntu_tweaks.capture.files_scan import FilesResult, scan_files
 from ubuntu_tweaks.capture.rules import PANEL_SELECTORS, Rules
-from ubuntu_tweaks.capture.schemas import SchemaCatalog
 from ubuntu_tweaks.capture.settings_scan import SettingsResult, Target, scan_settings
 from ubuntu_tweaks.capture.system_scan import (
     INSTALLER_BASELINE,
@@ -29,9 +28,9 @@ from ubuntu_tweaks.capture.system_scan import (
     scan_packages,
     scan_system,
 )
-from ubuntu_tweaks.capture.toml_io import read_toml
 from ubuntu_tweaks.errors import ConfigError
-from ubuntu_tweaks.profile import Profile
+from ubuntu_tweaks.profile import Profile, read_toml
+from ubuntu_tweaks.setkey import SchemaIndex
 from ubuntu_tweaks.settings import KeyFileData, SettingsBackend, read_keyfile
 
 SECTION_NAMES = ("files", "packages", "system")
@@ -60,7 +59,6 @@ def build_plan(
     profile: Profile,
     rules: Rules,
     backend: SettingsBackend,
-    catalog: SchemaCatalog,
     *,
     home: Path,
     only: frozenset[str] = frozenset(),
@@ -82,7 +80,9 @@ def build_plan(
 
     wants_settings = not only or bool(panels)
     settings = (
-        scan_settings(backend, catalog, rules, existing, home / ".config/glib-2.0/settings/keyfile", panels)
+        scan_settings(
+            backend, SchemaIndex(backend), rules, existing, home / ".config/glib-2.0/settings/keyfile", panels
+        )
         if wants_settings
         else None
     )

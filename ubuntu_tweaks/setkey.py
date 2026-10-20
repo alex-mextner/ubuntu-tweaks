@@ -23,7 +23,7 @@ Assumptions:
 
 Public API:
 
-- ``RELOCATABLE_PATHS``: ``(compiled path pattern, schema id)`` pairs.
+- ``RELOCATABLE_PATHS``: ``(compiled path pattern, schema id)`` pairs from ``panels.toml``'s ``[[relocatable]]``.
 - ``MODULE_OWNED_KEYS``: dconf keys no keyfile (panel file or module preset) may set
   (``enabled-extensions``, ``disabled-extensions``: the toggle planner owns them as single-item edits
   of the user value).
@@ -41,13 +41,13 @@ Public API:
 from __future__ import annotations
 
 import json
-import re
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, Phase
+from ubuntu_tweaks.capture.rules import relocatable_schemas
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.manifest import Manifest, SettingsFile, SourceKind, discover_modules, module_defaults
@@ -63,16 +63,7 @@ from ubuntu_tweaks.settings import (
 
 from gi.repository import GLib  # noqa: E402  (ubuntu_tweaks.settings has pinned the GLib typelib version)
 
-RELOCATABLE_PATHS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(r"/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/[^/]+/"),
-        "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding",
-    ),
-    (re.compile(r"/org/gnome/desktop/notifications/application/[^/]+/"), "org.gnome.desktop.notifications.application"),
-    (re.compile(r"/org/gnome/desktop/app-folders/folders/[^/]+/"), "org.gnome.desktop.app-folders.folder"),
-    (re.compile(r"/org/gnome/terminal/legacy/profiles:/:[^/]+/"), "org.gnome.Terminal.Legacy.Profile"),
-    (re.compile(r"/org/gnome/Ptyxis/Profiles/[^/]+/"), "org.gnome.Ptyxis.Profile"),
-)
+RELOCATABLE_PATHS = relocatable_schemas()
 
 MODULE_OWNED_KEYS = frozenset({"/org/gnome/shell/enabled-extensions", "/org/gnome/shell/disabled-extensions"})
 

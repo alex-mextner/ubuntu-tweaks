@@ -10,19 +10,21 @@ checked first and always wins; ``machine`` and ``include_files`` extend the defa
 cannot weaken the secret/identity/hardware excludes: they are evaluated before anything it adds.
 
 Public API: ``load_rules(profile_capture=None) -> Rules``; ``Rules`` and its parts
-(``PanelInfo``, ``PanelRule``, ``ExcludeRule``, ``MachineRule``, ``Relocatable``,
-``FileRules``, ``PackageRules``); ``PANEL_IDS`` (the contract's panel file ids).
+(``PanelInfo``, ``PanelRule``, ``ExcludeRule``, ``MachineRule``, ``FileRules``, ``PackageRules``);
+``relocatable_schemas()`` (the ``[[relocatable]]`` table, also read by ``setkey.SchemaIndex``);
+``PANEL_IDS`` (the contract's panel file ids).
 """
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ubuntu_tweaks.capture.globs import GlobSet
+from ubuntu_tweaks.capture.globs import GlobSet, compile_glob
 from ubuntu_tweaks.errors import ConfigError
 
 PANELS_TOML = Path(__file__).resolve().parent.parent / "panels.toml"
@@ -108,7 +110,6 @@ class PackageRules:
 class Rules:
     panels: Mapping[str, PanelInfo]
     panel_rules: tuple[PanelRule, ...]
-    relocatable: tuple[Relocatable, ...]
     profile_exclude: GlobSet
     profile_machine: GlobSet
     hard_excludes: tuple[ExcludeRule, ...]
@@ -134,9 +135,6 @@ class Rules:
         if self.state_keep.matches(full):
             return None
         return next((rule for rule in self.state if rule.globs.matches(full)), None)
-
-    def relocatable_schema(self, directory: str) -> str | None:
-        return next((entry.schema for entry in self.relocatable if entry.globs.matches(directory)), None)
 
 
 def _load(path: Path) -> Table:
@@ -212,6 +210,16 @@ def _parse_panels(data: Table) -> tuple[dict[str, PanelInfo], tuple[PanelRule, .
     return panels, tuple(rules), relocatable
 
 
+def relocatable_schemas() -> tuple[tuple[re.Pattern[str], str], ...]:
+    """``(dconf path pattern, schema id)`` of every ``[[relocatable]]`` in ``panels.toml``.
+
+    The one list of relocatable schemas: ``capture`` reads and ``apply`` writes through it
+    (``setkey.SchemaIndex``), so what capture emits is always something apply can resolve.
+    """
+    relocatable = _parse_panels(_load(PANELS_TOML))[2]
+    return tuple((compile_glob(entry.globs.patterns[0]), entry.schema) for entry in relocatable)
+
+
 def _profile_capture(table: Mapping[str, object] | None) -> tuple[GlobSet, GlobSet, tuple[str, ...], tuple[str, ...]]:
     where = "profile [capture]"
     table = table or {}
@@ -227,7 +235,7 @@ def _profile_capture(table: Mapping[str, object] | None) -> tuple[GlobSet, GlobS
 
 
 def load_rules(profile_capture: Mapping[str, object] | None = None) -> Rules:
-    panels, panel_rules, relocatable = _parse_panels(_load(PANELS_TOML))
+    panels, panel_rules, _relocatable = _parse_panels(_load(PANELS_TOML))
     defaults = _load(DEFAULTS_TOML)
     where = str(DEFAULTS_TOML)
     excludes = [
@@ -261,7 +269,6 @@ def load_rules(profile_capture: Mapping[str, object] | None = None) -> Rules:
     return Rules(
         panels=panels,
         panel_rules=panel_rules,
-        relocatable=relocatable,
         profile_exclude=profile_exclude,
         profile_machine=profile_machine,
         hard_excludes=tuple(rule for rule in excludes if rule.cls in _HARD_CLASSES),

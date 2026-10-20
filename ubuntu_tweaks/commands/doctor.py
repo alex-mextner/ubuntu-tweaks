@@ -16,7 +16,6 @@ Public API: ``Requirement``, ``requirements(ctx)``, ``missing(requirements)``,
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -26,7 +25,8 @@ from ubuntu_tweaks.commands._support import has_gi
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.manifest import discover_modules, module_defaults
-from ubuntu_tweaks.proc import run as run_command
+from ubuntu_tweaks.process import elevate
+from ubuntu_tweaks.process import run as run_command
 
 
 @dataclass(frozen=True)
@@ -78,8 +78,7 @@ def install(absent: Sequence[Requirement]) -> None:
     packages = sorted({item.apt for item in absent})
     if not packages:
         return
-    prefix = [] if os.geteuid() == 0 else ["sudo"]
-    run_command([*prefix, "apt-get", "install", "-y", *packages])
+    run_command(elevate(["apt-get", "install", "-y", *packages]))
 
 
 def report(needed: Sequence[Requirement]) -> list[Requirement]:

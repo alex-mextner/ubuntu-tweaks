@@ -19,7 +19,7 @@ import sys
 
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT
-from ubuntu_tweaks.proc import run as run_command
+from ubuntu_tweaks.process import run as run_command
 
 PULL = ("git", "pull", "--ff-only")
 SUBMODULES = ("git", "submodule", "update", "--init", "--recursive")

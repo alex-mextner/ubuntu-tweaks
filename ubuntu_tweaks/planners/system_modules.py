@@ -12,47 +12,31 @@ and both run with it as the working directory. ``run()`` executes the install co
 
 Public API:
 
-- ``build(ctx, backend, *, runner=run_command) -> list[Action]``: one ``SystemModuleAction``
+- ``build(ctx, backend, *, process=None) -> list[Action]``: one ``SystemModuleAction``
   per enabled ``system`` module (module default < profile < machine overlay); disabled modules
   produce nothing. ``backend`` is unused: system modules do not touch dconf.
-- ``SystemModuleAction(manifest, display_root, *, runner=run_command, elevate=...)``: kind
-  ``system-module``, phase ``SYSTEM``, ``needs_root``, scope = module name.
-- ``run_command(argv, *, cwd, timeout, capture) -> CompletedProcess`` is the injectable runner.
+- ``SystemModuleAction(manifest, display_root, *, process=None)``: kind ``system-module``, phase
+  ``SYSTEM``, ``needs_root``, scope = module name. Commands go through ``process.Process`` (the one
+  runner; its ``elevate`` adds ``sudo --`` unless root) so tests pass a ``FakeProcess``-style double.
 """
 
 from __future__ import annotations
 
-import os
 import shlex
-import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, ActionFailed, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.manifest import Manifest, SourceKind, discover_modules, module_defaults
+from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.settings import SettingsBackend
 
 CHECK_TIMEOUT_SECONDS = 60
 DRIFT_EXIT = 3
+MISSING_EXIT = 127  # Process.query's answer for a binary that does not exist
+TIMEOUT_EXIT = 124  # Process.query's answer for a command that outlived its timeout
 _OUTPUT_TAIL_LINES = 10
-
-type Runner = Callable[..., subprocess.CompletedProcess[str]]
-
-
-def run_command(
-    argv: Sequence[str], *, cwd: Path, timeout: float | None, capture: bool
-) -> subprocess.CompletedProcess[str]:
-    """Run ``argv``; with ``capture`` the output is collected and stdin closed, else inherited."""
-    return subprocess.run(
-        list(argv),
-        cwd=cwd,
-        timeout=timeout,
-        capture_output=capture,
-        stdin=subprocess.DEVNULL if capture else None,
-        text=True,
-        check=False,
-    )
 
 
 def _tail(text: str | None) -> str:
@@ -65,52 +49,44 @@ class SystemModuleAction(Action):
     kind = "system-module"
     needs_root = True
 
-    def __init__(
-        self,
-        manifest: Manifest,
-        display_root: Path,
-        *,
-        runner: Runner = run_command,
-        elevate: bool | None = None,
-    ) -> None:
+    def __init__(self, manifest: Manifest, display_root: Path, *, process: Process | None = None) -> None:
         self.scope = manifest.name
         self._manifest = manifest
         self._display_root = display_root
-        self._runner = runner
-        self._elevate = os.geteuid() != 0 if elevate is None else elevate
+        self._process = process or Process()
 
     def _argv(self, command: Sequence[str]) -> list[str]:
         directory = self._manifest.directory
         return [str(directory / command[0]), *command[1:]]
 
     def _install_argv(self) -> list[str]:
-        argv = self._argv(self._manifest.source.install)
-        return ["sudo", *argv] if self._elevate else argv
+        try:
+            return self._process.elevate(self._argv(self._manifest.source.install))
+        except CommandError as error:
+            raise ActionFailed(f"{self._manifest.name}: {error}") from error
 
     def describe(self) -> str:
         shown = self._install_argv()
-        try:
-            index = 1 if self._elevate else 0
-            shown[index] = str(Path(shown[index]).relative_to(self._display_root))
-        except ValueError:
-            pass
+        for index, part in enumerate(shown):
+            try:
+                shown[index] = str(Path(part).relative_to(self._display_root))
+            except ValueError:
+                continue
+            break
         return f"run {self._manifest.name}: {shlex.join(shown)}"
 
     def check(self) -> bool:
         name = self._manifest.name
         argv = self._argv(self._manifest.source.check)
-        try:
-            result = self._runner(argv, cwd=self._manifest.directory, timeout=CHECK_TIMEOUT_SECONDS, capture=True)
-        except subprocess.TimeoutExpired as error:
-            raise ActionFailed(
-                f"{name}: check {shlex.join(argv)} did not finish within {CHECK_TIMEOUT_SECONDS}s"
-            ) from error
-        except OSError as error:
-            raise ActionFailed(f"{name}: cannot run check {shlex.join(argv)}: {error}") from error
+        result = self._process.query(argv, timeout=CHECK_TIMEOUT_SECONDS, cwd=self._manifest.directory)
         if result.returncode == 0:
             return True
         if result.returncode == DRIFT_EXIT:
             return False
+        if result.returncode == TIMEOUT_EXIT:
+            raise ActionFailed(f"{name}: check {shlex.join(argv)} did not finish within {CHECK_TIMEOUT_SECONDS}s")
+        if result.returncode == MISSING_EXIT:
+            raise ActionFailed(f"{name}: cannot run check {shlex.join(argv)}: {result.stderr.strip()}")
         output = _tail(result.stderr) or _tail(result.stdout)
         raise ActionFailed(
             f"{name}: check {shlex.join(argv)} crashed (exit {result.returncode}, expected 0 or {DRIFT_EXIT})"
@@ -118,21 +94,18 @@ class SystemModuleAction(Action):
         )
 
     def run(self) -> None:
-        name = self._manifest.name
         argv = self._install_argv()
         try:
-            result = self._runner(argv, cwd=self._manifest.directory, timeout=None, capture=False)
-        except OSError as error:
-            raise ActionFailed(f"{name}: cannot run {shlex.join(argv)}: {error}") from error
-        if result.returncode != 0:
-            raise ActionFailed(f"{name}: {shlex.join(argv)} exited {result.returncode}")
+            self._process.execute(argv, cwd=self._manifest.directory)
+        except CommandError as error:
+            raise ActionFailed(f"{self._manifest.name}: {error}") from error
 
 
-def build(ctx: Context, backend: SettingsBackend, *, runner: Runner = run_command) -> list[Action]:
+def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> list[Action]:
     manifests = discover_modules(ctx.modules_dir)
     config = ctx.profile.load_config(module_defaults(manifests))
     return [
-        SystemModuleAction(manifest, ctx.repo_root, runner=runner)
+        SystemModuleAction(manifest, ctx.repo_root, process=process)
         for manifest in manifests
         if manifest.source.kind is SourceKind.SYSTEM and config.module_enabled(manifest.name)
     ]

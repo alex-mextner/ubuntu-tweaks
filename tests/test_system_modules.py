@@ -1,13 +1,13 @@
 """The ``system`` module planner: one root action per enabled module, decided by its checker."""
 
 import stat
-import subprocess
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
 from tests.util import TempDirCase, write
+from ubuntu_tweaks import process
 from ubuntu_tweaks.actions import ActionFailed, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.planners import system_modules
@@ -31,8 +31,8 @@ path = "gnome-extensions/x"
 """
 
 
-class Recorder:
-    """A runner that answers from ``exit_codes`` (by flag) and remembers every call."""
+class Recorder(process.Process):
+    """A process double: ``query`` is the checker, ``execute`` the installer; both are recorded."""
 
     def __init__(self, check_exit: int = 0, install_exit: int = 0, stderr: str = "") -> None:
         self.check_exit = check_exit
@@ -40,12 +40,17 @@ class Recorder:
         self.stderr = stderr
         self.calls: list[tuple[list[str], Path, float | None, bool]] = []
 
-    def __call__(
-        self, argv: Sequence[str], *, cwd: Path, timeout: float | None, capture: bool
-    ) -> subprocess.CompletedProcess[str]:
-        self.calls.append((list(argv), cwd, timeout, capture))
-        code = self.check_exit if capture else self.install_exit
-        return subprocess.CompletedProcess(list(argv), code, stdout="", stderr=self.stderr if capture else "")
+    def query(self, argv: Sequence[str], *, timeout: float = 60.0, cwd: Path | None = None) -> process.CommandResult:
+        self.calls.append((list(argv), cwd, timeout, True))
+        return process.CommandResult(self.check_exit, "", self.stderr)
+
+    def execute(self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None) -> None:
+        self.calls.append((list(argv), cwd, None, False))
+        if self.install_exit:
+            raise process.CommandError(f"{' '.join(argv)}: exited with status {self.install_exit}")
+
+    def elevate(self, argv: Sequence[str]) -> list[str]:
+        return ["sudo", "--", *argv]
 
 
 class SystemModulePlannerTests(TempDirCase):
@@ -60,8 +65,7 @@ class SystemModulePlannerTests(TempDirCase):
 
     def candidates(self, runner: Recorder, only: frozenset[str] = frozenset()) -> list:
         ctx = Context(self.repo, self.profile, only)
-        with mock.patch.object(system_modules.os, "geteuid", return_value=1000):
-            return system_modules.build(ctx, FakeBackend(), runner=runner)
+        return system_modules.build(ctx, FakeBackend(), process=runner)
 
     def test_unsatisfied_module_is_one_root_system_action_with_the_exact_command(self) -> None:
         self.module("memguard")
@@ -74,8 +78,8 @@ class SystemModulePlannerTests(TempDirCase):
             (action.kind, action.phase, action.needs_root, action.scope),
             ("system-module", Phase.SYSTEM, True, "memguard"),
         )
-        self.assertEqual(action.describe(), "run memguard: sudo modules/memguard/install.sh --now")
-        self.assertIn("[sudo] [system-module] run memguard: sudo modules/memguard/install.sh --now", plan.render())
+        self.assertEqual(action.describe(), "run memguard: sudo -- modules/memguard/install.sh --now")
+        self.assertIn("[sudo] [system-module] run memguard: sudo -- modules/memguard/install.sh --now", plan.render())
 
     def test_checker_runs_inside_the_module_directory_without_sudo_and_with_a_timeout(self) -> None:
         self.module("memguard")
@@ -99,19 +103,14 @@ class SystemModulePlannerTests(TempDirCase):
 
     def test_a_checker_timeout_and_a_missing_checker_are_clear_failures(self) -> None:
         self.module("memguard")
-        for error, pattern in (
-            (subprocess.TimeoutExpired("x", 60), r"memguard: check .* did not finish within 60s"),
-            (FileNotFoundError(2, "No such file or directory"), r"memguard: cannot run check .*No such file"),
+        for code, stderr, pattern in (
+            (124, "x: timed out after 60 s", r"memguard: check .* did not finish within 60s"),
+            (127, "x: command not found", r"memguard: cannot run check .*command not found"),
         ):
-            with self.subTest(error=type(error).__name__):
-
-                def runner(
-                    *_args: object, _error: Exception = error, **_kwargs: object
-                ) -> subprocess.CompletedProcess[str]:
-                    raise _error
-
+            with self.subTest(code=code):
+                runner = Recorder(check_exit=code, stderr=stderr)
                 ctx = Context(self.repo, self.profile)
-                actions = system_modules.build(ctx, FakeBackend(), runner=runner)
+                actions = system_modules.build(ctx, FakeBackend(), process=runner)
                 with self.assertRaisesRegex(ActionFailed, pattern):
                     Plan.build(actions)
 
@@ -153,10 +152,9 @@ class SystemModulePlannerTests(TempDirCase):
         self.module("memguard")
 
         class Converging(Recorder):
-            def __call__(self, argv, *, cwd, timeout, capture):  # type: ignore[no-untyped-def]
-                if not capture:
-                    self.check_exit = 0
-                return super().__call__(argv, cwd=cwd, timeout=timeout, capture=capture)
+            def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+                self.check_exit = 0
+                super().execute(argv, input_text=input_text, cwd=cwd)
 
         runner = Converging(check_exit=3)
         plan = Plan.build(self.candidates(runner))
@@ -165,11 +163,11 @@ class SystemModulePlannerTests(TempDirCase):
 
         directory = self.repo / "modules/memguard"
         self.assertEqual(result.changed, 1)
-        self.assertIn((["sudo", str(directory / "install.sh"), "--now"], directory, None, False), runner.calls)
+        self.assertIn((["sudo", "--", str(directory / "install.sh"), "--now"], directory, None, False), runner.calls)
 
     def test_a_failing_installer_and_one_that_does_not_converge_both_fail(self) -> None:
         self.module("memguard")
-        with self.assertRaisesRegex(ActionFailed, r"memguard: sudo .*install\.sh --now exited 2"):
+        with self.assertRaisesRegex(ActionFailed, r"memguard: sudo -- .*install\.sh --now: exited with status 2"):
             Plan.build(self.candidates(Recorder(check_exit=3, install_exit=2))).execute()
         with self.assertRaisesRegex(ActionFailed, r"still not satisfied"):
             Plan.build(self.candidates(Recorder(check_exit=3, install_exit=0))).execute()
@@ -177,9 +175,9 @@ class SystemModulePlannerTests(TempDirCase):
     def test_root_does_not_prefix_sudo(self) -> None:
         self.module("memguard")
         ctx = Context(self.repo, self.profile)
-        with mock.patch.object(system_modules.os, "geteuid", return_value=0):
-            (action,) = system_modules.build(ctx, FakeBackend(), runner=Recorder(check_exit=3))
-        self.assertEqual(action.describe(), "run memguard: modules/memguard/install.sh --now")
+        with mock.patch.object(process.os, "geteuid", return_value=0):
+            (action,) = system_modules.build(ctx, FakeBackend(), process=process.Process())
+            self.assertEqual(action.describe(), "run memguard: modules/memguard/install.sh --now")
 
 
 class DefaultRunnerTests(TempDirCase):

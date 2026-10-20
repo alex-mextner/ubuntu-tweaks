@@ -21,7 +21,6 @@ from ubuntu_tweaks.capture.globs import GlobSet, compile_glob
 from ubuntu_tweaks.capture.plan import CapturePlan, build_plan, refusals
 from ubuntu_tweaks.capture.report import build_document, render_markdown, render_text
 from ubuntu_tweaks.capture.rules import PANEL_IDS, PANELS_TOML, Rules, load_rules
-from ubuntu_tweaks.capture.schemas import fake_catalog
 from ubuntu_tweaks.capture.secrets import key_names, scan_text, scan_value
 from ubuntu_tweaks.capture.system_scan import scan_packages
 from ubuntu_tweaks.capture.toml_io import dump_toml
@@ -144,7 +143,6 @@ def make_plan(
         Profile(case.tmp / "profile", "testbox", "flag"),
         rules,
         backend or seeded_backend(),
-        fake_catalog(SCHEMAS),
         home=home,
         only=only,
         run=fake_runner,
@@ -452,7 +450,6 @@ class SettingsScanTests(TempDirCase):
             Profile(self.tmp / "profile", "testbox", "flag"),
             load_rules(),
             backend,
-            fake_catalog(schemas),
             home=self.tmp / "home",
             only=frozenset({"power"}),
             run=fake_runner,
@@ -807,7 +804,6 @@ class CommandTests(TempDirCase):
                 Context(REPO_ROOT, Profile(profile_dir, "testbox", "flag"), only),
                 args,
                 seeded_backend(),
-                fake_catalog(SCHEMAS),
                 home=home,
                 now=NOW,
                 run=fake_runner,

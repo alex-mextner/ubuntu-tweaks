@@ -156,6 +156,10 @@ path = "/org/gnome/Ptyxis/Profiles/*/"
 schema = "org.gnome.Ptyxis.Profile"
 
 [[relocatable]]
+path = "/org/gnome/terminal/legacy/profiles:/:*/"
+schema = "org.gnome.Terminal.Legacy.Profile"
+
+[[relocatable]]
 path = "/org/gnome/nm-applet/eap/*/"
 schema = "org.gnome.nm-applet.eap"
 

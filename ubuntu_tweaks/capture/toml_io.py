@@ -5,35 +5,20 @@ Accessed via: ``plan.py`` (raw layer tables), ``commit.py`` (regenerating a file
 Assumptions: values are strings, booleans, numbers and lists of those; tables nest. Keys are
 written bare when they are valid bare keys and quoted otherwise, so a key such as ``my.key``
 round-trips as one key. Comments and ordering of an existing file are not preserved (ticket #29).
-``read_toml`` mirrors ``profile._read_toml`` (missing file = empty table, bad TOML = ``ConfigError``);
-integration can merge the two.
+Reading is ``profile.read_toml`` (missing file = empty table, bad TOML = ``ConfigError``).
 
-Public API: ``read_toml(path) -> dict``, ``dump_toml(table) -> str``.
+Public API: ``dump_toml(table) -> str``.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import tomllib
 from collections.abc import Mapping
-from pathlib import Path
 
 from ubuntu_tweaks.errors import ConfigError
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
-
-
-def read_toml(path: Path) -> dict[str, object]:
-    try:
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except FileNotFoundError:
-        return {}
-    except tomllib.TOMLDecodeError as error:
-        raise ConfigError(f"{path}: invalid TOML: {error}") from error
-    except OSError as error:
-        raise ConfigError(f"{path}: cannot read: {error.strerror or error}") from error
 
 
 def _key(name: str) -> str:

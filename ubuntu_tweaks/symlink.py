@@ -3,9 +3,9 @@
 Accessed via: ``planners/extension_links.py`` (extension directories) and ``commands/init.py``
 (the CLI link in ``~/.local/bin``).
 
-Assumptions: replacing anything that exists at the destination first *moves* it to
-``<state>/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>`` (``<state>`` is
-``$XDG_STATE_HOME`` else ``~/.local/state``), so nothing is ever lost (safety invariant 5).
+Assumptions: replacing anything that exists at the destination first copies it (``backup.backup``)
+to ``<state>/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>`` (``<state>`` is
+``$XDG_STATE_HOME`` else ``~/.local/state``) and then removes it, so nothing is ever lost (safety invariant 5).
 
 Public API:
 
@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, Phase
+from ubuntu_tweaks.backup import backup
 from ubuntu_tweaks.extension import tilde
 
 type Clock = Callable[[], datetime]
@@ -39,11 +40,6 @@ type Clock = Callable[[], datetime]
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def state_dir(env: dict[str, str] | None = None) -> Path:
-    environment = os.environ if env is None else env
-    return Path(environment.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "ubuntu-tweaks"
 
 
 def is_linked(dest: Path, source: Path) -> bool:
@@ -95,10 +91,11 @@ def describe_link(dest: Path, source: Path) -> str:
 def replace_with_symlink(dest: Path, source: Path, *, now: Clock = utc_now) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if os.path.lexists(dest):
-        stamp = now().strftime("%Y%m%dT%H%M%SZ")
-        saved = state_dir() / "backup" / stamp / str(dest.absolute()).lstrip(os.sep)
-        saved.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(dest, saved)
+        backup(dest, now=now())
+        if dest.is_dir() and not dest.is_symlink():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
     os.symlink(source, dest)
 
 

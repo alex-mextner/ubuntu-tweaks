@@ -83,7 +83,7 @@ def _validate_machine_name(name: str) -> str:
     return name
 
 
-def _read_toml(path: Path) -> TomlTable:
+def read_toml(path: Path) -> TomlTable:
     try:
         with path.open("rb") as handle:
             return tomllib.load(handle)
@@ -416,15 +416,15 @@ class Profile:
         return tuple(sorted(result, key=lambda entry: entry.rel))
 
     def load_config(self, module_defaults: Mapping[str, TomlValue] | None = None) -> Config:
-        shared = _read_toml(self.profile_toml)
-        overlay = _read_toml(self.machine_toml)
+        shared = read_toml(self.profile_toml)
+        overlay = read_toml(self.machine_toml)
         _check_modules_shape(shared, str(self.profile_toml))
         _check_modules_shape(overlay, str(self.machine_toml))
         return merge_layers([("module", module_defaults or {}), ("shared", shared), ("overlay", overlay)])
 
     def _load_union[T](self, shared: Path, overlay: Path, parse: Callable[[TomlTable, str], T]) -> T:
         """Parse each layer alone (so one layer cannot mask a typo in the other), then the union."""
-        shared_table, overlay_table = _read_toml(shared), _read_toml(overlay)
+        shared_table, overlay_table = read_toml(shared), read_toml(overlay)
         parse(shared_table, str(shared))
         parse(overlay_table, str(overlay))
         merged = merge_layers([("shared", shared_table), ("overlay", overlay_table)], union_lists=True)

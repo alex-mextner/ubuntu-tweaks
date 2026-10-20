@@ -592,7 +592,7 @@ panel files, then machine overlay) → seeds.
 | `system` (root) | `timedatectl`, `localectl` or `/etc/default/keyboard` matches | the same through sudo |
 | `system-module` (root) | a `system` module's checker exits 0 | its installer through sudo |
 | `link` | `~/.local/share/gnome-shell/extensions/<uuid>` (uuid from `metadata.json`) or `~/<path>` is a symlink to the source | `ln -sfnT` |
-| `link-replace` | same check; the destination exists as a real file/directory or a symlink elsewhere | move it to `~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>`, then `ln -sfnT`; the plan line says `backup+replace` and whether the content is identical |
+| `link-replace` | same check; the destination exists as a real file/directory or a symlink elsewhere | copy it to `~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>` (one helper, `backup.py`, shared by extension links, profile files and `capture --commit`), remove it, then `ln -sfnT`; the plan line says `backup+replace` and whether the content is identical |
 | `enable` | uuid is in the user value of `enabled-extensions` and not in `disabled-extensions` | add / remove the one item |
 | `disable` | a conflict is not in `enabled-extensions` and is in `disabled-extensions`; a retired uuid is not in `enabled-extensions` | remove / add the one item |
 | `set-key` | effective value (user value, else schema default) equals the wanted typed value | write it |

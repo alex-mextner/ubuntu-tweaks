@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 
-from ubuntu_tweaks.proc import CommandError
+from ubuntu_tweaks.process import CommandError
 
 
 def has_gi() -> bool:
