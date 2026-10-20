@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+# installed by ubuntu-tweaks/memguard -> /usr/local/sbin/swap-drain (run by swap-drain.service)
+"""swap-drain: fold stale swap back into RAM, one device at a time, only when RAM can take it.
+
+Linux never swaps pages back in on its own; `swapoff <dev>` forces them in and `swapon <dev>`
+puts the device straight back. Each run decides first (every skip names the failing
+condition), then drains under a watchdog that SIGTERMs swapoff when MemAvailable or PSI turn
+bad: the kernel's try_to_unuse stops on the pending signal and reinserts the device with the
+rest of its pages still in swap, so an abort loses nothing. Started by swap-drain.timer (every
+10 min) or `memguard swap-drain`. Spec: docs/specs/memguard.md § Swap hygiene.
+
+Exit codes: 0 drained (or --dry-run: would drain), 1 error, 2 usage/config, 10 skipped by a
+condition, 11 another drain is in progress, 12 aborted by the watchdog.
+"""
+import argparse
+import json
+import os
+import pwd
+import signal
+import subprocess
+import sys
+import time
+
+sys.path[:0] = [os.path.dirname(os.path.realpath(__file__)), "/usr/local/lib/memguard"]
+import memguard_swap as ms  # noqa: E402
+
+EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_SKIP, EXIT_BUSY, EXIT_ABORTED = 0, 1, 2, 10, 11, 12
+KILL_AFTER_S = 30          # swapoff that ignores SIGTERM this long gets SIGKILL (also stops it)
+SWAPON_TRIES, SWAPON_RETRY_S = 5, 2.0   # a failed swapon is retried: a device left off loses swap
+# Worst case after a stop: KILL_AFTER_S + tries x timeout + pauses = 30 + 40 + 8 = 78 s, inside the
+# unit's TimeoutStopSec=90, so systemd never kills the drain mid-recovery with swap left off.
+SWAPON_TIMEOUT_S = 8
+STOP = []                  # set by SIGTERM (systemctl stop swap-drain): abort like the watchdog
+
+# Runs as the desktop user (never as root: the gate is a user-writable file) and prints the
+# gate's own live-runner scan, so the drain uses the same runner list and limit as the gate.
+HEAVY_SCAN = r"""
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("heavy_op_memory_gate", sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+runners = gate.scan_live_runners()
+print(json.dumps({"limit": gate._max_live(), "runners": [f"pid {r.pid} {r.label}" for r in runners]}))
+"""
+
+
+def log(msg):
+    print(f"swap-drain: {msg}", flush=True)
+
+
+def user_home(user):
+    try:
+        return pwd.getpwnam(user).pw_dir
+    except KeyError:
+        return f"/home/{user}"
+
+
+def expand_home(path, home):
+    return home + path[1:] if path.startswith("~/") else path
+
+
+def heavy_gate_path(cfg):
+    gate = cfg["heavy_gate"]
+    if not gate:
+        return None
+    home = user_home(cfg["user"])
+    if gate != "auto":
+        return expand_home(gate, home)
+    with open(expand_home(cfg["heavy_hook"], home)) as f:
+        return json.load(f)["cmd"]
+
+
+class HeavyScanError(Exception):
+    pass
+
+
+def heavy_runners(cfg):
+    """(live runner labels, limit) from the heavy-op gate's scan; None when the scan is off
+    (heavy_gate = ""). A scan that cannot run raises HeavyScanError: the drain then skips
+    (fail closed), since it is the disruptive side and the scan is the cheap check."""
+    try:
+        gate = heavy_gate_path(cfg)
+    except (OSError, ValueError, KeyError) as e:
+        raise HeavyScanError(f"{e.__class__.__name__}: {e}") from e
+    if gate is None:
+        return None
+    argv = [sys.executable, "-c", HEAVY_SCAN, gate]
+    if os.geteuid() == 0:
+        argv = ["runuser", "-u", cfg["user"], "--"] + argv
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": user_home(cfg["user"]), "LC_ALL": "C.UTF-8"}
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=20, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise HeavyScanError(f"{e.__class__.__name__}: {e}") from e
+    try:
+        data = json.loads(r.stdout)
+        return data["runners"], cfg["heavy_max_live"] or int(data["limit"])
+    except (ValueError, KeyError, TypeError) as e:
+        err = (r.stderr.strip().splitlines() or ["no stderr"])[-1]
+        raise HeavyScanError(f"rc={r.returncode} {e.__class__.__name__}: {e}; {err}") from e
+
+
+def take_heavy_locks(cfg):
+    """Shared non-blocking flock on every heavy lock: (fds, None) or (None, why it is busy).
+    Heavy runs take these exclusively, so while we hold them a queued run waits for the drain.
+    A missing file means no heavy run is queued; any other failure to open (a symlink, not a
+    regular file, no permission) means we cannot see the lock, so the drain skips."""
+    fds = []
+    busy = None
+    for path in cfg["heavy_locks"]:
+        try:
+            fd = ms.try_lock(path, shared=True)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            busy = f"{path} cannot be checked ({e.strerror or e})"
+            break
+        if fd is None:
+            busy = f"{path} is held by a heavy run"
+            break
+        fds.append(fd)
+    if busy:
+        for held in fds:
+            os.close(held)
+        return None, busy
+    return fds, None
+
+
+def sample_fall(src, cfg):
+    """MemAvailable fall in GB/min over fall_window_s (positive = falling)."""
+    window = max(cfg["fall_window_s"], 0)
+    t0, a0 = time.monotonic(), src.snapshot().avail_kb
+    if window == 0:
+        return 0.0
+    time.sleep(window)
+    dt, a1 = time.monotonic() - t0, src.snapshot().avail_kb
+    return (a0 - a1) / ms.GB_KB / dt * 60
+
+
+def top_swap_cgroups(root, n=5):
+    rows = []
+    for path, dirs, files in os.walk(root):
+        if dirs or "memory.swap.current" not in files:
+            continue
+        try:
+            with open(os.path.join(path, "memory.swap.current")) as f:
+                val = int(f.read())
+        except (OSError, ValueError):
+            continue
+        if val > 0:
+            rows.append((val, os.path.basename(path)))
+    rows.sort(reverse=True)
+    return ", ".join(f"{name} {ms.mb(val // 1024)}" for val, name in rows[:n]) or "none"
+
+
+def in_progress(state, wall):
+    drain = ms.active_drain(state, wall)
+    if not drain:
+        return "drain already in progress (lock held)"
+    started = time.strftime("%H:%M", time.localtime(drain["started"]))
+    return (f"drain already in progress (started {started}, {ms.mb(drain.get('left_kb', 0))} left "
+            f"on {drain.get('device', '?')})")
+
+
+class Drain:
+    def __init__(self, args, cfg, src):
+        self.args, self.cfg, self.src = args, cfg, src
+        self.state = ms.read_state(args.state_dir)
+
+    def save(self, **changes):
+        self.state.update(changes)
+        ms.write_state(self.state, self.args.state_dir)
+
+    @staticmethod
+    def after_totals(snap, dev):
+        """SwapTotal/SwapFree once `dev` is back on and empty (see memguard_swap docstring)."""
+        others = [d for d in snap.devices if d.name != dev.name]
+        total = sum(d.size_kb for d in others) + dev.size_kb
+        return total, total - sum(d.used_kb for d in others)
+
+    def drain_device(self, dev):
+        """Drain one device; returns "done", "aborted" or "error". The device is on afterwards."""
+        cfg, src = self.cfg, self.src
+        started = time.time()
+        total_after, free_after = self.after_totals(src.snapshot(), dev)
+        self.save(state="draining", pid=os.getpid(), started=started, updated=started, device=dev.name,
+                  size_kb=dev.size_kb, left_kb=dev.used_kb, swap_total_after_kb=total_after,
+                  swap_free_after_kb=free_after)
+        log(f"swapoff {dev.name}: {ms.mb(dev.used_kb)} to bring back")
+        proc = subprocess.Popen([self.args.swapoff, dev.name], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, preexec_fn=lambda: os.nice(19))
+        trip, term_at = None, None
+        while True:
+            try:
+                rc = proc.wait(timeout=self.args.tick)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            snap = src.snapshot()
+            left = next((d.used_kb for d in snap.devices if d.name == dev.name), 0)
+            total_after, free_after = self.after_totals(snap, dev)
+            self.save(updated=time.time(), left_kb=left, swap_total_after_kb=total_after,
+                      swap_free_after_kb=free_after)
+            if trip is None:
+                trip = ("stop requested (SIGTERM)" if STOP else None) or \
+                    ms.watchdog_trip(snap, cfg, time.time() - started)
+                if trip:
+                    log(f"abort {dev.name}: {trip}; SIGTERM to swapoff pid {proc.pid} ({ms.mb(left)} left)")
+                    proc.send_signal(signal.SIGTERM)
+                    term_at = time.monotonic()
+            elif time.monotonic() - term_at > KILL_AFTER_S:
+                proc.kill()
+        out = (proc.stdout.read() or "").strip().replace("\n", " | ")
+        on = any(d.name == dev.name for d in src.snapshot().devices)
+        if not on:
+            argv = [self.args.swapon] + (["-p", str(dev.prio)] if dev.prio >= 0 else []) + [dev.name]
+            for attempt in range(1, SWAPON_TRIES + 1):
+                # the device is off, so nothing is left to swap in; heartbeat: active_drain()
+                # treats >30 s without an update as a dead drain
+                self.save(updated=time.time(), left_kb=0)
+                try:
+                    r = subprocess.run(argv, capture_output=True, text=True, timeout=SWAPON_TIMEOUT_S)
+                    on_rc, why = r.returncode, (r.stderr or r.stdout).strip()
+                except subprocess.TimeoutExpired:
+                    on_rc, why = None, f"no answer in {SWAPON_TIMEOUT_S} s"
+                # a swapon that timed out (or raced) may still have put the device back
+                if on_rc == 0 or any(d.name == dev.name for d in src.snapshot().devices):
+                    break
+                log(f"ERROR swapon {dev.name} failed rc={on_rc} (try {attempt}/{SWAPON_TRIES}): {why}")
+                if attempt < SWAPON_TRIES:
+                    time.sleep(self.args.swapon_retry_s)
+            else:
+                log(f"ERROR {dev.name} left OFF: run `swapon {dev.name}` by hand")
+                return "error"
+            log(f"swapon {dev.name}: back on")
+        if rc == 0 and not on:
+            return "done"
+        if trip:
+            log(f"swapoff {dev.name} stopped rc={rc} ({out or 'no output'}); device stayed on with its pages")
+            return "aborted"
+        log(f"ERROR swapoff {dev.name} rc={rc}: {out or 'no output'}")
+        return "error"
+
+    def run(self, devices, before):
+        cfg, src = self.cfg, self.src
+        t0 = time.time()
+        log(f"drain start: {ms.describe(before)}; devices "
+            f"{', '.join(f'{d.name} {ms.mb(d.used_kb)}' for d in devices)}; "
+            f"top swap holders: {top_swap_cgroups(self.args.cgroup_root)}")
+        result, done = "done", []
+        for planned in devices:
+            if STOP:
+                result = "aborted"
+                break
+            snap = src.snapshot()
+            dev = next((d for d in snap.devices if d.name == planned.name), None)
+            if dev is None or dev.used_kb == 0:
+                continue
+            need = ms.headroom_kb(cfg, snap.mem_total_kb)
+            if snap.avail_kb - dev.used_kb < need:
+                log(f"skip {dev.name} headroom: avail {ms.mb(snap.avail_kb)} - swap {ms.mb(dev.used_kb)} "
+                    f"< headroom {ms.mb(need)}")
+                continue
+            result = self.drain_device(dev)
+            done.append(dev.name)
+            if result != "done":
+                break
+        after = src.snapshot()
+        dur = time.time() - t0
+        detail = f"{ms.describe(before)} -> {ms.describe(after)}"
+        log(f"drain {result} in {dur:.0f}s ({', '.join(done) or 'no device'}): {detail}")
+        self.save(state="idle", pid=None, updated=time.time(), last_drain_finished=time.time(),
+                  last={"result": result, "devices": done, "duration_s": round(dur), "finished": time.time(),
+                        "detail": detail})
+        return {"done": EXIT_OK, "aborted": EXIT_ABORTED}.get(result, EXIT_ERROR)
+
+
+def decide(args, cfg, src, state, wall):
+    """(devices, None) when a drain should run, else (None, (reason, detail))."""
+    snap = src.snapshot()
+    fixture = args.meminfo is not None
+    # Judged twice: the cheap checks first with no fall rate, so a clear skip does not cost the
+    # fall_window_s sampling sleep; then again on the fresh snapshot with the sampled rate.
+    devices, skip = ms.memory_decision(snap, cfg, 0.0, state, wall)
+    if skip:
+        return snap, None, skip
+    if args.fall_gb_per_min is not None:
+        fall = args.fall_gb_per_min
+    else:
+        fall = 0.0 if fixture else sample_fall(src, cfg)
+        snap = src.snapshot()
+    devices, skip = ms.memory_decision(snap, cfg, fall, state, wall)
+    if skip:
+        return snap, None, skip
+    try:
+        live = heavy_runners(cfg)
+    except HeavyScanError as e:
+        return snap, None, ("heavy-run", f"live-runner scan unavailable ({e}); "
+                                         'heavy_gate = "" in memguard.toml drains without it')
+    if live is not None:
+        runners, limit = live
+        if len(runners) >= limit:
+            return snap, None, ("heavy-run", f"{len(runners)} heavy runner(s) live, limit {limit}: "
+                                             + "; ".join(runners))
+    return snap, devices, None
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="swap-drain", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog="Exit codes: 0 drained / would drain, 1 error, 2 usage, "
+                                       "10 skipped, 11 in progress, 12 aborted.")
+    p.add_argument("--dry-run", action="store_true", help="print the decision, execute nothing")
+    p.add_argument("--config", default=ms.CONFIG_PATH)
+    p.add_argument("--meminfo", help="fixture instead of /proc/meminfo")
+    p.add_argument("--psi", help="fixture instead of /proc/pressure/memory")
+    p.add_argument("--swaps", help="fixture instead of /proc/swaps")
+    p.add_argument("--now", type=float, help="epoch seconds to judge the cooldown against")
+    p.add_argument("--state-dir", default=ms.STATE_DIR,
+                   help=f"dir of {ms.STATE_NAME} and the drain lock {ms.LOCK_NAME} (default %(default)s)")
+    p.add_argument("--fall-gb-per-min", type=float, help="use this MemAvailable fall rate instead of sampling")
+    p.add_argument("--cgroup-root", default="/sys/fs/cgroup")
+    p.add_argument("--swapoff", default="/usr/sbin/swapoff", help=argparse.SUPPRESS)
+    p.add_argument("--swapon", default="/usr/sbin/swapon", help=argparse.SUPPRESS)
+    p.add_argument("--tick", type=float, default=1.0, help=argparse.SUPPRESS)
+    p.add_argument("--swapon-retry-s", type=float, default=SWAPON_RETRY_S, help=argparse.SUPPRESS)
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    lock_path = os.path.join(args.state_dir, ms.LOCK_NAME)
+    try:
+        cfg = ms.load_config(args.config)
+    except (ValueError, OSError) as e:
+        log(f"ERROR config: {e}")
+        return EXIT_USAGE
+    src = ms.Sources(args.meminfo or "/proc/meminfo", args.psi or "/proc/pressure/memory",
+                     args.swaps or "/proc/swaps")
+    wall = args.now if args.now is not None else time.time()
+
+    if not args.dry_run:
+        os.makedirs(os.path.dirname(lock_path), mode=0o755, exist_ok=True)
+    try:
+        lock = ms.try_lock(lock_path, shared=args.dry_run, create=not args.dry_run)
+    except FileNotFoundError:
+        lock = -1                               # dry-run, no drain ever ran: nothing holds it
+    except OSError as e:                        # e.g. a foreign file planted at the lock path
+        log(f"ERROR lock {lock_path}: {e}")
+        return EXIT_ERROR
+    if lock is None:
+        log(in_progress(ms.read_state(args.state_dir), wall))
+        return EXIT_BUSY
+    state = ms.read_state(args.state_dir)
+    signal.signal(signal.SIGTERM, lambda *_: STOP.append(True))
+
+    snap, devices, skip = decide(args, cfg, src, state, wall)
+    heavy_fds = None
+    if not skip:
+        heavy_fds, busy = take_heavy_locks(cfg)
+        if busy:
+            skip = ("heavy-lock", busy)
+    prefix = "dry-run: " if args.dry_run else ""
+    if skip:
+        log(f"{prefix}skip {skip[0]}: {skip[1]} ({ms.describe(snap)})")
+        action = "skip"
+    else:
+        log(f"{prefix}{'would drain' if args.dry_run else 'drain'} "
+            f"{', '.join(f'{d.name} {ms.mb(d.used_kb)}' for d in devices)} ({ms.describe(snap)})")
+        action = "drain"
+    if args.dry_run:
+        return EXIT_SKIP if skip else EXIT_OK
+    reason, detail = skip or ("ok", "")
+    ms.write_state({**state, "state": "idle", "pid": None,
+                    "last_decision": {"at": time.time(), "action": action, "reason": reason, "detail": detail}},
+                   args.state_dir)
+    if STOP:
+        log("stop requested (SIGTERM) before the drain started")
+        return EXIT_SKIP
+    if skip:
+        return EXIT_SKIP
+    drain = Drain(args, cfg, src)
+    try:
+        return drain.run(devices, snap)
+    except Exception as e:                      # the state file must not stay "draining"
+        log(f"ERROR {e.__class__.__name__}: {e}")
+        drain.save(state="idle", pid=None, updated=time.time(),
+                   last={"result": "error", "detail": str(e), "finished": time.time()})
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())
