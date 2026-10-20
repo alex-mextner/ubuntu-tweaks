@@ -126,6 +126,9 @@ class LocaleAction(_RootAction):
         return text + (f", keeping {' '.join(kept)}" if kept else "")
 
     def run(self) -> None:
+        if self._assignments() is None:
+            # set-locale replaces the whole set; without knowing the current one it would drop LC_*.
+            raise UbuntuTweakError("cannot read the current locale (localectl status failed); not changing it")
         argv = ["localectl", "set-locale", f"LANG={self._wanted}", *self._kept()]
         self._process.execute(self._process.elevate(argv))
 

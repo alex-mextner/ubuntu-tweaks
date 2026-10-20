@@ -121,6 +121,15 @@ class SystemRootTests(ProfileCase):
         self.assertEqual(len(Plan.build(self.build())), 0)
         self.assertIn("LC_TIME=de_DE.UTF-8", self.machine.locale_status)  # the other locale settings survive
 
+    def test_locale_is_not_changed_when_the_current_one_cannot_be_read(self) -> None:
+        write(self.root / "system.toml", 'locale = "en_US.UTF-8"\n')
+        (action,) = self.build()
+        self.machine.query = lambda argv, *, timeout=60.0: CommandResult(1, "", "dbus down")  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(UbuntuTweakError, "not changing it"):
+            action.run()
+        self.assertEqual(self.machine.executed, [])
+
     def test_no_sudo_skips_root_actions_and_says_so(self) -> None:
         write(self.root / "system.toml", 'timezone = "Europe/Belgrade"\n')
         plan = Plan.build(self.build())

@@ -149,7 +149,7 @@ class FileLinkAction(Action):
         if destination.is_symlink():
             target = os.readlink(destination)
             resolved = os.path.normpath(os.path.join(destination.parent, target))
-            return "linked" if resolved == os.path.normpath(self._source) else "symlink"
+            return "linked" if resolved == os.path.normpath(os.path.abspath(self._source)) else "symlink"
         return "file" if os.path.lexists(destination) else "missing"
 
     @property
