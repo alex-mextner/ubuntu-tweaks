@@ -351,6 +351,7 @@ channel = "release"
 exclude = ["/org/gnome/shell/app-picker-layout"]            # never captured
 machine = ["/org/gnome/settings-daemon/plugins/power/**"]   # captured into machines/<machine>/
 include_files = [".config/mimeapps.list", ".config/gtk-3.0/bookmarks"]   # file allow-list
+machine_files = [".config/monitors.xml"]                      # adopted into machines/<machine>/files/
 ```
 
 Disabling a module stops managing it; it does not uninstall. `ubuntu-tweak` never edits the
@@ -402,36 +403,45 @@ as the user from the `flathub` remote. Installed means: `dpkg-query` status `ii`
 
 Every GNOME Settings panel gets an explicit disposition. `S` = shared, `M` = per-machine
 overlay, `X` = never captured (secret, identity, hardware), `F` = file adapter, `R` = root
-adapter. The exact dconf path globs per panel are finalized in `ubuntu_tweaks/panels.toml`.
+adapter. The panel file ids are the first column; `ubuntu_tweaks/panels.toml` holds the same
+table plus the ordered dconf path globs (`*` is one path segment, `**` any number; **first
+matching rule wins**, specific before general) and a unit test fails when this table and
+`panels.toml` disagree.
 
-| Panel (file id) | Source | Disp. |
+| Panel (file id) | dconf paths and files (see `panels.toml` for the exact globs) | Disp. |
 |---|---|---|
-| network (Wi-Fi, Ethernet, VPN, proxy) | NetworkManager connections hold secrets; `org.gnome.system.proxy` | proxy `S/M`; connections `X` |
-| bluetooth | pairings are machine hardware | `X` |
-| background | `org.gnome.desktop.background`, screensaver picture | `S` (absolute paths are flagged) |
-| appearance | `org.gnome.desktop.interface` (theme, color-scheme, accent, fonts, cursor), dash/dock, `org.gnome.shell.extensions.*` Ubuntu dock | `S` |
-| notifications | `org.gnome.desktop.notifications` (+ per-app children) | `S` |
-| search | `org.gnome.desktop.search-providers`, `org.freedesktop.Tracker3.*` | `S` |
-| multitasking | `org.gnome.mutter`, `org.gnome.desktop.wm.preferences`, hot corner, workspaces | `S` |
-| applications / default apps | `~/.config/mimeapps.list` (`F`), per-app permissions in flatpak | `F` |
-| privacy | `org.gnome.desktop.privacy`, `org.gnome.desktop.screensaver`, location | `S`; location coordinates `M` |
-| online-accounts | tokens, identities | `X` |
-| sharing | `org.gnome.desktop.remote-desktop.*` (RDP credentials), file sharing | settings `S`; credentials `X` |
-| sound | `org.gnome.desktop.sound`; device choice lives in PipeWire state | event sounds `S`; devices `M` |
-| power | `org.gnome.settings-daemon.plugins.power`, `org.gnome.desktop.session`, battery-specific keys | `M` by default (lid and idle differ per machine); profile mode `M` |
-| displays | `~/.config/monitors.xml`, night light keys, `org.gnome.settings-daemon.plugins.color` | `monitors.xml` `F`+`M`; night light `S`, coordinates `M` |
-| mouse-touchpad | `org.gnome.desktop.peripherals.{mouse,touchpad,trackball}` | `M` (laptop vs desktop) |
-| keyboard | `org.gnome.desktop.input-sources`, `org.gnome.desktop.wm.keybindings`, `org.gnome.settings-daemon.plugins.media-keys` (custom bindings), `org.gnome.mutter.keybindings`, tiling-assistant | `S` |
-| printers | CUPS queues, machine and network specific | `X` |
-| removable-media | `org.gnome.desktop.media-handling` | `S` |
-| color | ICC profiles per display | `M` / `X` |
-| region-language | `org.gnome.system.locale`, `org.gnome.desktop.interface clock-format`; system locale | settings `S`; `locale` `R` |
-| accessibility | `org.gnome.desktop.a11y.*`, `org.gnome.desktop.interface toolkit-accessibility` | `S` |
-| users | accounts | `X` |
-| date-time | `org.gnome.desktop.interface clock-*`, `org.gnome.desktop.datetime`; timezone | clock `S`; `timezone` `R`+`M` |
-| about | hostname, device name | `X` |
-| ubuntu-desktop | Ubuntu Dock, desktop icons (ding), tiling-assistant, app grid folders | `S` |
-| shell-extensions | enabled/disabled lists and per-extension schemas | handled by *modules*, not by panel files |
+| `network` | `/system/proxy/**`; `/org/gnome/nm-applet/**` and NetworkManager connections are `identity`, never captured | `S/M` |
+| `bluetooth` | `/org/gnome/bluetooth/**`, `/org/blueman/**`: pairings are hardware | `X` |
+| `background` | `/org/gnome/desktop/background/**`, the screensaver picture and colours; an absolute path outside `/usr/share` is flagged and goes to the machine overlay | `S` |
+| `appearance` | `/org/gnome/desktop/interface/**` (theme, color-scheme, accent, fonts, cursor, icons) except the keys other panels claim; `user-theme` | `S` |
+| `notifications` | `/org/gnome/desktop/notifications/**` including per-app children | `S` |
+| `search` | `/org/gnome/desktop/search-providers/**`, Tracker | `S` |
+| `multitasking` | `/org/gnome/mutter/**`, `/org/gnome/desktop/wm/preferences/**`, `enable-hot-corners`, shell overrides and switchers | `S` |
+| `apps` | `~/.config/mimeapps.list` (file adapter) and the preferences of GNOME core apps: Files, Ptyxis, Papers, File Roller, Clocks, Calendar, GTK file chooser | `F` (+`S` keys) |
+| `privacy` | `/org/gnome/desktop/privacy/**`, `/org/gnome/desktop/screensaver/**` (lock), `/org/gnome/system/location/**`, lockdown | `S` |
+| `online-accounts` | `/org/gnome/online-accounts/**`: tokens and identities | `X` |
+| `sharing` | `/org/gnome/desktop/remote-desktop/**`, file sharing; TLS keys, certificates and credentials are `secret` | `S` (credentials `X`) |
+| `sound` | `/org/gnome/desktop/sound/**`, the startup sound; keys named `*-device*`, `default-sink*`, `default-source*` go to the machine overlay | `S/M` |
+| `power` | `/org/gnome/settings-daemon/plugins/power/**`, `/org/gnome/desktop/session/**`, `last-selected-power-profile`, `show-battery-percentage` | `M` |
+| `displays` | night light and the colour plugin (`/org/gnome/settings-daemon/plugins/color/**`); `night-light-last-coordinates` goes to the machine overlay; `~/.config/monitors.xml` (file adapter, machine overlay) | `S/M/F` |
+| `mouse-touchpad` | `/org/gnome/desktop/peripherals/{mouse,touchpad,trackball}/**` | `M` |
+| `keyboard` | input sources, `wm/keybindings`, media-keys (custom bindings), `mutter/keybindings`, `shell/keybindings`, global shortcuts, tiling-assistant `tile-*`/`restore-window`/`center-window`/… bindings, IBus, peripherals keyboard | `S` |
+| `printers` | `/org/gnome/cups/**`: queues are machine and network specific | `X` |
+| `removable-media` | `/org/gnome/desktop/media-handling/**` | `S` |
+| `color` | `/org/gnome/color-manager/**`: ICC profiles belong to the display | `X` |
+| `region-language` | `/org/gnome/system/locale/**`; the system `locale` is a root adapter (`system.toml`) | `S/R` |
+| `accessibility` | `/org/gnome/desktop/a11y/**`, `toolkit-accessibility`, `text-scaling-factor` | `S` |
+| `users` | `/org/freedesktop/accounts/**`: accounts | `X` |
+| `date-time` | `/org/gnome/desktop/datetime/**`, `interface/clock-*` (including `clock-format`), `/org/gnome/shell/world-clocks/**`; the `timezone` is a root adapter in the machine overlay's `system.toml` | `S/R` |
+| `about` | hostname and device name are not in dconf; `/etc/hostname` is never captured | `X` |
+| `ubuntu-desktop` | Ubuntu Dock (`dash-to-dock`), `ding`, tiling-assistant behaviour, app grid folders, `favorite-apps` | `S` |
+| `shell-extensions` | enabled/disabled lists and every other extension schema: handled by *modules*, not by panel files (`excluded-by-rule`) | modules |
+
+Decisions where the contract listed a key twice: `clock-format` belongs to `date-time` (where
+GNOME Settings shows it); tiling-assistant's bindings go to `keyboard` and its behaviour keys
+to `ubuntu-desktop`; the Dock lives in `ubuntu-desktop`, not `appearance`; the Settings
+*Wellbeing* panel has no id in this table, so its keys land in the `unmapped` bucket until a
+panel is added.
 
 ### Per-machine
 
@@ -439,7 +449,12 @@ adapter. The exact dconf path globs per panel are finalized in `ubuntu_tweaks/pa
 - Default `machine` rules ship with the engine (`ubuntu_tweaks/capture/defaults.toml`): power
   plugin keys including `battery-*`, `peripherals/touchpad`, `peripherals/mouse`,
   `night-light-last-coordinates`, `last-selected-power-profile`, sound device keys, absolute
-  filesystem paths outside `/usr/share`, anything under `monitors.xml`.
+  filesystem paths outside `/usr/share` (a string leaf of the value that starts with a real
+  filesystem root such as `/home` or `/opt`, or a `file:///` URI to one; a dconf object path
+  like `/org/gnome/.../custom0/` is not a file),
+  `~/.config/monitors.xml`. A panel whose disposition is `M` (`power`, `mouse-touchpad`) also
+  routes its keys to the overlay. An explicit `machine` match protects a key from the `state`
+  globs, a panel `M` does not.
 - `ubuntu-tweak machine` prints the detected name, whether the overlay exists, and which
   module setting, panel file and linked file comes from the overlay and which from the shared
   profile. A panel file present in both is reported as `overlay over shared`; a linked file
@@ -451,36 +466,111 @@ adapter. The exact dconf path globs per panel are finalized in `ubuntu_tweaks/pa
 `ubuntu-tweak capture` is the read-only inventory of the live system, printed as the exact
 diff the profile would receive. With `--commit` it writes into the profile working tree and
 does not run `git commit`: the user reviews `git diff` in `.files` (the second preview) and
-commits through the repo's PR flow. `--report FILE.md` writes the same report as markdown.
-`--only <panel,…>` limits panels.
+commits through the repo's PR flow. `--report FILE.md` writes the same report as markdown
+(full values; the terminal clips a cell at 80 characters). `-v` also lists entries equal to
+the profile, already-linked files and every cache-state candidate. `--only` takes panel ids
+(and `shell-extensions`, to audit the extension skip rules) and the section names `files`,
+`packages`, `system`; a section not named is not computed and an unknown name is invalid
+config (exit 2).
 
 Sections, in this order:
 
 1. **Settings → `settings/<panel>.ini`** (shared) and **→ `machines/<machine>/settings/…`**
    (machine): per panel, per dconf path, every key that has a user value differing from the
-   schema default, or whose effective value is overridden by the keyfile backend. Marks: `+`
-   new in the profile, `~` differs from the profile value, `=` already in the profile
-   (hidden unless `-v`).
-2. **Files → `files/…`**: only allow-list candidates (`include_files` plus engine built-ins:
+   schema default. Marks: `+` new in the profile, `~` differs from the profile value (the old
+   value is shown), `=` already in the profile (hidden unless `-v`). Values are read through
+   the schema (typed), written as GVariant text. **Keyfile overrides**:
+   `~/.config/glib-2.0/settings/keyfile` is parsed through the schema; a key it sets to a value
+   different from the dconf value (or the default) is listed in its own table with the keyfile
+   value, the dconf-side value and whether the override is the effective value in the capturing
+   process. Overrides are never written into a panel file (that would freeze them into dconf);
+   a captured key that an override also touches carries the `override` note. The keyfile
+   itself is an allow-listed file (section 2).
+2. **Files → `files/…`**: only allow-list candidates (`include_files` plus the built-ins
    `mimeapps.list`, `user-dirs.dirs`, `gtk-3.0/bookmarks`, `gtk-3.0/settings.ini`,
-   `gtk-4.0/settings.ini`, `glib-2.0/settings/keyfile`, `monitors.xml` (machine),
-   `autostart/*.desktop`, hand-written dotfiles the user chose), plus a `candidates` listing
-   of everything else in `~/.config` and `$HOME` dotfiles classified `portable-config` /
-   `secret-bearing` / `cache-state` / `mixed` with the reason, so the user can promote an
-   entry by adding it to `include_files`. Nothing outside the allow-list is ever adopted.
-   Each adopted file shows size, destination, the `backup+symlink` action and
-   `identical`/`differs` against the profile copy.
-3. **Packages** (a `packages.toml` proposal) and **System** (a `system.toml` proposal).
-4. **Skipped**, with a reason class: `secret` (online-accounts, gsconnect certificates, a
-   value matching a PEM/token/email pattern; values are masked in the report), `identity`,
-   `hardware`, `state` (window geometry, recents, app-picker-layout, `last-*` timestamps),
-   `no-schema`, `excluded-by-rule`. Counts per class plus each key.
-5. A totals line; exit 0. `--commit` refuses with exit 5 ("refused: secret finding") when
-   the output scan finds anything.
+   `gtk-4.0/settings.ini`, `glib-2.0/settings/keyfile`, `monitors.xml` (machine overlay),
+   `autostart/*.desktop`, hand-written dotfiles the user chose; globs relative to `$HOME`, an
+   absolute path or `..` is refused with exit 5), plus a `candidates` listing of everything
+   else in `~/.config` and the `$HOME` dotfiles with a class and a reason (below), so the user
+   can promote an entry by adding it to `include_files`. Nothing outside the allow-list is
+   ever adopted. Each adopted file shows size, destination, the `backup+symlink` action and
+   `new` / `identical` / `differs (+a -b lines)` against the profile copy; a file that is
+   already a symlink into the profile is `linked` (its profile copy is still scanned for
+   secrets), a dangling link into the profile, a symlink elsewhere, a file over 512 KiB, a
+   non-UTF-8 or an unreadable file is listed as *not adopted* with the reason.
+3. **Packages** (a `packages.toml` proposal: `apt-mark showmanual` minus the installer
+   baseline, minus `required`/`important` packages and the `[packages] ignore` globs; snaps
+   without base and seeded ones; flatpak apps) and **System** (a `system.toml` proposal:
+   timezone into the machine overlay, locale and console keyboard shared).
+4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (window
+   geometry, recents, app-picker-layout, `last-*` timestamps), `no-schema`,
+   `excluded-by-rule`; counts per class plus each key and its reason, never its value. The
+   **`unmapped`** bucket lists user-valued keys that no panel rule claims (nothing is captured
+   for them), so the user sees what the table misses. Keys equal to the schema default are
+   only counted.
+5. A totals line; exit 0. `--commit` refuses with exit 5 (`refused: secret finding`) when the
+   output scan finds anything, and writes nothing.
+
+Every dconf key that has a user value is accounted for exactly once (captured, skipped,
+unmapped or at default); the totals line carries the number of user keys in scope (with
+`--only`, only the selected panels' keys are counted) so this is
+checkable. Decision order for one key: profile `exclude` → built-in `secret`/`identity`
+exclusion globs → the panel rule (a `skip` rule gives its own class) → `state` (unless an
+explicit `machine` rule claims the key) → no schema → value secret scan → no panel
+(`unmapped`) → target (machine when a machine rule, an `M` panel or an absolute path in the
+value says so). The `state` globs never apply under `[state_keep]` (keybindings, privacy,
+accessibility, interface, peripherals, window-manager preferences, mutter and tiling-assistant
+keys: names such as `activate-window-menu`, `dwell-time` or `remember-recent-files` look like
+state but are preferences). A key already set in the machine overlay's panel file is captured
+into the overlay (the overlay wins at apply, so a shared write would never take effect). A
+value in the keyfile-override
+table is masked when its key is excluded by the profile, a built-in `secret`/`identity`/
+`hardware` rule or a panel rule of such a class, or when it matches a secret pattern.
+
+`system.toml` items are compared with the layer they are written to: the timezone always goes
+to the machine overlay; locale and keyboard go to the shared file unless the overlay already
+sets that key (a shared write would never take effect), in which case they replace it there.
+
+**Secret scan.** Patterns: PEM blocks, API tokens (`ghp_`/`gho_`/…, `github_pat_`, `sk-`,
+`AKIA`, `xox*`, `glpat-`, `AIza`, `npm_`), JWTs, e-mail addresses, credentials in URLs, long
+hex (40+) and mixed-case base64 (40+, at most two `/`, so a long file path is not a token)
+runs → class `secret`; private LAN addresses → class
+`identity`. The scan runs on every dconf value, every adopted file and, at `--commit`, on the
+exact text about to be written (the merged panel files, `packages.toml`, `system.toml`). A
+hit in a dconf value skips the key; a hit in an adopted file or in the output refuses the
+commit. A finding carries only its kind and line number, so reports and errors never contain
+the matched text. E-mail matches are ignored for the keys listed in `[secrets]
+email_exempt_keys` (`enabled-extensions`, `disabled-extensions`: extension uuids look like
+addresses).
+
+**Candidate classes** (decided from name, size, extension and the *names* of keys inside small
+text files; values are scanned but never printed): `secret-bearing` (credential-looking file
+name, a credential-store or browser-profile directory, or a secret pattern inside),
+`cache-state` (binary, over 64 KiB, empty, log/db/lock/history/backup names, cache
+directories), `mixed` (credential-looking key names without a secret value, or a directory
+with 60+ files: state and config interleaved), `portable-config` (everything else: small
+text). Directories named in `secret_dirs`, `cache_dirs` or `mixed_dirs` (`~/.local`, which holds
+the keyrings) are one row and are never read.
+
+**`--commit`** checks everything first and writes only then: panel files are merged key by key
+into the existing file (keys the live system no longer has stay, `~` values are replaced) and
+written atomically; an adopted file is copied into `files/` (or `machines/<machine>/files/`),
+the original is copied to the backup directory (invariant 5) and replaced atomically by an
+absolute symlink to the profile copy, so a failure before the last step leaves the original
+untouched; `packages.toml` gets the proposed names added (sorted union) and `system.toml`
+the proposed values; both are regenerated from the parsed file, so their comments are not
+preserved (ticket #29). Before anything is written the commit refuses (exit 5, nothing written)
+a directory that resolves outside `$HOME` or the profile, a destination that is a symlink or a
+directory, and an adopted file whose bytes differ from the ones scanned for the preview: what
+is written is exactly what was shown. Each file is written atomically; a failure part-way
+stops at that file and a rerun finishes the rest. The command never runs git.
 
 Selection is deterministic rules (engine defaults plus `[capture]` in the profile), not an
 interactive picker, so a preview is reproducible and reviewable and the rules live in the
-repo.
+repo. The profile's `[capture]` takes `exclude` (globs, `excluded-by-rule`, checked first),
+`machine` (globs), `include_files` and `machine_files` (`$HOME`-relative globs); an unknown
+key is invalid config. A profile cannot weaken the built-in `secret`/`identity`/`hardware`
+exclusions: they are evaluated before anything the profile adds.
 
 ### Plan and actions
 

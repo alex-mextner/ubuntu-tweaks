@@ -1,0 +1,380 @@
+# The panel table `ubuntu-tweak capture` sorts dconf keys with.
+#
+# [panels.<id>]  one entry per GNOME Settings panel; <id> is the settings/<id>.ini file name.
+#   title        what the panel holds
+#   disposition  S shared, M per-machine overlay, X never captured, F file adapter, R root adapter
+#                (a combination such as "S/M" means the rules below split the panel)
+# [[rule]]       ordered, FIRST MATCH WINS. `paths` are globs over the full dconf key path
+#                (`*` = one path segment, `**` = any number of segments, `?` = one character).
+#   panel        panel id (or "shell-extensions": module presets, not a panel file)
+#   to           "shared" | "machine" | "skip"
+#   class        for to = "skip": secret | identity | hardware | state | excluded-by-rule
+#   reason       shown in the report for skipped keys
+# [[relocatable]] a relocatable schema cannot be found from its dconf path alone, so its path
+#   pattern is listed with the schema id; `capture` reads such keys through
+#   Gio.Settings.new_with_path.
+
+[panels.network]
+title = "Wi-Fi, Ethernet, VPN, proxy"
+disposition = "S/M"
+note = "proxy is captured; NetworkManager connections hold secrets and are never captured"
+
+[panels.bluetooth]
+title = "pairings and adapters"
+disposition = "X"
+note = "machine hardware"
+
+[panels.background]
+title = "wallpaper and lock-screen picture"
+disposition = "S"
+note = "absolute picture paths outside /usr/share are flagged and go to the machine overlay"
+
+[panels.appearance]
+title = "theme, color scheme, accent, fonts, cursor, icons"
+disposition = "S"
+
+[panels.notifications]
+title = "notification settings and per-application children"
+disposition = "S"
+
+[panels.search]
+title = "search providers, Tracker"
+disposition = "S"
+
+[panels.multitasking]
+title = "mutter, window manager preferences, hot corner, workspaces"
+disposition = "S"
+
+[panels.apps]
+title = "default applications (mimeapps.list is a file adapter) and application preferences"
+disposition = "F"
+note = "GNOME core apps' preferences (Files, Papers, Ptyxis, File Roller, ...) land here"
+
+[panels.privacy]
+title = "screen lock, diagnostics, location"
+disposition = "S"
+
+[panels.online-accounts]
+title = "tokens and identities"
+disposition = "X"
+
+[panels.sharing]
+title = "remote desktop, file sharing"
+disposition = "S"
+note = "RDP credentials, TLS keys and certificates are never captured"
+
+[panels.sound]
+title = "event sounds, startup sound"
+disposition = "S/M"
+note = "audio device choice is per machine"
+
+[panels.power]
+title = "power plugin, idle, lid, profile"
+disposition = "M"
+note = "lid and idle behaviour differ per machine"
+
+[panels.displays]
+title = "night light, color plugin; monitors.xml is a file adapter"
+disposition = "S/M/F"
+note = "night light settings are shared, coordinates and monitors.xml are per machine"
+
+[panels.mouse-touchpad]
+title = "mouse, touchpad, trackball"
+disposition = "M"
+note = "laptop versus desktop"
+
+[panels.keyboard]
+title = "input sources, shortcuts, custom bindings, tiling-assistant bindings"
+disposition = "S"
+
+[panels.printers]
+title = "CUPS queues"
+disposition = "X"
+note = "machine and network specific"
+
+[panels.removable-media]
+title = "automount and autorun"
+disposition = "S"
+
+[panels.color]
+title = "ICC profiles per display"
+disposition = "X"
+note = "tied to the display hardware"
+
+[panels.region-language]
+title = "locale and formats"
+disposition = "S/R"
+note = "the system locale is a root adapter (system.toml); clock-format lives in date-time"
+
+[panels.accessibility]
+title = "a11y, toolkit-accessibility, text scaling"
+disposition = "S"
+
+[panels.users]
+title = "accounts"
+disposition = "X"
+
+[panels.date-time]
+title = "clock, world clocks, datetime"
+disposition = "S/R"
+note = "the timezone is a root adapter and goes to the machine overlay's system.toml"
+
+[panels.about]
+title = "hostname, device name"
+disposition = "X"
+note = "not stored in dconf; /etc/hostname is never captured"
+
+[panels.ubuntu-desktop]
+title = "Ubuntu Dock, desktop icons (ding), tiling-assistant behaviour, app grid folders, dash favorites"
+disposition = "S"
+
+[panels.shell-extensions]
+title = "enabled/disabled lists and per-extension schemas"
+disposition = "modules"
+note = "handled by modules (hyperdock preset, enabled-extensions edits), not by panel files"
+
+# ---------------------------------------------------------------- relocatable schemas
+
+[[relocatable]]
+path = "/org/gnome/desktop/notifications/application/*/"
+schema = "org.gnome.desktop.notifications.application"
+
+[[relocatable]]
+path = "/org/gnome/desktop/app-folders/folders/*/"
+schema = "org.gnome.desktop.app-folders.folder"
+
+[[relocatable]]
+path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/*/"
+schema = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
+
+[[relocatable]]
+path = "/org/gnome/settings-daemon/global-shortcuts/*/"
+schema = "org.gnome.settings-daemon.global-shortcuts.application"
+
+[[relocatable]]
+path = "/org/gnome/Ptyxis/Profiles/*/"
+schema = "org.gnome.Ptyxis.Profile"
+
+[[relocatable]]
+path = "/org/gnome/nm-applet/eap/*/"
+schema = "org.gnome.nm-applet.eap"
+
+[[relocatable]]
+path = "/org/gnome/portal/filechooser/*/"
+schema = "org.gnome.portal.filechooser"
+
+# ---------------------------------------------------------------- rules (first match wins)
+
+# -- keys that never leave the machine
+[[rule]]
+panel = "bluetooth"
+to = "skip"
+class = "hardware"
+reason = "Bluetooth pairings are machine hardware"
+paths = ["/org/gnome/bluetooth/**", "/org/blueman/**"]
+
+[[rule]]
+panel = "online-accounts"
+to = "skip"
+class = "secret"
+reason = "online accounts: tokens and identities"
+paths = ["/org/gnome/online-accounts/**"]
+
+[[rule]]
+panel = "network"
+to = "skip"
+class = "identity"
+reason = "NetworkManager connection data"
+paths = ["/org/gnome/nm-applet/**"]
+
+[[rule]]
+panel = "printers"
+to = "skip"
+class = "hardware"
+reason = "CUPS queues are machine and network specific"
+paths = ["/org/gnome/cups/**"]
+
+[[rule]]
+panel = "color"
+to = "skip"
+class = "hardware"
+reason = "ICC profiles are tied to the display"
+paths = ["/org/gnome/color-manager/**"]
+
+[[rule]]
+panel = "users"
+to = "skip"
+class = "identity"
+reason = "accounts"
+paths = ["/org/freedesktop/accounts/**"]
+
+[[rule]]
+panel = "shell-extensions"
+to = "skip"
+class = "excluded-by-rule"
+reason = "extension settings and enable lists belong to modules (modules/<name>), not to panel files"
+paths = [
+  "/org/gnome/shell/enabled-extensions",
+  "/org/gnome/shell/disabled-extensions",
+  "/org/gnome/shell/extensions/dash2dock-lite/**",
+  "/org/gnome/shell/extensions/hyperdock/**",
+]
+
+# -- panels, specific before general
+[[rule]]
+panel = "network"
+to = "shared"
+paths = ["/system/proxy/**"]
+
+[[rule]]
+panel = "background"
+to = "shared"
+paths = [
+  "/org/gnome/desktop/background/**",
+  "/org/gnome/desktop/screensaver/picture-*",
+  "/org/gnome/desktop/screensaver/primary-color",
+  "/org/gnome/desktop/screensaver/secondary-color",
+  "/org/gnome/desktop/screensaver/color-shading-type",
+]
+
+[[rule]]
+panel = "privacy"
+to = "shared"
+paths = ["/org/gnome/desktop/privacy/**", "/org/gnome/desktop/screensaver/**", "/org/gnome/system/location/**", "/org/gnome/desktop/lockdown/**"]
+
+[[rule]]
+panel = "power"
+to = "machine"
+paths = [
+  "/org/gnome/settings-daemon/plugins/power/**",
+  "/org/gnome/desktop/session/**",
+  "/org/gnome/shell/last-selected-power-profile",
+  "/org/gnome/desktop/interface/show-battery-percentage",
+]
+
+[[rule]]
+panel = "mouse-touchpad"
+to = "machine"
+paths = ["/org/gnome/desktop/peripherals/mouse/**", "/org/gnome/desktop/peripherals/touchpad/**", "/org/gnome/desktop/peripherals/trackball/**"]
+
+[[rule]]
+panel = "keyboard"
+to = "shared"
+paths = [
+  "/org/gnome/desktop/peripherals/keyboard/**",
+  "/org/gnome/desktop/input-sources/**",
+  "/org/gnome/desktop/wm/keybindings/**",
+  "/org/gnome/settings-daemon/plugins/media-keys/**",
+  "/org/gnome/settings-daemon/global-shortcuts/**",
+  "/org/gnome/mutter/keybindings/**",
+  "/org/gnome/mutter/wayland/keybindings/**",
+  "/org/gnome/shell/keybindings/**",
+  "/org/gnome/shell/extensions/tiling-assistant/tile-*",
+  "/org/gnome/shell/extensions/tiling-assistant/restore-window",
+  "/org/gnome/shell/extensions/tiling-assistant/center-window",
+  "/org/gnome/shell/extensions/tiling-assistant/toggle-tiling-popup",
+  "/org/gnome/shell/extensions/tiling-assistant/activate-window-layout*",
+  "/org/gnome/shell/extensions/tiling-assistant/search-popup-layout",
+  "/org/gnome/shell/extensions/tiling-assistant/auto-tile",
+  "/desktop/ibus/**",
+]
+
+[[rule]]
+panel = "multitasking"
+to = "shared"
+paths = [
+  "/org/gnome/mutter/**",
+  "/org/gnome/desktop/wm/preferences/**",
+  "/org/gnome/desktop/interface/enable-hot-corners",
+  "/org/gnome/shell/overrides/**",
+  "/org/gnome/shell/app-switcher/**",
+  "/org/gnome/shell/window-switcher/**",
+]
+
+[[rule]]
+panel = "accessibility"
+to = "shared"
+paths = ["/org/gnome/desktop/a11y/**", "/org/gnome/desktop/interface/toolkit-accessibility", "/org/gnome/desktop/interface/text-scaling-factor"]
+
+[[rule]]
+panel = "date-time"
+to = "shared"
+paths = ["/org/gnome/desktop/datetime/**", "/org/gnome/desktop/interface/clock-*", "/org/gnome/shell/world-clocks/**"]
+
+[[rule]]
+panel = "appearance"
+to = "shared"
+paths = ["/org/gnome/desktop/interface/**", "/org/gnome/shell/extensions/user-theme/**"]
+
+[[rule]]
+panel = "notifications"
+to = "shared"
+paths = ["/org/gnome/desktop/notifications/**", "/com/ubuntu/notifications/**"]
+
+[[rule]]
+panel = "search"
+to = "shared"
+paths = ["/org/gnome/desktop/search-providers/**", "/org/freedesktop/tracker/**", "/org/freedesktop/Tracker3/**"]
+
+[[rule]]
+panel = "sharing"
+to = "shared"
+paths = ["/org/gnome/desktop/remote-desktop/**", "/org/gnome/desktop/file-sharing/**", "/org/gnome/settings-daemon/plugins/sharing/**"]
+
+[[rule]]
+panel = "sound"
+to = "shared"
+paths = ["/org/gnome/desktop/sound/**", "/org/gnome/shell/ubuntu/**", "/com/ubuntu/sound/**"]
+
+[[rule]]
+panel = "displays"
+to = "shared"
+paths = ["/org/gnome/settings-daemon/plugins/color/**"]
+
+[[rule]]
+panel = "removable-media"
+to = "shared"
+paths = ["/org/gnome/desktop/media-handling/**"]
+
+[[rule]]
+panel = "region-language"
+to = "shared"
+paths = ["/org/gnome/system/locale/**"]
+
+[[rule]]
+panel = "ubuntu-desktop"
+to = "shared"
+paths = [
+  "/org/gnome/shell/favorite-apps",
+  "/org/gnome/desktop/app-folders/**",
+  "/org/gnome/shell/extensions/dash-to-dock/**",
+  "/org/gnome/shell/extensions/ubuntu-dock/**",
+  "/org/gnome/shell/extensions/ding/**",
+  "/org/gnome/shell/extensions/tiling-assistant/**",
+]
+
+[[rule]]
+panel = "apps"
+to = "shared"
+paths = [
+  "/org/gnome/nautilus/**",
+  "/org/gnome/Ptyxis/**",
+  "/org/gnome/papers/**",
+  "/org/gnome/file-roller/**",
+  "/org/gnome/baobab/**",
+  "/org/gnome/clocks/**",
+  "/org/gnome/calendar/**",
+  "/org/gnome/Snapshot/**",
+  "/org/gnome/TextEditor/**",
+  "/org/gnome/Loupe/**",
+  "/org/gtk/settings/**",
+  "/org/gtk/gtk4/settings/**",
+]
+
+# everything under extensions that no rule above claimed: a module's business
+[[rule]]
+panel = "shell-extensions"
+to = "skip"
+class = "excluded-by-rule"
+reason = "extension settings belong to modules (modules/<name>), not to panel files"
+paths = ["/org/gnome/shell/extensions/**"]
