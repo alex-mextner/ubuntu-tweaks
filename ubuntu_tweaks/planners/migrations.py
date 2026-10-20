@@ -71,13 +71,16 @@ class MigrateAction(Action):
         self._repo_root = os.path.normpath(repo_root)
 
     def _dump(self, directory: str) -> dict[str, str]:
+        """User values directly in ``directory``. A failing ``dconf dump`` (binary missing, timeout,
+        unparsable output) is an error, never "no values": treating it as empty would skip the copy
+        while the old uuid is still dropped and unlinked."""
         result = self._process.query(["dconf", "dump", directory])
         if not result.ok:
-            return {}
+            raise SettingsError(f"dconf dump {directory} failed: {result.stderr.strip() or result.returncode}")
         try:
             return parse_keyfile(result.stdout).get("/", {})
-        except ConfigError:
-            return {}
+        except ConfigError as error:
+            raise SettingsError(f"dconf dump {directory}: {error}") from error
 
     def _key_known(self, key: str) -> bool:
         facts = self._facts
@@ -121,7 +124,7 @@ class MigrateAction(Action):
         migration = self._migration
         parts: list[str] = []
         copy = self._copy()
-        if copy and migration.from_path and self._facts and self._facts.directory:
+        if copy:
             parts.append(
                 f"copy {len(copy)} value(s) {migration.from_path} -> {self._facts.directory} "
                 f"({short(', '.join(sorted(copy)), 80)})"

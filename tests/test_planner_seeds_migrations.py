@@ -20,7 +20,7 @@ from ubuntu_tweaks.planners import seeds as seeds_planner
 from ubuntu_tweaks.process import CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.seeds import SeedContext, get_provider, pictures_dir, screenshots_stack
-from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, dump_keyfile, parse_keyfile
+from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, SettingsError, dump_keyfile, parse_keyfile
 from tests.util import TempDirCase, write
 
 SCHEMA = "org.example.hyper"
@@ -48,9 +48,12 @@ class DconfMachine(FakeProcess):
     def __init__(self, dconf: dict[str, dict[str, str]]) -> None:
         super().__init__()
         self.dconf = dconf
+        self.failing: set[str] = set()
 
     def query(self, argv: Sequence[str], *, timeout: float = 60.0) -> CommandResult:
         super().query(argv, timeout=timeout)
+        if argv[2] in self.failing:
+            return CommandResult(124, "", "timed out")
         values = self.dconf.get(argv[2], {})
         return CommandResult(0, dump_keyfile({"/": values}) if values else "")
 
@@ -109,6 +112,11 @@ class SeedProviderTests(TempDirCase):
     def test_without_user_dirs_it_falls_back_to_pictures(self) -> None:
         self.assertEqual(pictures_dir(self.tmp, {}), self.tmp / "Pictures")
         self.assertEqual(screenshots_stack(self.context()).ensure_dirs, (self.tmp / "Pictures/Schermate",))
+
+    def test_a_relative_pictures_dir_is_ignored(self) -> None:
+        write(self.tmp / ".config/user-dirs.dirs", 'XDG_PICTURES_DIR="Pics"\n')
+
+        self.assertEqual(pictures_dir(self.tmp, {}), self.tmp / "Pictures")
 
     def test_unknown_provider_is_invalid_config(self) -> None:
         with self.assertRaisesRegex(ConfigError, "unknown seed provider 'nope'; known: screenshots-stack"):
@@ -258,6 +266,14 @@ class MigrationTests(RepoCase):
         self.dconf[DIRECTORY] = {"icon-size": "0.17"}
 
         self.assertEqual(len(Plan.build(self.build())), 0)
+
+    def test_a_failing_dconf_dump_is_an_error_not_an_empty_path(self) -> None:
+        self.module(self.MIGRATION)
+        for failing in (OLD_PATH, DIRECTORY):
+            self.process.failing = {failing}
+            with self.subTest(failing=failing), self.assertRaisesRegex(SettingsError, "dconf dump .* failed"):
+                Plan.build(self.build())
+        self.assertEqual(self.process.executed, [])
 
 
 if __name__ == "__main__":

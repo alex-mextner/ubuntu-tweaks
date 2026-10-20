@@ -62,8 +62,10 @@ def pictures_dir(home: Path, env: Mapping[str, str]) -> Path:
         match = _USER_DIR.search((config / "user-dirs.dirs").read_text(encoding="utf-8"))
     except OSError:
         match = None
-    if match and match.group(1).strip():
-        return Path(match.group(1).replace("$HOME", str(home)))
+    if match:
+        value = match.group(1).strip().replace("$HOME", str(home))
+        if value.startswith("/"):
+            return Path(value)
     return home / "Pictures"
 
 

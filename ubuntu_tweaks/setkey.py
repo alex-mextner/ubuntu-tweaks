@@ -340,9 +340,12 @@ class SeedKeyAction(_KeyAction):
         return text + self._tail()
 
     def run(self) -> None:
-        if self.check():  # the key was set (or is decided by an override) since the plan was built
+        if self.check():  # a user value appeared since the plan was built (an earlier action, another process)
             return
         for directory in self._ensure_dirs:
-            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise SettingsError(f"cannot create {directory}: {error.strerror or error}") from error
         target = self.target
         self._backend.write(target.schema, target.path, target.key, self._wanted())
