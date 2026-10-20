@@ -304,11 +304,13 @@ the real file lives in the profile.
 - Destination states and plan kinds: nothing there → `link`; a real file or a symlink that
   points elsewhere → `link-replace`, shown as `adopt` (identical content) or `backup+replace`
   (with sizes and `+added/-removed` line counts; binary or large files are not diffed); a
-  real directory → shown as `REFUSED` and `run()` raises (exit 5), nothing is touched. The
-  original always goes through `ubuntu_tweaks/backup.py` first.
+  real directory, a non-regular file, or a regular file where a parent directory should be →
+  shown as `REFUSED` and `run()` raises (exit 5), nothing is touched. The destination is
+  re-checked against `$HOME` right before it is replaced. The original always goes through
+  `ubuntu_tweaks/backup.py` first.
 - Refused before any plan exists (exit 5): a path containing `..`, and a destination whose
   nearest existing parent resolves outside `$HOME` (for example a symlinked `~/.config`).
-- Extras: symlinks into the profile whose file was removed from it. Found in the
+- Extras: dangling symlinks into the profile (their file was removed from it). Found in the
   directories the profile manages plus `$HOME`, `~/.config` and the first level below
   `~/.config`; deeper orphans are not found. Reported, never removed.
 
@@ -352,7 +354,10 @@ Checks are read-only (`timedatectl show`, `localectl status`, parsing
 `/etc/default/keyboard`). The plan marks root actions `[sudo]`; `--no-sudo` skips them and
 says so.
 
-`locale` sets `LANG` only (the locale must already be generated). Only the keyboard fields
+`locale` sets `LANG` and passes the other `LC_*` assignments of the current system locale
+through (`localectl set-locale` replaces the whole set); the locale must already be generated.
+Keyboard values containing quotes, `$`, backticks, backslashes or control characters are
+invalid config. Only the keyboard fields
 listed are compared and written; the other lines of `/etc/default/keyboard` are kept, and
 the new file is installed with `install -m 644` through sudo/pkexec. A failing check command
 counts as "not satisfied". Timezone, locale and keyboard are three `system` actions with

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError
 from ubuntu_tweaks.process import Process
 from ubuntu_tweaks.profile import Keyboard
 from ubuntu_tweaks.settings import SettingsBackend
@@ -47,7 +48,7 @@ def parse_keyboard(text: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for line in text.splitlines():
         match = _ASSIGNMENT.match(line)
-        if match is None or line.lstrip().startswith("#"):
+        if match is None:
             continue
         value = match.group(2)
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
@@ -90,7 +91,8 @@ class LocaleAction(_RootAction):
         super().__init__(process)
         self._wanted = wanted
 
-    def _current(self) -> str | None:
+    def _assignments(self) -> dict[str, str] | None:
+        """The ``System Locale:`` block of ``localectl status`` as ``{name: value}``; None when it fails."""
         result = self._process.query(["localectl", "status"])
         if not result.ok:
             return None
@@ -103,19 +105,29 @@ class LocaleAction(_RootAction):
                 if not re.match(r"^\s+[A-Z_]+=", follow):
                     break
                 block.append(follow)
-            match = re.search(r"\bLANG=(\S+)", " ".join(block))
-            return match.group(1) if match else ""
-        return ""
+            return dict(re.findall(r"\b([A-Z_]+)=(\S+)", " ".join(block)))
+        return {}
+
+    def _current(self) -> str | None:
+        assignments = self._assignments()
+        return None if assignments is None else assignments.get("LANG", "")
 
     def check(self) -> bool:
         return self._current() == self._wanted
 
+    def _kept(self) -> list[str]:
+        """The other ``LC_*`` assignments: ``localectl set-locale`` replaces the whole set, so they are passed on."""
+        return [f"{name}={value}" for name, value in (self._assignments() or {}).items() if name != "LANG"]
+
     def describe(self) -> str:
         now = self._current()
-        return f"locale LANG={now if now is not None else '(unknown)'} -> LANG={self._wanted} (localectl set-locale)"
+        text = f"locale LANG={now if now is not None else '(unknown)'} -> LANG={self._wanted} (localectl set-locale)"
+        kept = self._kept()
+        return text + (f", keeping {' '.join(kept)}" if kept else "")
 
     def run(self) -> None:
-        self._process.execute(self._process.elevate(["localectl", "set-locale", f"LANG={self._wanted}"]))
+        argv = ["localectl", "set-locale", f"LANG={self._wanted}", *self._kept()]
+        self._process.execute(self._process.elevate(argv))
 
 
 class KeyboardAction(_RootAction):
@@ -129,8 +141,10 @@ class KeyboardAction(_RootAction):
     def _text(self) -> str:
         try:
             return self._path.read_text(encoding="utf-8")
-        except OSError:
+        except FileNotFoundError:
             return ""
+        except OSError as error:
+            raise UbuntuTweakError(f"cannot read {self._path}: {error.strerror or error}") from error
 
     def _differences(self) -> Mapping[str, tuple[str, str]]:
         current = parse_keyboard(self._text())
@@ -152,7 +166,7 @@ class KeyboardAction(_RootAction):
         lines: list[str] = []
         for line in self._text().splitlines():
             match = _ASSIGNMENT.match(line)
-            if match and not line.lstrip().startswith("#") and match.group(1) in pending:
+            if match and match.group(1) in pending:
                 lines.append(f'{match.group(1)}="{pending.pop(match.group(1))}"')
             else:
                 lines.append(line)
@@ -187,4 +201,10 @@ def build(
         actions.append(LocaleAction(runner, system.locale))
     if any(getattr(system.keyboard, field) is not None for field, _ in _KEYBOARD_VARIABLES):
         actions.append(KeyboardAction(runner, system.keyboard, keyboard_file))
+    for field, _ in _KEYBOARD_VARIABLES:
+        value = getattr(system.keyboard, field)
+        if value is not None and re.search(r'[\x00-\x1f"$`\\]', value):
+            raise ConfigError(
+                f"system.toml [keyboard] {field}: {value!r} has a character that is unsafe in a shell file"
+            )
     return actions

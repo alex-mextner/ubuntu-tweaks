@@ -133,6 +133,23 @@ class ReplaceTests(FilesCase):
 
         self.assertEqual([a.kind for a in self.plan().actions], ["link-replace"])
 
+    def test_a_file_where_a_parent_directory_should_be_is_shown_as_refused(self) -> None:
+        self.shared(".config/a.conf")
+        write(self.home / ".config", "a file")
+        plan = self.plan()
+
+        self.assertIn("REFUSED", plan.actions[0].describe())
+        self.assertIn("~/.config is not a directory", plan.actions[0].describe())
+        with self.assertRaisesRegex(RefusedError, "not a directory"):
+            plan.execute()
+
+    def test_a_directory_symlink_into_the_profile_is_not_reported_as_an_orphan(self) -> None:
+        self.shared(".config/nvim/init.lua")
+        (self.home / ".config").mkdir()
+        (self.home / ".config/old-nvim").symlink_to(self.profile_root / "files/.config/nvim")
+
+        self.assertEqual(list(planner.extras(self.ctx, FakeBackend(), home=self.home)), [])
+
     def test_a_directory_in_the_way_is_refused_not_touched(self) -> None:
         self.shared("thing")
         (self.home / "thing").mkdir()

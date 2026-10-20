@@ -29,6 +29,7 @@ from __future__ import annotations
 import difflib
 import filecmp
 import os
+import stat
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -93,12 +94,9 @@ def _changed_lines(disk: Path, profile_copy: Path) -> str:
         new = profile_copy.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return "binary or unreadable, not diffed"
-    added = removed = 0
-    for line in difflib.unified_diff(old, new, lineterm="", n=0):
-        if line.startswith("+") and not line.startswith("+++"):
-            added += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            removed += 1
+    body = list(difflib.unified_diff(old, new, lineterm="", n=0))[2:]  # drop the two file header lines
+    added = sum(line.startswith("+") for line in body)
+    removed = sum(line.startswith("-") for line in body)
     return f"+{added}/-{removed} lines"
 
 
@@ -127,15 +125,32 @@ class FileLinkAction(Action):
     def _source(self) -> Path:
         return self._entry.source
 
+    def _refusal(self) -> str | None:
+        """Why nothing can be linked here: a directory, a non-regular file, or a parent that is not a directory."""
+        destination = self._destination
+        where = _tilde(destination, self._home)
+        for parent in destination.parents:
+            if parent == self._home or self._home not in parent.parents:
+                break
+            if os.path.lexists(parent) and not os.path.isdir(parent):
+                return f"{_tilde(parent, self._home)} is not a directory"
+        if destination.is_symlink() or not os.path.lexists(destination):
+            return None
+        if destination.is_dir():
+            return f"{where} is a directory, move it away first"
+        if not stat.S_ISREG(destination.lstat().st_mode):
+            return f"{where} is not a regular file"
+        return None
+
     def _state(self) -> str:
         destination = self._destination
+        if self._refusal() is not None:
+            return "refused"
         if destination.is_symlink():
             target = os.readlink(destination)
             resolved = os.path.normpath(os.path.join(destination.parent, target))
             return "linked" if resolved == os.path.normpath(self._source) else "symlink"
-        if not os.path.lexists(destination):
-            return "missing"
-        return "directory" if destination.is_dir() else "file"
+        return "file" if os.path.lexists(destination) else "missing"
 
     @property
     def kind(self) -> str:
@@ -152,29 +167,33 @@ class FileLinkAction(Action):
             what += " [machine overlay]"
         if state == "missing":
             return f"link {what}"
-        if state == "directory":
-            return f"REFUSED {what}: {where} is a directory, move it away first"
+        if state == "refused":
+            return f"REFUSED {what}: {self._refusal()}"
         if state == "symlink":
             return f"backup+replace {what} (now a symlink to {os.readlink(self._destination)})"
-        if filecmp.cmp(self._destination, self._source, shallow=False):
-            return f"adopt {what} (identical content; the original is backed up first)"
-        disk, profile_size = self._destination.stat().st_size, self._source.stat().st_size
+        try:
+            if filecmp.cmp(self._destination, self._source, shallow=False):
+                return f"adopt {what} (identical content; the original is backed up first)"
+            disk, profile_size = self._destination.stat().st_size, self._source.stat().st_size
+        except OSError as error:
+            return f"backup+replace {what} (cannot read it: {error.strerror or error})"
         return (
             f"backup+replace {what} (differs: {_size(disk)} on disk, {_size(profile_size)} in profile, "
             f"{_changed_lines(self._destination, self._source)})"
         )
 
     def run(self) -> None:
+        _destination(self._home, self._entry.rel)  # still inside $HOME (a parent may have turned into a symlink)
         state = self._state()
-        if state == "directory":
-            raise RefusedError(f"refused: {self._destination} is a directory; move it away and run apply again")
+        if state == "refused":
+            raise RefusedError(f"refused: {self._refusal()}; fix it and run apply again")
         try:
             self._destination.parent.mkdir(parents=True, exist_ok=True)
             if state in ("file", "symlink"):
                 backup(self._destination, now=self._clock(), state_home=self._state_home)
             temporary = self._destination.with_name(f".{self._destination.name}.ubuntu-tweak.tmp")
             temporary.unlink(missing_ok=True)
-            os.symlink(self._source, temporary)
+            os.symlink(os.path.abspath(self._source), temporary)
             os.replace(temporary, self._destination)
         except OSError as error:
             raise UbuntuTweakError(f"cannot link {self._destination}: {error.strerror or error}") from error
@@ -234,6 +253,6 @@ def extras(ctx: Context, backend: SettingsBackend, *, home: Path | None = None) 
             if not item.is_symlink() or path in declared:
                 continue
             target = os.path.normpath(os.path.join(directory, os.readlink(path)))
-            if any(_within(target, root) for root in roots):
+            if any(_within(target, root) for root in roots) and not os.path.lexists(target):
                 found.append(f"{_tilde(path, base)} -> {target}: the profile no longer has that file")
     return found

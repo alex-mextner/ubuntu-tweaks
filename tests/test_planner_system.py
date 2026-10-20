@@ -1,5 +1,6 @@
 """The system.toml (root) and packages.toml planners, with an injected process and keyboard file."""
 
+import json
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,7 +12,7 @@ except ModuleNotFoundError as error:
 
 from ubuntu_tweaks.actions import Plan
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError
 from ubuntu_tweaks.planners import packages as packages_planner
 from ubuntu_tweaks.planners import system_root as system_planner
 from ubuntu_tweaks.process import CommandResult, FakeProcess
@@ -68,7 +69,8 @@ class Machine(FakeProcess):
             case ["timedatectl", "set-timezone"]:
                 self.timezone = words[2]
             case ["localectl", "set-locale"]:
-                self.locale_status = f"   System Locale: {words[2]}\n       VC Keymap: us\n"
+                lines = [f"   System Locale: {words[2]}"] + [f"                  {word}" for word in words[3:]]
+                self.locale_status = "\n".join([*lines, "       VC Keymap: us", ""])
             case ["install", "-m"]:
                 Path(words[-1]).write_text(Path(words[-2]).read_text(encoding="utf-8"), encoding="utf-8")
 
@@ -102,7 +104,8 @@ class SystemRootTests(ProfileCase):
         self.assertTrue(all(a.needs_root for a in plan.actions))
         self.assertEqual(plan.actions[0].describe(), "timezone UTC -> Europe/Belgrade (timedatectl set-timezone)")
         self.assertEqual(
-            plan.actions[1].describe(), "locale LANG=en_GB.UTF-8 -> LANG=en_US.UTF-8 (localectl set-locale)"
+            plan.actions[1].describe(),
+            "locale LANG=en_GB.UTF-8 -> LANG=en_US.UTF-8 (localectl set-locale), keeping LC_TIME=de_DE.UTF-8",
         )
         self.assertIn("[sudo]", plan.render())
         self.assertEqual(self.machine.executed, [])  # preview ran nothing
@@ -112,10 +115,11 @@ class SystemRootTests(ProfileCase):
             [argv for argv, _ in self.machine.executed],
             [
                 ("sudo", "--", "timedatectl", "set-timezone", "Europe/Belgrade"),
-                ("sudo", "--", "localectl", "set-locale", "LANG=en_US.UTF-8"),
+                ("sudo", "--", "localectl", "set-locale", "LANG=en_US.UTF-8", "LC_TIME=de_DE.UTF-8"),
             ],
         )
         self.assertEqual(len(Plan.build(self.build())), 0)
+        self.assertIn("LC_TIME=de_DE.UTF-8", self.machine.locale_status)  # the other locale settings survive
 
     def test_no_sudo_skips_root_actions_and_says_so(self) -> None:
         write(self.root / "system.toml", 'timezone = "Europe/Belgrade"\n')
@@ -126,6 +130,21 @@ class SystemRootTests(ProfileCase):
         self.assertEqual(result.changed, 0)
         self.assertEqual(len(result.skipped), 1)
         self.assertEqual(self.machine.executed, [])
+
+    def test_a_keyboard_value_that_is_unsafe_in_a_shell_file_is_invalid_config(self) -> None:
+        for bad in ('us"; rm -rf /; "', "a$(b)", "a`b`", "a\\b", "a\nb"):
+            with self.subTest(bad=bad):
+                write(self.root / "system.toml", f"[keyboard]\nlayout = {json.dumps(bad)}\n")
+                with self.assertRaisesRegex(ConfigError, "unsafe in a shell file"):
+                    self.build()
+
+    def test_an_unreadable_keyboard_file_is_an_error_not_an_empty_file(self) -> None:
+        write(self.root / "system.toml", '[keyboard]\nlayout = "us"\n')
+        directory = self.tmp / "kbd-is-a-directory"
+        directory.mkdir()
+
+        with self.assertRaisesRegex(UbuntuTweakError, "cannot read"):
+            Plan.build(self.build(directory))
 
     def test_overlay_scalars_replace_shared(self) -> None:
         write(self.root / "system.toml", 'timezone = "Europe/Belgrade"\n')
