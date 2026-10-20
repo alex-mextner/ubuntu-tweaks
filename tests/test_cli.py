@@ -207,6 +207,15 @@ class MachineCommandTests(TempDirCase):
         known = Context(repo, Profile(self.tmp / "profile", "home"), frozenset({"memguard"}))
         self.assertIn("  memguard: disabled (module default)", machine_command.render(known))
 
+    def test_only_does_not_accept_a_module_that_only_the_profile_configures(self) -> None:
+        repo = self.tmp / "repo"
+        write(repo / "modules/memguard/module.toml", SYSTEM_MODULE)
+        profile = Profile(self.tmp / "profile", "home")
+        write(profile.profile_toml, "[modules.hyperdock]\nenabled = false\n")
+        self.assertIn("  hyperdock: disabled (shared) (no such module)", machine_command.render(Context(repo, profile)))
+        with self.assertRaisesRegex(UnknownModuleError, "unknown module.*hyperdock"):
+            machine_command.render(Context(repo, profile, frozenset({"hyperdock"})))
+
     def test_non_ascii_settings_are_printed_readably(self) -> None:
         profile = Profile(self.tmp / "profile", "home")
         write(profile.profile_toml, '[modules.hyperdock.settings]\nlabel = "Обзор"\n')
