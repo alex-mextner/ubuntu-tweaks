@@ -181,8 +181,11 @@ that is absolute or contains `..` are invalid config (exit 2).
     `run <module>: sudo <command>`. Disabled modules (module default, profile or machine
     overlay) emit nothing; `--no-sudo` skips them and says so like every root action.
     `memguard` checks with `install.sh --check` (the `--dry-run` comparison: every installed
-    file byte-equal to the repo copy and its mode, timer enabled; `MEMGUARD_ROOT=DIR` points it
-    at a test root). `apple-hid-battery` checks the running kernel: module present, loaded at
+    file byte-equal to the repo copy and its mode, timer enabled; `/etc/polkit-1/rules.d` is not
+    readable by the desktop user, so that one file is vouched for by
+    `/etc/memguard/installed.sha256` (mode, sha256, path per file), written by the root install;
+    `MEMGUARD_ROOT=DIR` points the check at a test root). `apple-hid-battery` checks the running
+    kernel: module present, loaded at
     boot, livepatch enabled, or absent on kernels with the upstream fix (>= 7.3).
   - `ego`: an extension from extensions.gnome.org by uuid and optional version. The
     manifest schema reserves it and validation rejects it with "not supported yet (#20)"

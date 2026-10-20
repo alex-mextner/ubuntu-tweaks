@@ -63,6 +63,8 @@ render=$(mktemp -d)
 trap 'rm -rf "$render"' EXIT
 changed=()
 pending=0
+stamp_lines=()
+stamp="$root/etc/memguard/installed.sha256"
 for entry in "${files[@]}"; do
   IFS=: read -r src dst mode <<<"$entry"
   dst="$root$dst"
@@ -71,8 +73,12 @@ for entry in "${files[@]}"; do
     *.rules) sed "s/@USER@/$user/g" "$here/$src" >"$out" ;;
     *) cp "$here/$src" "$out" ;;
   esac
-  if [ -e "$dst" ] && [ ! -r "$dst" ]; then
-    echo "? $dst: not readable without sudo (compared on the real run)"
+  stamp_lines+=("$mode $(sha256sum <"$out" | cut -d' ' -f1) $dst")
+  if { [ -d "$(dirname "$dst")" ] && [ ! -x "$(dirname "$dst")" ]; } || { [ -e "$dst" ] && [ ! -r "$dst" ]; }; then
+    if grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
+      continue
+    fi
+    echo "? $dst: not readable without sudo and the install stamp does not vouch for it"
     pending=1
     continue
   fi
@@ -114,6 +120,13 @@ for entry in "${changed[@]}"; do
   case "$dst" in *.service|*.timer) reload=1 ;; esac
   case "$dst" in *.timer) restart_timer=1 ;; esac
 done
+# The polkit rules directory is unreadable for the desktop user, so `--check` cannot compare that
+# file; it trusts this stamp (mode, sha256, path per file) written by the last root install.
+printf '%s\n' "${stamp_lines[@]}" >"$render/stamp"
+if ! cmp -s "$render/stamp" "$stamp" 2>/dev/null; then
+  install -D -m 644 "$render/stamp" "$stamp"
+  echo "installed $stamp"
+fi
 [ "$reload" = 1 ] && systemctl daemon-reload
 systemctl enable --now swap-drain.timer >/dev/null 2>&1
 # a rewritten timer (e.g. the old hourly one) keeps its old schedule until restarted

@@ -25,6 +25,10 @@ echo "modprobe $*" >>"$FAKE_LOG"
 mkdir -p "$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}"
 echo 1 >"$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}/enabled"
 """
+FAKE_RMMOD = f"""#!/bin/sh
+echo "rmmod $*" >>"$FAKE_LOG"
+rm -rf "$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}"
+"""
 
 
 class InstallTests(unittest.TestCase):
@@ -38,6 +42,7 @@ class InstallTests(unittest.TestCase):
             ("strip", FAKE_STRIP),
             ("depmod", FAKE_DEPMOD),
             ("modprobe", FAKE_MODPROBE),
+            ("rmmod", FAKE_RMMOD),
         ):
             path = os.path.join(self.bin, name)
             with open(path, "w") as f:
@@ -106,10 +111,14 @@ class InstallTests(unittest.TestCase):
         self.assertIn("does not name", r.stdout)
         self.assertIn("not loaded and enabled", r.stdout)
 
-    def test_check_on_a_fixed_kernel_wants_the_module_gone(self):
+    def test_check_on_a_fixed_kernel_wants_its_module_gone(self):
         self.kernel(FIXED)
         self.assertEqual(self.run_install("--check", kver=FIXED).returncode, 0)
+        self.kernel("7.0.0-15-generic", ko=True)
         self.conf()
+        self.assertEqual(self.run_install("--check", kver=FIXED).returncode, 0)
+        with open(self.path("lib/modules", FIXED, "updates", NAME + ".ko"), "w") as f:
+            f.write("ko")
         r = self.run_install("--check", kver=FIXED)
         self.assertEqual(r.returncode, 3)
         self.assertIn("upstream fix", r.stdout)
@@ -125,7 +134,7 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(os.path.exists(self.path("lib/modules", OLD, "updates", NAME + ".ko")))
         self.assertIn("skipped 7.0.0-14-generic: no kernel headers", first.stdout)
         self.assertEqual(sum(c.startswith("make ") for c in self.calls()), 1)
-        self.assertIn("depmod -a", self.calls())
+        self.assertIn("depmod -a " + OLD, self.calls())
         self.assertIn("modprobe " + NAME, self.calls())
         self.assertEqual(self.run_install("--check").returncode, 0)
 
@@ -139,7 +148,7 @@ class InstallTests(unittest.TestCase):
         self.kernel(OLD, headers=False)
         r = self.run_install()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("running kernel has no headers", r.stderr)
+        self.assertIn("has no headers", r.stderr)
 
     def test_install_on_a_fixed_kernel_removes_the_module_and_the_conf(self):
         self.kernel(FIXED, ko=True)
@@ -153,6 +162,42 @@ class InstallTests(unittest.TestCase):
 
     def test_unknown_flag_is_a_usage_error(self):
         self.assertEqual(self.run_install("--bogus").returncode, 2)
+
+    def test_a_loaded_but_disabled_livepatch_is_unloaded_before_modprobe(self):
+        self.kernel(OLD, ko=True)
+        self.conf()
+        self.live("0")
+        r = self.run_install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.calls()
+        self.assertLess(calls.index("rmmod " + NAME), calls.index("modprobe " + NAME))
+        self.assertEqual(self.run_install("--check").returncode, 0)
+
+    def test_a_dropped_in_module_gets_a_module_index_before_modprobe(self):
+        self.kernel(OLD, ko=True)
+        self.conf()
+        r = self.run_install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.calls()
+        self.assertLess(calls.index("depmod -a " + OLD), calls.index("modprobe " + NAME))
+
+    def test_the_conf_stays_while_any_kernel_still_carries_the_module(self):
+        self.kernel(FIXED, ko=True)
+        self.kernel(OLD, ko=True)
+        self.conf()
+        self.live()
+        r = self.run_install(kver=FIXED)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(self.path("lib/modules", FIXED, "updates", NAME + ".ko")))
+        self.assertTrue(os.path.exists(self.path("etc/modules-load.d/livepatch-hid-battery-offset.conf")))
+        self.assertIn("depmod -a " + FIXED, self.calls())
+
+    def test_the_other_kernels_are_still_built_when_the_running_one_has_no_headers(self):
+        self.kernel("7.0.0-15-generic")
+        self.kernel(OLD, headers=False)
+        r = self.run_install()
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(os.path.exists(self.path("lib/modules/7.0.0-15-generic/updates", NAME + ".ko")))
 
 
 if __name__ == "__main__":

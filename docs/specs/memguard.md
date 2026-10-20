@@ -489,8 +489,10 @@ the C source and Makefile recovered from it are in the repo verbatim.
   running one, which is an error. A `.ko` built elsewhere (a pod) can be dropped into
   `/lib/modules/<k>/updates/` and the installer then skips that kernel.
 - Install (`install.sh`, root): `.ko` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`
-  for each kernel, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`, `depmod -a`, then
-  `modprobe` into the running kernel. Idempotent: a second run prints "nothing to change".
+  for each kernel with `depmod -a <k>`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`,
+  then `depmod -a <running>` and `modprobe` into the running kernel (a loaded but disabled
+  livepatch is `rmmod`-ed first, since `modprobe` does not re-enable it; the installer fails
+  when `enabled` is still not `1`). Idempotent: a second run prints "nothing to change".
   Rollback: `echo 0 > /sys/kernel/livepatch/livepatch_hid_battery_offset/enabled`, then
   `rmmod`. Unsigned → requires Secure Boot disabled (above).
 - `install.sh --check` (read-only, no root; the module's `check` in `module.toml`): the running
@@ -499,7 +501,10 @@ the C source and Makefile recovered from it are in the repo verbatim.
   reasons. It does not compare the `.ko` with the C source: rebuilding after a source change
   means deleting the stale `.ko` first. `APPLE_HID_ROOT` / `APPLE_HID_KVER` redirect it for tests.
 - Self-remove: on a kernel ≥ 7.3 (upstream fix present) the module is a no-op —
-  `install.sh` removes the `.ko` and the modules-load entry, `--check` exits 0 once they are gone.
+  `install.sh` removes that kernel's `.ko` (and runs `depmod -a <k>`); the modules-load entry
+  goes only when no installed kernel carries the module any more (it is global, so booting a
+  fixed kernel while an old one keeps the module logs one harmless "module not found" from
+  `systemd-modules-load`). `--check` on a fixed kernel only requires its own `.ko` to be gone.
 - Per machine: `enabled = false` in `module.toml`; a machine with Apple HID devices sets
   `[modules.apple-hid-battery] enabled = true` in `machines/<host>/machine.toml`.
 

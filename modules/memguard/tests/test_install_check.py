@@ -1,6 +1,7 @@
 """`install.sh --check` against a scratch MEMGUARD_ROOT: exit 0 only when every installed file
 equals its repo copy (polkit rule with the user substituted) and has the right mode; read-only."""
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -94,6 +95,43 @@ class InstallCheck(unittest.TestCase):
         r = self.check("--check")
         self.assertEqual(r.returncode, 3)
         self.assertIn("mode 600 -> 644", r.stdout)
+
+    def write_stamp(self, tamper=False):
+        lines = []
+        for _, dst, mode in FILES:
+            with open(os.path.join(self.root, dst), "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            if tamper and dst.endswith(".rules"):
+                digest = "0" * 64
+            lines.append(f"{mode:o} {digest} {self.root}/{dst}")
+        os.makedirs(os.path.join(self.root, "etc/memguard"), exist_ok=True)
+        with open(os.path.join(self.root, "etc/memguard/installed.sha256"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def hide_rules_dir(self):
+        rules_dir = os.path.join(self.root, "etc/polkit-1/rules.d")
+        os.chmod(rules_dir, 0)
+        self.addCleanup(os.chmod, rules_dir, 0o755)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read the hidden directory")
+    def test_a_directory_the_user_cannot_read_is_vouched_for_by_the_install_stamp(self):
+        self.install_all()
+        self.write_stamp()
+        self.hide_rules_dir()
+        r = self.check("--check")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "memguard: nothing to change"), r.stderr)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read the hidden directory")
+    def test_an_unreadable_directory_without_a_matching_stamp_is_drift(self):
+        self.install_all()
+        self.write_stamp(tamper=True)
+        self.hide_rules_dir()
+        stale = self.check("--check")
+        os.remove(os.path.join(self.root, "etc/memguard/installed.sha256"))
+        missing = self.check("--check")
+        for r in (missing, stale):
+            self.assertEqual(r.returncode, 3)
+            self.assertIn("install stamp does not vouch for it", r.stdout)
 
     def test_root_override_is_refused_for_a_real_install(self):
         r = self.check()

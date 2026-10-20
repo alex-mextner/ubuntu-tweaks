@@ -42,7 +42,6 @@ if [ "$check" = 1 ]; then
   problems=()
   if has_upstream_fix "$kver"; then
     [ ! -e "$(ko_of "$kver")" ] || problems+=("$(ko_of "$kver") should be removed: kernel $kver has the upstream fix")
-    [ ! -e "$conf" ] || problems+=("$conf should be removed: kernel $kver has the upstream fix")
   else
     [ -e "$(ko_of "$kver")" ] || problems+=("$(ko_of "$kver") is missing")
     [ "$(cat "$conf" 2>/dev/null || true)" = "$name" ] || problems+=("$conf is missing or does not name $name")
@@ -62,6 +61,9 @@ if [ -z "$root" ] && [ "$(id -u)" != 0 ]; then
 fi
 
 changed=0
+running_without_headers=0
+work=""
+trap '[ -z "$work" ] || rm -rf "$work"' EXIT
 for dir in "$root"/lib/modules/*/; do
   [ -d "$dir" ] || continue
   k=$(basename "$dir")
@@ -70,6 +72,7 @@ for dir in "$root"/lib/modules/*/; do
     if [ -e "$ko" ]; then
       rm -f "$ko"
       echo "removed $ko (upstream fix present in $k)"
+      depmod -a "$k"
       changed=1
     fi
     continue
@@ -77,7 +80,7 @@ for dir in "$root"/lib/modules/*/; do
   [ ! -e "$ko" ] || continue
   if [ ! -d "$dir/build" ]; then
     echo "skipped $k: no kernel headers (apt install linux-headers-$k, then rerun)"
-    [ "$k" != "$kver" ] || { echo "the running kernel has no headers" >&2; exit 1; }
+    [ "$k" != "$kver" ] || running_without_headers=1
     continue
   fi
   work=$(mktemp -d)
@@ -86,11 +89,18 @@ for dir in "$root"/lib/modules/*/; do
   strip --strip-debug "$work/$name.ko"
   install -D -m 644 "$work/$name.ko" "$ko"
   rm -rf "$work"
+  work=""
+  depmod -a "$k"
   echo "installed $ko"
   changed=1
 done
 
-if has_upstream_fix "$kver"; then
+# The modules-load entry is global: keep it while any kernel still carries the module.
+any_ko=0
+for ko in "$root"/lib/modules/*/updates/"$name.ko"; do
+  [ ! -e "$ko" ] || any_ko=1
+done
+if [ "$any_ko" = 0 ]; then
   if [ -e "$conf" ]; then
     rm -f "$conf"
     echo "removed $conf"
@@ -103,9 +113,21 @@ elif [ "$(cat "$conf" 2>/dev/null || true)" != "$name" ]; then
   changed=1
 fi
 
-[ "$changed" = 0 ] || depmod -a
+if [ "$running_without_headers" = 1 ]; then
+  echo "the running kernel $kver has no headers: no module was built for it" >&2
+  exit 1
+fi
 if ! has_upstream_fix "$kver" && [ "$(cat "$enabled_file" 2>/dev/null || true)" != 1 ]; then
+  # a loaded but disabled livepatch cannot be re-enabled by modprobe: unload it first
+  if [ -e "$enabled_file" ]; then
+    rmmod "$name"
+  fi
+  depmod -a "$kver"
   modprobe "$name"
+  if [ "$(cat "$enabled_file" 2>/dev/null || true)" != 1 ]; then
+    echo "$name did not come up enabled in $kver" >&2
+    exit 1
+  fi
   echo "loaded $name into $kver"
   changed=1
 fi
