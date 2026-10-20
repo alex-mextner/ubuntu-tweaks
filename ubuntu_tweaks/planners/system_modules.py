@@ -35,7 +35,7 @@ from ubuntu_tweaks.settings import SettingsBackend
 CHECK_TIMEOUT_SECONDS = 60
 DRIFT_EXIT = 3
 MISSING_EXIT = 127  # Process.query's answer for a binary that does not exist
-UNRUNNABLE_EXIT = 126  # ... for one that cannot be executed (no exec bit, bad cwd)
+UNRUNNABLE_EXIT = 126  # ... for one that cannot be executed (no exec bit, permission denied)
 TIMEOUT_EXIT = 124  # ... for a command that outlived its timeout
 _OUTPUT_TAIL_LINES = 10
 

@@ -13,10 +13,9 @@ try:
 except ModuleNotFoundError as error:
     raise unittest.SkipTest("PyGObject (python3-gi) is not importable in this interpreter") from error
 
-from datetime import UTC, datetime
 from pathlib import Path
 
-from tests.test_capture import SCHEMAS, commit_plan, make_plan
+from tests.test_capture import NOW, SCHEMAS, commit_plan, make_plan
 from tests.util import TempDirCase, write
 from ubuntu_tweaks.actions import Plan
 from ubuntu_tweaks.context import Context
@@ -24,8 +23,6 @@ from ubuntu_tweaks.planners import files as files_planner
 from ubuntu_tweaks.planners import settings as settings_planner
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import FakeBackend
-
-NOW = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
 
 
 class CaptureThenApplyTests(TempDirCase):

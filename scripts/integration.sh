@@ -125,9 +125,17 @@ for name in ubuntu-tweak-integration ubuntu-tweak-integration-machine; do
 done
 
 echo "== capture (preview; the scratch dconf and HOME are all it can see)"
+# Every file and symlink of the profile and of HOME before and after, but for dconf's own database
+# and flatpak's user installation (`flatpak list`, which the packages section runs, creates it).
+snapshot() {
+    find "$profile" "$HOME" \( -path "$HOME/.config/dconf" -o -path "$HOME/.local/share/flatpak" \) -prune -o \
+        \( -type f -o -type l \) -printf '%p %y %s %T@\n' | sort
+}
+before="$(snapshot)"
 capture="$(tweak capture "${flags[@]}" --report "$root/capture.md" -v)"
 echo "$capture"
 [[ -s "$root/capture.md" ]] || fail "capture wrote no report"
 grep -q "color-scheme" <<<"$capture" || fail "capture does not list the applied keys"
-[[ "$(cat "$profile/settings/appearance.ini")" == *"prefer-dark"* ]] || fail "capture preview modified the profile"
+after="$(snapshot)"
+[[ "$after" == "$before" ]] || { diff <(echo "$before") <(echo "$after") >&2 || true; fail "the capture preview changed the profile or HOME"; }
 echo "integration: OK"

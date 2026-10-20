@@ -24,19 +24,15 @@ from ubuntu_tweaks.process import CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, parse_keyfile
 
+from gi.repository import GLib  # noqa: E402  (ubuntu_tweaks.settings has pinned the GLib typelib version)
+
 SCHEMA = "org.gnome.shell.extensions.dash2dock-lite"
 DIRECTORY = "/org/gnome/shell/extensions/dash2dock-lite/"
 OLD_UUID = "dash2dock-lite@icedman.github.com"
 
 
 def key_type(text: str) -> str:
-    if text in ("true", "false"):
-        return "b"
-    if text.startswith("["):
-        return "as"
-    if text.startswith("("):
-        return "(dddd)"
-    return "d" if "." in text else "i"
+    return GLib.Variant.parse(None, text).get_type_string()
 
 
 class HyperdockModuleTests(TempDirCase):
@@ -49,7 +45,7 @@ class HyperdockModuleTests(TempDirCase):
             json.dumps({"uuid": "hyperdock@alex-mextner", "schema-id": SCHEMA}),
         )
         self.preset = parse_keyfile((REPO_ROOT / "modules/hyperdock/dock.ini").read_text(encoding="utf-8"))["/"]
-        keys = {name: FakeKey(key_type(text), "false") for name, text in self.preset.items()}
+        keys = {name: FakeKey(key_type(text), text) for name, text in self.preset.items()}
         keys["folder-stacks"] = FakeKey("s", "''")
         self.backend = FakeBackend(
             [

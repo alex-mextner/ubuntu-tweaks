@@ -25,6 +25,12 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 124)
         self.assertFalse(result.ok)
 
+    def test_a_file_that_cannot_be_executed_is_126(self) -> None:
+        result = Process().query([__file__])  # a source file without the exec bit
+
+        self.assertEqual(result.returncode, 126)
+        self.assertIn("cannot run", result.stderr)
+
 
 class ExecuteTests(unittest.TestCase):
     def test_non_zero_exit_and_missing_binary_raise(self) -> None:
@@ -33,6 +39,10 @@ class ExecuteTests(unittest.TestCase):
             process.execute(["false"])
         with self.assertRaisesRegex(CommandError, "command not found"):
             process.execute(["/nonexistent/ubuntu-tweak-test"])
+
+    def test_a_file_that_cannot_be_executed_raises(self) -> None:
+        with self.assertRaisesRegex(CommandError, "cannot run"):
+            Process().execute([__file__])
 
     def test_zero_exit_with_input_is_fine(self) -> None:
         Process().execute(["true"], input_text="ignored\n")
