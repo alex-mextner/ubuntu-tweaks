@@ -17,12 +17,14 @@ Public API:
   listing the known names.
 - ``screenshots_stack`` (``"screenshots-stack"``): the dock's ``folder-stacks`` value for GNOME's
   Screenshots folder (``<Pictures>/<localized "Screenshots">``).
-- ``pictures_dir(home, env)``: ``XDG_PICTURES_DIR`` from ``user-dirs.dirs``, else ``~/Pictures``.
+- ``pictures_dir(home, env)``: an absolute ``XDG_PICTURES_DIR`` (``$HOME`` expanded, ``..`` collapsed) from
+  ``user-dirs.dirs``, else ``~/Pictures``.
 """
 
 from __future__ import annotations
 
 import gettext
+import os
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -64,8 +66,9 @@ def pictures_dir(home: Path, env: Mapping[str, str]) -> Path:
         match = None
     if match:
         value = match.group(1).strip().replace("$HOME", str(home))
+        # A relative value would make the seed (and its mkdir) depend on the process's working directory.
         if value.startswith("/"):
-            return Path(value)
+            return Path(os.path.normpath(value))
     return home / "Pictures"
 
 

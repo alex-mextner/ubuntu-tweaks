@@ -139,7 +139,7 @@ class MigrateAction(Action):
 
     def run(self) -> None:
         copy = self._copy()
-        if copy and self._facts and self._facts.directory:
+        if copy:
             self._process.execute(["dconf", "load", self._facts.directory], input_text=dump_keyfile({"/": copy}))
         names = self._enabled_user_value()
         if names is not None:

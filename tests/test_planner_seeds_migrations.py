@@ -49,11 +49,14 @@ class DconfMachine(FakeProcess):
         super().__init__()
         self.dconf = dconf
         self.failing: set[str] = set()
+        self.garbage: set[str] = set()
 
     def query(self, argv: Sequence[str], *, timeout: float = 60.0) -> CommandResult:
         super().query(argv, timeout=timeout)
-        if argv[2] in self.failing:
+        if len(argv) > 2 and argv[2] in self.failing:
             return CommandResult(124, "", "timed out")
+        if len(argv) > 2 and argv[2] in self.garbage:
+            return CommandResult(0, "[broken\n")
         values = self.dconf.get(argv[2], {})
         return CommandResult(0, dump_keyfile({"/": values}) if values else "")
 
@@ -118,6 +121,11 @@ class SeedProviderTests(TempDirCase):
 
         self.assertEqual(pictures_dir(self.tmp, {}), self.tmp / "Pictures")
 
+    def test_dotdot_in_the_pictures_dir_is_collapsed(self) -> None:
+        write(self.tmp / ".config/user-dirs.dirs", 'XDG_PICTURES_DIR="$HOME/a/../Bilder"\n')
+
+        self.assertEqual(pictures_dir(self.tmp, {}), self.tmp / "Bilder")
+
     def test_unknown_provider_is_invalid_config(self) -> None:
         with self.assertRaisesRegex(ConfigError, "unknown seed provider 'nope'; known: screenshots-stack"):
             get_provider("nope")
@@ -159,6 +167,16 @@ class SeedPlannerTests(RepoCase):
 
         stacks = json.loads(backend.effective(SCHEMA, None, "folder-stacks").unpack())
         self.assertEqual(stacks[0]["path"], str(awkward / "Pictures/Screenshots"))
+
+    def test_a_folder_that_cannot_be_created_is_a_clean_error_and_writes_nothing(self) -> None:
+        self.module(self.SEEDS)
+        backend = FakeBackend([INSTALLED])
+        write(self.home / "Pictures", "a file, not a directory")
+        plan = Plan.build(self.build(backend))
+
+        with self.assertRaisesRegex(SettingsError, "cannot create"):
+            plan.execute()
+        self.assertEqual(backend.writes, [])
 
     def test_schema_not_installed_yet_is_planned_unsatisfied(self) -> None:
         self.module(self.SEEDS)
@@ -273,6 +291,14 @@ class MigrationTests(RepoCase):
             self.process.failing = {failing}
             with self.subTest(failing=failing), self.assertRaisesRegex(SettingsError, "dconf dump .* failed"):
                 Plan.build(self.build())
+        self.assertEqual(self.process.executed, [])
+
+    def test_an_unparsable_dconf_dump_is_an_error_too(self) -> None:
+        self.module(self.MIGRATION)
+        self.process.garbage = {OLD_PATH}
+
+        with self.assertRaisesRegex(SettingsError, "dconf dump /org/example/old/: .*invalid keyfile"):
+            Plan.build(self.build())
         self.assertEqual(self.process.executed, [])
 
 
