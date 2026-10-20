@@ -471,6 +471,19 @@ class UpdateTests(CommandScenario):
         self.assertEqual(command[command.index("--profile") + 1], str(self.profile_root))
         self.assertIn(RELOGIN_HINT, out)
 
+    def test_commit_runs_git_even_when_this_interpreter_lacks_pygobject(self) -> None:
+        # The child `apply` guards itself; the parent must not refuse (or pull) based on its own gi.
+        with (
+            mock.patch.object(_support, "has_gi", return_value=False),
+            mock.patch.object(update, "run_command", return_value="") as run_command,
+            mock.patch.object(update, "_code_state", return_value="same"),
+            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=0)) as spawn,
+        ):
+            code, _ = self.run_update(commit=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(run_command.call_count, 2)
+        spawn.assert_called_once()
+
     def test_commit_propagates_apply_failure_and_skips_hint_when_nothing_changed(self) -> None:
         with (
             mock.patch.object(update, "run_command", return_value=""),

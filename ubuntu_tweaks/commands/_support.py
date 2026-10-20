@@ -15,7 +15,8 @@ from ubuntu_tweaks.proc import CommandError
 
 def has_gi() -> bool:
     importlib.invalidate_caches()
-    return importlib.util.find_spec("gi") is not None
+    spec = importlib.util.find_spec("gi")
+    return spec is not None and spec.origin is not None  # a stray gi/ directory is a namespace package
 
 
 def require_gi() -> None:
