@@ -19,27 +19,17 @@ backend)``, ``collect_warnings(ctx, backend)``.
 
 from __future__ import annotations
 
-import importlib
-import pkgutil
 from types import ModuleType
 
 from ubuntu_tweaks import planners
 from ubuntu_tweaks.actions import Action
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.discovery import discover
 from ubuntu_tweaks.settings import SettingsBackend
 
 
 def discover_planners() -> list[ModuleType]:
-    found: list[ModuleType] = []
-    for info in sorted(pkgutil.iter_modules(planners.__path__), key=lambda item: item.name):
-        if info.name.startswith("_"):
-            continue
-        module = importlib.import_module(f"{planners.__name__}.{info.name}")
-        if not callable(getattr(module, "build", None)):
-            raise ConfigError(f"planner module {module.__name__} has no build(ctx, backend)")
-        found.append(module)
-    return found
+    return discover(planners, kind="planner", entry="build", signature="build(ctx, backend)")
 
 
 def build_actions(ctx: Context, backend: SettingsBackend) -> list[Action]:

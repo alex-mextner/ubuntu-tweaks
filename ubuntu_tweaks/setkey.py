@@ -40,7 +40,6 @@ Public API:
 
 from __future__ import annotations
 
-import json
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -50,6 +49,7 @@ from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.capture.rules import relocatable_schemas
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.extension import ExtensionModule
 from ubuntu_tweaks.manifest import Manifest, SettingsFile, SourceKind, discover_modules, module_defaults
 from ubuntu_tweaks.profile import Config
 from ubuntu_tweaks.settings import (
@@ -145,11 +145,12 @@ def module_schema_id(ctx: Context, manifest: Manifest, settings_file: SettingsFi
     if directory is None:
         return None
     try:
-        data = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        metadata = ExtensionModule(manifest, directory).metadata()
+    except ConfigError:
+        return None  # a broken metadata.json is the extension planners' error; it must not stop settings planning
+    if metadata is None:
         return None
-    value = data.get("settings-schema") if isinstance(data, dict) else None
-    return value if isinstance(value, str) and value else None
+    return metadata.settings_schema or None
 
 
 def _read_schema_xml(schema_dir: Path, schema_id: str) -> tuple[str | None, dict[str, str | None]] | None:

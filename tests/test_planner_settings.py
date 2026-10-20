@@ -421,6 +421,16 @@ class PendingExtensionSchemaTests(SettingsPlannerCase):
         self.assertEqual(planner.build(self.context(), backend), [])
         self.assertIn("no settings schema", planner.warnings(self.context(), backend)[0])
 
+    def test_a_broken_metadata_file_skips_the_module_like_a_missing_one(self) -> None:
+        for text in ("{not json", '["a list"]', '{"uuid": "ext@x", "settings-schema": 123}', '{"uuid": "ext@x"}'):
+            with self.subTest(metadata=text):
+                self.extension_module()
+                write(self.repo / "gnome-extensions/ext@x/metadata.json", text)
+                backend = FakeBackend(SCHEMAS)
+
+                self.assertEqual(planner.build(self.context(), backend), [])
+                self.assertIn("no settings schema", planner.warnings(self.context(), backend)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

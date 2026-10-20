@@ -129,7 +129,7 @@ echo "== capture (preview; the scratch dconf and HOME are all it can see)"
 # and flatpak's user installation (`flatpak list`, which the packages section runs, creates it).
 snapshot() {
     find "$profile" "$HOME" \( -path "$HOME/.config/dconf" -o -path "$HOME/.local/share/flatpak" \) -prune -o \
-        \( -type f -o -type l \) -printf '%p %y %s %T@\n' | sort
+        \( -type f -o -type l \) -printf '%p %y %s %T@ %l\n' | sort
 }
 before="$(snapshot)"
 capture="$(tweak capture "${flags[@]}" --report "$root/capture.md" -v)"

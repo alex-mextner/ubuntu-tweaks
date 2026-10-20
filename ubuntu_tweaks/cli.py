@@ -21,8 +21,6 @@ Public API:
 """
 
 import argparse
-import importlib
-import pkgutil
 import sys
 import traceback
 from collections.abc import Sequence
@@ -30,20 +28,13 @@ from types import ModuleType
 
 from ubuntu_tweaks import commands
 from ubuntu_tweaks.context import REPO_ROOT, Context
-from ubuntu_tweaks.errors import ConfigError, ExitCode, UbuntuTweakError
+from ubuntu_tweaks.discovery import discover
+from ubuntu_tweaks.errors import ExitCode, UbuntuTweakError
 from ubuntu_tweaks.profile import PROFILE_ENV, Profile
 
 
 def discover_commands() -> list[ModuleType]:
-    found: list[ModuleType] = []
-    for info in sorted(pkgutil.iter_modules(commands.__path__), key=lambda item: item.name):
-        if info.name.startswith("_"):
-            continue
-        module = importlib.import_module(f"{commands.__name__}.{info.name}")
-        if not callable(getattr(module, "register", None)):
-            raise ConfigError(f"command module {module.__name__} has no register(subparsers)")
-        found.append(module)
-    return found
+    return discover(commands, kind="command", entry="register", signature="register(subparsers)")
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> None:
