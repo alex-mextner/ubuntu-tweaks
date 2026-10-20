@@ -1,0 +1,9 @@
+description = "Livepatch: Apple Magic Keyboard/Trackpad Bluetooth battery level on kernels before 7.3"
+# Off by default: a root-built unsigned kernel module, enabled per machine in
+# machines/<host>/machine.toml ([modules.apple-hid-battery] enabled = true).
+enabled = false
+
+[source]
+kind = "system"
+install = "install.sh"
+check = "install.sh --check"
