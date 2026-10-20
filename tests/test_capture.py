@@ -1,0 +1,965 @@
+"""`ubuntu-tweak capture`: glob and secret-scan units, rule tables, classifier, settings scan,
+report golden, and `--commit` into a temporary profile and HOME. No live dconf or HOME is touched:
+settings come from ``FakeBackend``, system tools from a fake runner."""
+
+import argparse
+import contextlib
+import gzip
+import io
+import os
+import re
+import tomllib
+import unittest
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+
+from tests.util import TempDirCase, write
+from ubuntu_tweaks.capture import commit as commit_module
+from ubuntu_tweaks.capture.files_scan import classify_file
+from ubuntu_tweaks.capture.globs import GlobSet, compile_glob
+from ubuntu_tweaks.capture.plan import CapturePlan, build_plan, refusals
+from ubuntu_tweaks.capture.report import build_document, render_markdown, render_text
+from ubuntu_tweaks.capture.rules import PANEL_IDS, PANELS_TOML, Rules, load_rules
+from ubuntu_tweaks.capture.schemas import fake_catalog
+from ubuntu_tweaks.capture.secrets import key_names, scan_text, scan_value
+from ubuntu_tweaks.capture.system_scan import scan_packages
+from ubuntu_tweaks.capture.toml_io import dump_toml
+from ubuntu_tweaks.capture.settings_scan import has_machine_path
+from ubuntu_tweaks.commands import capture as capture_command
+from ubuntu_tweaks.context import REPO_ROOT, Context
+from ubuntu_tweaks.errors import ConfigError, RefusedError
+from ubuntu_tweaks.profile import Packages, Profile
+from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, UserKey, parse_value, read_keyfile
+
+# Shaped like real secrets so the scanner fires, assembled here so no scanner flags this file.
+FAKE_TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0" + "k1L2m3N4o5P6"
+FAKE_PEM = "-----BEGIN " + "PRIVATE KEY-----"
+NOW = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+
+SCHEMAS = (
+    FakeSchema(
+        "org.gnome.desktop.interface",
+        {
+            "color-scheme": FakeKey("s", "'default'"),
+            "clock-format": FakeKey("s", "'24h'"),
+            "show-battery-percentage": FakeKey("b", "false"),
+        },
+        "/org/gnome/desktop/interface/",
+    ),
+    FakeSchema("org.gnome.desktop.background", {"picture-uri": FakeKey("s", "''")}, "/org/gnome/desktop/background/"),
+    FakeSchema(
+        "org.gnome.settings-daemon.plugins.power",
+        {"sleep-inactive-ac-timeout": FakeKey("i", "1200")},
+        "/org/gnome/settings-daemon/plugins/power/",
+    ),
+    FakeSchema(
+        "org.gnome.shell",
+        {"enabled-extensions": FakeKey("as", "@as []"), "app-picker-layout": FakeKey("s", "''")},
+        "/org/gnome/shell/",
+    ),
+    FakeSchema("org.gnome.Ptyxis", {"window-size": FakeKey("(ii)", "(0, 0)")}, "/org/gnome/Ptyxis/"),
+    FakeSchema("org.example.App", {"contact": FakeKey("s", "''"), "mode": FakeKey("s", "'a'")}, "/org/example/app/"),
+    FakeSchema("org.example.Weird", {"thing": FakeKey("i", "0")}, "/org/example/weird/"),
+    FakeSchema("org.gnome.desktop.notifications.application", {"enable": FakeKey("b", "true")}, None),
+)
+
+
+class NoSchemaBackend(FakeBackend):
+    """Also lists a user key that no schema describes, as ``dconf dump`` would."""
+
+    def list_user_keys(self) -> tuple[UserKey, ...]:
+        return (*super().list_user_keys(), UserKey("/org/example/ghost/", "level"))
+
+
+def seeded_backend() -> FakeBackend:
+    backend = NoSchemaBackend(SCHEMAS)
+    backend.set_user("org.gnome.desktop.interface", None, "color-scheme", "'prefer-dark'")
+    backend.set_user("org.gnome.desktop.interface", None, "clock-format", "'24h'")  # equals the default
+    backend.set_user("org.gnome.desktop.interface", None, "show-battery-percentage", "true")
+    backend.set_user("org.gnome.desktop.background", None, "picture-uri", "'file:///home/me/Pictures/wall.jpg'")
+    backend.set_user("org.gnome.settings-daemon.plugins.power", None, "sleep-inactive-ac-timeout", "3600")
+    backend.set_user("org.gnome.shell", None, "enabled-extensions", "['ding@rastersoft.com']")
+    backend.set_user("org.gnome.shell", None, "app-picker-layout", "'x'")
+    backend.set_user("org.gnome.Ptyxis", None, "window-size", "(100, 200)")
+    backend.set_user("org.example.App", None, "contact", "'someone@example.com'")
+    backend.set_user("org.example.App", None, "mode", "'b'")
+    backend.set_user("org.example.Weird", None, "thing", "7")
+    backend.set_user(
+        "org.gnome.desktop.notifications.application",
+        "/org/gnome/desktop/notifications/application/foo/",
+        "enable",
+        "false",
+    )
+    return backend
+
+
+def fake_runner(argv: Sequence[str]) -> str | None:
+    command = argv[0]
+    if command == "apt-mark":
+        return "curl\nlibssl-dev\nlibfoo1\nlinux-image-1\nripgrep\nubuntu-desktop\ntmux\n"
+    if command == "apt-cache":
+        return "ubuntu-minimal\n  Depends: curl\n  Depends: <virtual>\n |Depends: bash\n"
+    if command == "dpkg-query":
+        return "curl\tstandard\nbash\trequired\nripgrep\toptional\n"
+    if command == "snap":
+        return (
+            "Name Version Rev Tracking Publisher Notes\ncore24 1 1 x y base\nfirefox 1 2 x y -\ncode 1 3 x y classic\n"
+        )
+    if command == "flatpak":
+        return "org.example.Flat\n"
+    if command == "timedatectl":
+        return "Europe/Belgrade\n"
+    if command == "localectl":
+        return "   System Locale: LANG=en_US.UTF-8\n       VC Keymap: us\n"
+    return None
+
+
+def commit_plan(plan: CapturePlan, rules: Rules, home: Path) -> list[str]:
+    return commit_module.commit(plan, email_exempt_keys=rules.email_exempt_keys, home=home, now=NOW)
+
+
+def sources(case: TempDirCase) -> dict[str, Path]:
+    keyboard = write(
+        case.tmp / "keyboard", 'XKBMODEL="pc105"\nXKBLAYOUT="us,ru"\nXKBVARIANT=","\nXKBOPTIONS="grp_led:scroll"\n'
+    )
+    return {
+        "installer_baseline": case.tmp / "no-initial-status.gz",
+        "snap_seed": case.tmp / "no-seed.yaml",
+        "keyboard_file": keyboard,
+    }
+
+
+def make_plan(
+    case: TempDirCase,
+    backend: FakeBackend | None = None,
+    *,
+    capture: dict[str, object] | None = None,
+    only: frozenset[str] = frozenset(),
+) -> tuple[CapturePlan, Rules]:
+    home = case.tmp / "home"
+    home.mkdir(exist_ok=True)
+    rules = load_rules(capture)
+    plan = build_plan(
+        Profile(case.tmp / "profile", "testbox", "flag"),
+        rules,
+        backend or seeded_backend(),
+        fake_catalog(SCHEMAS),
+        home=home,
+        only=only,
+        run=fake_runner,
+        **sources(case),
+    )
+    return plan, rules
+
+
+class GlobTests(unittest.TestCase):
+    def test_star_stays_in_a_segment_and_double_star_crosses_them(self) -> None:
+        self.assertTrue(compile_glob("/org/gnome/mutter/*").fullmatch("/org/gnome/mutter/edge-tiling"))
+        self.assertFalse(compile_glob("/org/gnome/mutter/*").fullmatch("/org/gnome/mutter/wayland/x"))
+        self.assertTrue(compile_glob("/org/gnome/mutter/**").fullmatch("/org/gnome/mutter/wayland/x"))
+
+    def test_double_star_between_slashes_also_matches_zero_segments(self) -> None:
+        self.assertTrue(compile_glob("/**/window-*").fullmatch("/window-size"))
+        self.assertTrue(compile_glob("/**/window-*").fullmatch("/a/b/window-size"))
+        self.assertFalse(compile_glob("/**/window-*").fullmatch("/a/b/xwindow-size"))
+
+    def test_first_returns_the_matching_pattern(self) -> None:
+        self.assertEqual(GlobSet(["/a/*", "/b/**"]).first("/b/c/d"), "/b/**")
+        self.assertIsNone(GlobSet(["/a/*"]).first("/x"))
+
+
+class SecretScanTests(unittest.TestCase):
+    def kinds(self, text: str) -> set[str]:
+        return {finding.kind for finding in scan_value(text)}
+
+    def test_each_pattern_class_is_detected(self) -> None:
+        samples = {
+            "pem-block": FAKE_PEM,
+            "api-token": FAKE_TOKEN,
+            "jwt": "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghijk",
+            "email": "me@example.com",
+            "url-credentials": "https://user:hunter2@host.example/x",
+            "hex-run": "d" * 40,
+            "base64-run": "Ab3" * 15,
+            "lan-ip": "192.168.1.20",
+        }
+        for kind, sample in samples.items():
+            self.assertIn(kind, self.kinds(sample), kind)
+        self.assertIn("api-token", self.kinds("sk-" + "x1" * 15))
+        self.assertIn("api-token", self.kinds("AKIA" + "ABCDEFGHIJKLMNOP"))
+
+    def test_ordinary_values_are_clean(self) -> None:
+        for value in (
+            "'Yaru-blue-dark'",
+            "'file:///usr/share/backgrounds/a_b-C.jpg'",
+            "uint32 5",
+            "['<Super>Left']",
+            "'/usr/share/x'",
+        ):
+            self.assertEqual(scan_value(value), (), value)
+
+    def test_a_long_mixed_case_path_is_not_a_base64_token(self) -> None:
+        self.assertEqual(scan_value("'file:///home/Alex/Pictures/Wallpapers/2024/Mountains.jpg'"), ())
+        self.assertEqual(scan_text("Exec=/opt/MyApp2/bin/Launcher/run/x/y/z-app-startup\n"), ())
+
+    def test_lan_ip_is_an_identity_flag_and_public_ip_is_clean(self) -> None:
+        self.assertEqual({f.cls for f in scan_value("10.0.0.5")}, {"identity"})
+        self.assertEqual(scan_value("8.8.8.8"), ())
+
+    def test_findings_never_carry_the_matched_text(self) -> None:
+        for finding in scan_text(f"token = {FAKE_TOKEN}\nmail = me@example.com"):
+            self.assertNotIn("ghp_", repr(finding))
+            self.assertNotIn("example", repr(finding))
+        self.assertEqual([f.line for f in scan_text("a\nb = me@example.com")], [2])
+
+    def test_extension_uuids_are_exempt_only_for_listed_keys(self) -> None:
+        text = "enabled-extensions=['ding@rastersoft.com']"
+        self.assertEqual(scan_text(text, exempt_email_keys=["enabled-extensions"]), ())
+        self.assertEqual({f.kind for f in scan_text(text)}, {"email"})
+        self.assertTrue(scan_text("other=['ding@rastersoft.com']", exempt_email_keys=["enabled-extensions"]))
+
+    def test_key_names_lists_names_not_values(self) -> None:
+        names = key_names(
+            'api_key = "x"\nlevel = 3\n"password": "y"\nempty_token =\n', ["api[_-]?key", "passw", "token"]
+        )
+        self.assertEqual(names, ("api_key", "password"))
+
+
+class RuleTableTests(unittest.TestCase):
+    def test_panel_table_has_exactly_the_contract_ids_plus_shell_extensions(self) -> None:
+        rules = load_rules()
+        self.assertEqual(set(rules.panels), set(PANEL_IDS) | {"shell-extensions"})
+        for rule in rules.panel_rules:
+            self.assertIn(rule.panel, rules.panels)
+
+    def test_spec_table_and_panels_toml_list_the_same_panels(self) -> None:
+        spec = (REPO_ROOT / "docs/specs/ubuntu-tweak-cli.md").read_text(encoding="utf-8")
+        section = spec.split("### Panel coverage", 1)[1].split("### Per-machine", 1)[0]
+        in_spec = set(re.findall(r"^\| `([a-z-]+)` \|", section, re.MULTILINE))
+        self.assertEqual(in_spec, set(load_rules().panels), PANELS_TOML)
+
+    def test_specific_rules_beat_general_ones(self) -> None:
+        rules = load_rules()
+
+        def panel(full: str) -> str | None:
+            rule = rules.panel_rule(full)
+            return rule.panel if rule else None
+
+        self.assertEqual(panel("/org/gnome/desktop/interface/color-scheme"), "appearance")
+        self.assertEqual(panel("/org/gnome/desktop/interface/clock-format"), "date-time")
+        self.assertEqual(panel("/org/gnome/desktop/interface/toolkit-accessibility"), "accessibility")
+        self.assertEqual(panel("/org/gnome/desktop/interface/show-battery-percentage"), "power")
+        self.assertEqual(panel("/org/gnome/mutter/keybindings/toggle-tiled-left"), "keyboard")
+        self.assertEqual(panel("/org/gnome/mutter/edge-tiling"), "multitasking")
+        self.assertEqual(panel("/org/gnome/shell/extensions/tiling-assistant/tile-left-half"), "keyboard")
+        self.assertEqual(panel("/org/gnome/shell/extensions/tiling-assistant/enable-tiling-popup"), "ubuntu-desktop")
+        self.assertEqual(panel("/org/gnome/shell/extensions/some-other/key"), "shell-extensions")
+        self.assertIsNone(panel("/org/example/app/mode"))
+
+    def test_profile_capture_unknown_key_is_invalid_config(self) -> None:
+        with self.assertRaises(ConfigError):
+            load_rules({"exlude": []})
+        with self.assertRaises(ConfigError):
+            load_rules({"exclude": "not a list"})
+
+    def test_profile_cannot_switch_off_a_secret_exclude(self) -> None:
+        rules = load_rules({"machine": ["/**"]})
+        hard = rules.hard_exclude("/org/gnome/desktop/remote-desktop/rdp/tls-key")
+        self.assertIsNotNone(hard)
+        self.assertEqual(hard.cls if hard else None, "secret")
+
+    def test_machine_rule_protects_a_key_from_the_state_globs(self) -> None:
+        rules = load_rules()
+        full = "/org/gnome/shell/last-selected-power-profile"
+        self.assertIsNotNone(rules.machine_rule(full))
+        self.assertIsNotNone(rules.state_rule(full))
+
+    def test_state_globs_do_not_swallow_keybindings_or_privacy_preferences(self) -> None:
+        rules = load_rules()
+        for full in (
+            "/org/gnome/desktop/wm/keybindings/toggle-maximized",
+            "/org/gnome/desktop/wm/keybindings/activate-window-menu",
+            "/org/gnome/desktop/privacy/remember-recent-files",
+            "/org/gnome/desktop/privacy/recent-files-max-age",
+        ):
+            self.assertIsNone(rules.state_rule(full), full)
+        self.assertIsNotNone(rules.state_rule("/org/gnome/Ptyxis/window-size"))
+
+    def test_dconf_object_paths_are_not_filesystem_paths(self) -> None:
+        backend = seeded_backend()
+        text = "'/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/'"
+        self.assertFalse(has_machine_path(parse_value(backend, "org.example.App", "mode", text)))
+        self.assertFalse(has_machine_path(parse_value(backend, "org.example.App", "mode", "'https://example.org/a'")))
+
+    def test_absolute_paths_outside_usr_share_are_machine_paths(self) -> None:
+        backend = seeded_backend()
+
+        def machine(text: str) -> bool:
+            return has_machine_path(parse_value(backend, "org.example.App", "mode", text))
+
+        self.assertTrue(machine("'/home/x/y'"))
+        self.assertTrue(machine("'file:///home/x/y.jpg'"))
+        self.assertFalse(machine("'file:///usr/share/b/y.jpg'"))
+        self.assertFalse(machine("'plain'"))
+
+
+class ClassifierTests(unittest.TestCase):
+    rules = load_rules().files
+
+    def classify(self, name: str, data: bytes) -> str:
+        return classify_file(name, len(data), data, self.rules)[0]
+
+    def test_small_plain_text_is_portable_config(self) -> None:
+        self.assertEqual(self.classify("htoprc", b"fields=0 48\ncolor_scheme=0\n"), "portable-config")
+        self.assertEqual(self.classify("settings.ini", b"[Settings]\ngtk-theme-name=Yaru\n"), "portable-config")
+
+    def test_credential_names_are_secret_bearing_without_reading_content(self) -> None:
+        for name in ("credentials.json", "id_ed25519", ".env", "desktop-password", "x.pem", "tg.env"):
+            self.assertEqual(classify_file(name, 10, None, self.rules)[0], "secret-bearing", name)
+
+    def test_secret_value_inside_makes_it_secret_bearing(self) -> None:
+        self.assertEqual(self.classify("notes.conf", f"x = {FAKE_TOKEN}\n".encode()), "secret-bearing")
+
+    def test_credential_key_names_without_a_secret_value_are_mixed(self) -> None:
+        cls, reason = classify_file("app.toml", 30, b'api_key = "short"\nport = 1\n', self.rules)
+        self.assertEqual(cls, "mixed")
+        self.assertIn("api_key", reason)
+        self.assertNotIn("short", reason)
+
+    def test_binary_large_empty_and_log_files_are_cache_state(self) -> None:
+        self.assertEqual(self.classify("blob", b"\x00\x01binary"), "cache-state")
+        self.assertEqual(classify_file("big.json", 10**6, None, self.rules)[0], "cache-state")
+        self.assertEqual(classify_file("marker", 0, b"", self.rules)[0], "cache-state")
+        self.assertEqual(classify_file("run.log", 10, b"x", self.rules)[0], "cache-state")
+        self.assertEqual(classify_file("a.sqlite3", 10, b"x", self.rules)[0], "cache-state")
+
+
+class SettingsScanTests(TempDirCase):
+    def test_every_user_key_is_accounted_for_exactly_once(self) -> None:
+        plan, _rules = make_plan(self)
+        result = plan.settings
+        assert result is not None
+        self.assertEqual(
+            len(result.entries) + len(result.skipped) + len(result.unmapped) + result.at_default,
+            result.user_keys,
+        )
+        self.assertEqual(result.user_keys, 13)
+
+    def test_classification_of_the_scenario(self) -> None:
+        plan, _rules = make_plan(self)
+        result = plan.settings
+        assert result is not None
+        self.assertEqual(
+            {(e.panel, e.target, e.key, e.mark) for e in result.entries},
+            {
+                ("appearance", "shared", "color-scheme", "+"),
+                ("power", "machine", "show-battery-percentage", "+"),
+                ("power", "machine", "sleep-inactive-ac-timeout", "+"),
+                ("background", "machine", "picture-uri", "+"),
+                ("notifications", "shared", "enable", "+"),
+            },
+        )
+        self.assertEqual(
+            {(s.cls, s.full) for s in result.skipped},
+            {
+                ("state", "/org/gnome/Ptyxis/window-size"),
+                ("state", "/org/gnome/shell/app-picker-layout"),
+                ("excluded-by-rule", "/org/gnome/shell/enabled-extensions"),
+                ("secret", "/org/example/app/contact"),
+                ("no-schema", "/org/example/ghost/level"),
+            },
+        )
+        self.assertEqual(
+            {(u.full, u.schema) for u in result.unmapped},
+            {("/org/example/weird/thing", "org.example.Weird"), ("/org/example/app/mode", "org.example.App")},
+        )
+        self.assertEqual(result.at_default, 1)
+
+    def test_absolute_picture_path_is_flagged_and_goes_to_the_machine_overlay(self) -> None:
+        plan, _rules = make_plan(self)
+        assert plan.settings is not None
+        picture = next(e for e in plan.settings.entries if e.key == "picture-uri")
+        self.assertEqual((picture.target, picture.flags), ("machine", ("path",)))
+
+    def test_profile_exclude_and_machine_rules_apply(self) -> None:
+        plan, _rules = make_plan(
+            self,
+            capture={
+                "exclude": ["/org/gnome/desktop/interface/color-scheme"],
+                "machine": ["/org/gnome/desktop/notifications/**"],
+            },
+        )
+        assert plan.settings is not None
+        self.assertIn(
+            ("excluded-by-rule", "/org/gnome/desktop/interface/color-scheme"),
+            {(s.cls, s.full) for s in plan.settings.skipped},
+        )
+        self.assertEqual(next(e for e in plan.settings.entries if e.key == "enable").target, "machine")
+
+    def test_marks_new_differs_and_same_against_the_existing_profile(self) -> None:
+        write(self.tmp / "profile/settings/appearance.ini", "[org/gnome/desktop/interface]\ncolor-scheme='default'\n")
+        write(
+            self.tmp / "profile/machines/testbox/settings/power.ini",
+            "[org/gnome/settings-daemon/plugins/power]\nsleep-inactive-ac-timeout=3600\n",
+        )
+        plan, _rules = make_plan(self)
+        assert plan.settings is not None
+        marks = {e.key: (e.mark, e.previous) for e in plan.settings.entries}
+        self.assertEqual(marks["color-scheme"], ("~", "'default'"))
+        self.assertEqual(marks["sleep-inactive-ac-timeout"], ("=", None))
+        self.assertEqual(marks["enable"], ("+", None))
+
+    def test_keyfile_override_is_reported_not_captured(self) -> None:
+        write(
+            self.tmp / "home/.config/glib-2.0/settings/keyfile",
+            "[org/gnome/settings-daemon/plugins/power]\nsleep-inactive-ac-timeout=0\n\n"
+            "[org/gnome/desktop/interface]\nclock-format='12h'\n",
+        )
+        plan, _rules = make_plan(self)
+        assert plan.settings is not None
+        overrides = {o.full: o for o in plan.settings.overrides}
+        timeout_key = "/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout"
+        self.assertEqual(set(overrides), {timeout_key, "/org/gnome/desktop/interface/clock-format"})
+        self.assertEqual(overrides[timeout_key].override_value, "0")
+        timeout = next(e for e in plan.settings.entries if e.key == "sleep-inactive-ac-timeout")
+        self.assertEqual((timeout.value, timeout.flags), ("3600", ("override",)))  # dconf value, never the override
+        self.assertFalse(any(e.key == "clock-format" for e in plan.settings.entries))
+
+    def test_only_limits_to_the_named_panels(self) -> None:
+        plan, _rules = make_plan(self, only=frozenset({"power"}))
+        assert plan.settings is not None
+        self.assertEqual({e.panel for e in plan.settings.entries}, {"power"})
+        self.assertEqual((plan.files, plan.packages, plan.system), (None, None, None))
+
+    def test_only_rejects_an_unknown_name(self) -> None:
+        with self.assertRaises(ConfigError):
+            make_plan(self, only=frozenset({"powr"}))
+
+    def test_section_only_run_does_not_scan_settings(self) -> None:
+        plan, _rules = make_plan(self, only=frozenset({"files"}))
+        self.assertIsNone(plan.settings)
+        self.assertIsNotNone(plan.files)
+
+    def test_machine_rule_wins_over_state_globs_in_a_real_scan(self) -> None:
+        schemas = (
+            *SCHEMAS,
+            FakeSchema("org.example.Shell", {"last-selected-power-profile": FakeKey("s", "''")}, "/org/gnome/shell/"),
+        )
+        backend = NoSchemaBackend(schemas)
+        backend.set_user("org.example.Shell", None, "last-selected-power-profile", "'balanced'")
+        plan = build_plan(
+            Profile(self.tmp / "profile", "testbox", "flag"),
+            load_rules(),
+            backend,
+            fake_catalog(schemas),
+            home=self.tmp / "home",
+            only=frozenset({"power"}),
+            run=fake_runner,
+            **sources(self),
+        )
+        assert plan.settings is not None
+        captured = {(e.panel, e.target, e.key) for e in plan.settings.entries}
+        self.assertIn(("power", "machine", "last-selected-power-profile"), captured)
+
+
+class SystemScanTests(TempDirCase):
+    def test_package_and_system_proposals(self) -> None:
+        plan, _rules = make_plan(self)
+        assert plan.packages is not None and plan.system is not None
+        self.assertEqual(
+            [(i.manager, i.name) for i in plan.packages],
+            [
+                ("apt", "libssl-dev"),
+                ("apt", "ripgrep"),
+                ("apt", "tmux"),
+                ("snap", "code"),
+                ("snap", "firefox"),
+                ("flatpak", "org.example.Flat"),
+            ],
+        )
+        self.assertEqual(
+            [(i.key, i.value, i.machine) for i in plan.system],
+            [
+                ("timezone", "Europe/Belgrade", True),
+                ("locale", "en_US.UTF-8", False),
+                ("keyboard.model", "pc105", False),
+                ("keyboard.layout", "us,ru", False),
+                ("keyboard.options", "grp_led:scroll", False),
+            ],
+        )
+
+    def test_packages_already_in_the_profile_are_marked_equal(self) -> None:
+        write(self.tmp / "profile/packages.toml", 'apt = ["tmux"]\n')
+        plan, _rules = make_plan(self)
+        assert plan.packages is not None
+        self.assertEqual({i.name: i.mark for i in plan.packages if i.manager == "apt"}["tmux"], "=")
+
+
+class FilesScanTests(TempDirCase):
+    def setup_home(self) -> Path:
+        home = self.tmp / "home"
+        write(home / ".config/mimeapps.list", "[Default Applications]\ntext/plain=x.desktop\n")
+        write(home / ".config/monitors.xml", "<monitors/>\n")
+        write(
+            home / ".config/glib-2.0/settings/keyfile",
+            "[org/gnome/shell]\nenabled-extensions=['ding@rastersoft.com']\n",
+        )
+        write(home / ".config/autostart/a.desktop", "[Desktop Entry]\nName=A\n")
+        write(home / ".config/htop/htoprc", "color_scheme=0\n")
+        write(home / ".config/svc/credentials.json", '{"a": 1}\n')
+        write(home / ".ssh/id_ed25519", "key\n")
+        write(home / ".cache/x/y", "z")
+        return home
+
+    def test_only_the_allow_list_is_adopted_and_the_rest_is_listed_by_class(self) -> None:
+        self.setup_home()
+        plan, _rules = make_plan(self)
+        assert plan.files is not None
+        self.assertEqual(
+            {a.rel: (a.machine, a.status) for a in plan.files.adopted},
+            {
+                ".config/mimeapps.list": (False, "new"),
+                ".config/monitors.xml": (True, "new"),
+                ".config/glib-2.0/settings/keyfile": (False, "new"),
+                ".config/autostart/a.desktop": (False, "new"),
+            },
+        )
+        candidates = {c.rel: c.cls for c in plan.files.candidates}
+        self.assertEqual(candidates[".config/htop/htoprc"], "portable-config")
+        self.assertEqual(candidates[".config/svc/credentials.json"], "secret-bearing")
+        self.assertEqual(candidates[".ssh"], "secret-bearing")
+        self.assertEqual(candidates[".cache"], "cache-state")
+        self.assertNotIn(".config/mimeapps.list", candidates)
+        self.assertEqual(refusals(plan), [])  # the extension uuids in the keyfile are not e-mail findings
+
+    def test_identical_and_differing_profile_copies(self) -> None:
+        self.setup_home()
+        write(self.tmp / "profile/files/.config/mimeapps.list", "[Default Applications]\ntext/plain=x.desktop\n")
+        write(self.tmp / "profile/files/.config/autostart/a.desktop", "[Desktop Entry]\nName=B\nExec=b\n")
+        plan, _rules = make_plan(self)
+        assert plan.files is not None
+        by_rel = {a.rel: a for a in plan.files.adopted}
+        self.assertEqual(by_rel[".config/mimeapps.list"].status, "identical")
+        differs = by_rel[".config/autostart/a.desktop"]
+        self.assertEqual((differs.status, differs.lines_added, differs.lines_removed), ("differs", 1, 2))
+
+    def test_symlink_into_the_profile_is_linked_and_elsewhere_is_not_adopted(self) -> None:
+        home = self.setup_home()
+        target = write(self.tmp / "profile/files/.config/mimeapps.list", "x\n")
+        (home / ".config/mimeapps.list").unlink()
+        (home / ".config/mimeapps.list").symlink_to(target)
+        (home / ".config/autostart/a.desktop").unlink()
+        (home / ".config/autostart/a.desktop").symlink_to(write(self.tmp / "elsewhere", "e"))
+        plan, _rules = make_plan(self)
+        assert plan.files is not None
+        self.assertEqual({a.rel: a.status for a in plan.files.adopted}[".config/mimeapps.list"], "linked")
+        self.assertIn(".config/autostart/a.desktop", {s.rel for s in plan.files.skipped})
+
+    def test_include_files_outside_home_is_refused(self) -> None:
+        for bad in ("../etc/passwd", "/etc/passwd"):
+            with self.assertRaises(RefusedError):
+                make_plan(self, capture={"include_files": [bad]})
+
+    def test_a_secret_in_an_allow_listed_file_is_a_refusal_finding(self) -> None:
+        home = self.setup_home()
+        write(home / ".config/leak.conf", f"token = {FAKE_TOKEN}\nowner = me@example.com\n")
+        plan, _rules = make_plan(self, capture={"include_files": [".config/leak.conf"]})
+        self.assertEqual(
+            {(where, kind) for where, kind, _cls, _line in refusals(plan)},
+            {("~/.config/leak.conf", "api-token"), ("~/.config/leak.conf", "email")},
+        )
+
+
+class ReportTests(TempDirCase):
+    def render(self, *, verbose: bool = False, markdown: bool = False) -> str:
+        home = self.tmp / "home"
+        write(home / ".config/mimeapps.list", "[Default Applications]\ntext/plain=x.desktop\n")
+        write(home / ".config/htop/htoprc", "color_scheme=0\n")
+        plan, _rules = make_plan(self)
+        document = build_document(plan, machine="testbox", commit=False, verbose=verbose)
+        text = render_markdown(document) if markdown else render_text(document)
+        return text.replace(str(self.tmp), "<tmp>")
+
+    def test_markdown_report_golden(self) -> None:
+        expected = (Path(__file__).parent / "golden" / "capture_report.md").read_text(encoding="utf-8")
+        self.assertEqual(self.render(markdown=True), expected)
+
+    def test_text_report_has_the_sections_in_contract_order(self) -> None:
+        report = self.render()
+        order = ["= 1. Settings", "= 2. Files", "= 3. Packages and System", "= 4. Skipped", "= 5. Totals"]
+        positions = [report.index(heading) for heading in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("totals: settings: 5 keys in 4 panels", report)
+
+    def test_only_scopes_the_totals_to_the_selected_panels(self) -> None:
+        plan, _rules = make_plan(self, only=frozenset({"power"}))
+        assert plan.settings is not None
+        result = plan.settings
+        accounted = len(result.entries) + len(result.skipped) + len(result.unmapped) + result.at_default
+        self.assertEqual(accounted, result.user_keys)
+        self.assertEqual(result.user_keys, 2)
+
+    def test_override_values_of_excluded_keys_are_masked(self) -> None:
+        write(
+            self.tmp / "home/.config/glib-2.0/settings/keyfile",
+            "[org/example/app]\nmode='hunter2'\n\n[org/gnome/desktop/interface]\nclock-format='12h'\n",
+        )
+        excluded = ["/org/example/app/mode", "/org/gnome/desktop/interface/clock-format"]
+        plan, _rules = make_plan(self, capture={"exclude": excluded})
+        assert plan.settings is not None
+        self.assertTrue(plan.settings.overrides)
+        self.assertTrue(all(o.masked for o in plan.settings.overrides))
+        markdown = render_markdown(build_document(plan, machine="testbox", commit=False, verbose=True))
+        self.assertNotIn("hunter2", markdown)
+        self.assertNotIn("12h", markdown)
+
+    def test_report_never_contains_a_skipped_value(self) -> None:
+        for markdown in (False, True):
+            report = self.render(markdown=markdown, verbose=True)
+            self.assertNotIn("someone@example.com", report)
+            self.assertNotIn("(100, 200)", report)  # state value
+            self.assertIn("/org/example/app/contact", report)  # the key is listed, the value is not
+
+    def test_verbose_lists_equal_entries_only_when_asked(self) -> None:
+        write(
+            self.tmp / "profile/machines/testbox/settings/power.ini",
+            "[org/gnome/settings-daemon/plugins/power]\nsleep-inactive-ac-timeout=3600\n",
+        )
+        quiet, loud = self.render(), self.render(verbose=True)
+        self.assertNotIn("sleep-inactive-ac-timeout", quiet.split("= 4. Skipped")[0])
+        self.assertIn("sleep-inactive-ac-timeout", loud.split("= 4. Skipped")[0])
+        self.assertIn("1 already in the profile", quiet)
+
+
+class CommitTests(TempDirCase):
+    def setup_home(self) -> Path:
+        home = self.tmp / "home"
+        write(home / ".config/mimeapps.list", "[Default Applications]\ntext/plain=x.desktop\n")
+        write(home / ".config/monitors.xml", "<monitors/>\n")
+        write(home / ".config/autostart/a.desktop", "[Desktop Entry]\nName=A\n")
+        return home
+
+    def test_commit_writes_panels_links_files_and_backs_originals_up(self) -> None:
+        home = self.setup_home()
+        plan, rules = make_plan(self)
+        lines = commit_plan(plan, rules, home)
+        profile = self.tmp / "profile"
+
+        self.assertEqual(
+            read_keyfile(profile / "settings/appearance.ini"),
+            {"org/gnome/desktop/interface": {"color-scheme": "'prefer-dark'"}},
+        )
+        self.assertEqual(
+            read_keyfile(profile / "machines/testbox/settings/power.ini")["org/gnome/settings-daemon/plugins/power"],
+            {"sleep-inactive-ac-timeout": "3600"},
+        )
+        self.assertTrue((profile / "machines/testbox/settings/background.ini").is_file())
+        self.assertFalse((profile / "settings/power.ini").exists())
+
+        link = home / ".config/mimeapps.list"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(Path(os.readlink(link)), profile / "files/.config/mimeapps.list")
+        self.assertEqual(link.read_text(), "[Default Applications]\ntext/plain=x.desktop\n")
+        self.assertEqual(
+            Path(os.readlink(home / ".config/monitors.xml")), profile / "machines/testbox/files/.config/monitors.xml"
+        )
+        self.assertFalse((profile / "files/.config/monitors.xml").exists())
+
+        backup = (
+            home
+            / ".local/state/ubuntu-tweaks/backup/20261020T120000Z"
+            / (home / ".config/mimeapps.list").as_posix().lstrip("/")
+        )
+        self.assertEqual(backup.read_text(), "[Default Applications]\ntext/plain=x.desktop\n")
+        self.assertFalse(backup.is_symlink())
+        self.assertTrue(any("adopted" in line for line in lines))
+        self.assertIn('timezone = "Europe/Belgrade"', (profile / "machines/testbox/system.toml").read_text())
+        self.assertIn('locale = "en_US.UTF-8"', (profile / "system.toml").read_text())
+        self.assertIn("ripgrep", (profile / "packages.toml").read_text())
+
+    def test_second_capture_is_a_no_op(self) -> None:
+        home = self.setup_home()
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        again, _rules = make_plan(self)
+        assert again.settings and again.files and again.packages is not None and again.system is not None
+        self.assertEqual({e.mark for e in again.settings.entries}, {"="})
+        self.assertEqual({a.status for a in again.files.adopted}, {"linked"})
+        self.assertEqual({i.mark for i in again.packages}, {"="})
+        self.assertEqual({i.mark for i in again.system}, {"="})
+
+    def test_existing_profile_keys_survive_and_differing_ones_are_replaced(self) -> None:
+        home = self.setup_home()
+        write(
+            self.tmp / "profile/settings/appearance.ini",
+            "[org/gnome/desktop/interface]\ncolor-scheme='default'\nicon-theme='Old'\n",
+        )
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        self.assertEqual(
+            read_keyfile(self.tmp / "profile/settings/appearance.ini"),
+            {"org/gnome/desktop/interface": {"color-scheme": "'prefer-dark'", "icon-theme": "'Old'"}},
+        )
+
+    def test_a_secret_in_an_adopted_file_refuses_and_writes_nothing(self) -> None:
+        home = self.setup_home()
+        write(home / ".config/leak.conf", f"token = {FAKE_TOKEN}\n")
+        plan, rules = make_plan(self, capture={"include_files": [".config/leak.conf"]})
+        with self.assertRaises(RefusedError) as caught:
+            commit_plan(plan, rules, home)
+        self.assertIn("refused: secret finding", str(caught.exception))
+        self.assertIn(".config/leak.conf", str(caught.exception))
+        self.assertNotIn(FAKE_TOKEN, str(caught.exception))
+        self.assertFalse((self.tmp / "profile").exists())
+        self.assertFalse((home / ".config/leak.conf").is_symlink())
+        self.assertFalse((home / ".local/state").exists())
+
+    def test_a_secret_already_in_a_panel_file_refuses_the_commit(self) -> None:
+        home = self.setup_home()
+        write(
+            self.tmp / "profile/settings/appearance.ini",
+            f"[org/gnome/desktop/interface]\nicon-theme='{FAKE_TOKEN}'\n",
+        )
+        plan, rules = make_plan(self)
+        with self.assertRaises(RefusedError):
+            commit_plan(plan, rules, home)
+        self.assertFalse((home / ".config/mimeapps.list").is_symlink())
+
+    def test_a_home_directory_that_escapes_home_is_refused(self) -> None:
+        home = self.setup_home()
+        outside = self.tmp / "outside"
+        write(outside / "x.conf", "a=1\n")
+        (home / ".config/link").symlink_to(outside)
+        plan, rules = make_plan(self, capture={"include_files": [".config/link/x.conf"]})
+        with self.assertRaises(RefusedError):
+            commit_plan(plan, rules, home)
+        self.assertFalse((outside / "x.conf").is_symlink())
+
+    def test_a_file_that_changed_since_the_preview_is_refused_and_nothing_is_written(self) -> None:
+        home = self.setup_home()
+        plan, rules = make_plan(self)
+        write(home / ".config/mimeapps.list", f"[Default Applications]\ntoken = {FAKE_TOKEN}\n")  # an app rewrote it
+        with self.assertRaises(RefusedError) as caught:
+            commit_plan(plan, rules, home)
+        self.assertIn("changed since the preview", str(caught.exception))
+        self.assertFalse((self.tmp / "profile").exists())
+        self.assertFalse((home / ".config/mimeapps.list").is_symlink())
+
+    def test_a_destination_that_is_a_symlink_is_refused(self) -> None:
+        home = self.setup_home()
+        target = write(self.tmp / "elsewhere/mimeapps.list", "x\n")
+        (self.tmp / "profile/files/.config").mkdir(parents=True)
+        (self.tmp / "profile/files/.config/mimeapps.list").symlink_to(target)
+        plan, rules = make_plan(self)
+        with self.assertRaises(RefusedError):
+            commit_plan(plan, rules, home)
+        self.assertEqual(target.read_text(), "x\n")
+
+    def test_existing_packages_of_other_managers_survive_a_commit(self) -> None:
+        home = self.setup_home()
+        write(self.tmp / "profile/packages.toml", '# my notes\nflatpak = ["org.keep.Me"]\nsnap = ["firefox"]\n')
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        data = tomllib.loads((self.tmp / "profile/packages.toml").read_text())
+        self.assertEqual(data["flatpak"], ["org.example.Flat", "org.keep.Me"])
+        self.assertEqual(data["snap"], ["code", "firefox"])
+        self.assertEqual(data["apt"], ["libssl-dev", "ripgrep", "tmux"])
+
+    def test_system_value_set_in_the_overlay_is_replaced_there_so_the_commit_converges(self) -> None:
+        home = self.setup_home()
+        write(self.tmp / "profile/machines/testbox/system.toml", '[keyboard]\nlayout = "de"\n')
+        plan, rules = make_plan(self)
+        assert plan.system is not None
+        layout = next(i for i in plan.system if i.key == "keyboard.layout")
+        self.assertEqual((layout.machine, layout.mark, layout.previous), (True, "~", "de"))
+        commit_plan(plan, rules, home)
+        again, _rules = make_plan(self)
+        assert again.system is not None
+        self.assertEqual({i.mark for i in again.system}, {"="})
+        overlay = tomllib.loads((self.tmp / "profile/machines/testbox/system.toml").read_text())
+        self.assertEqual(overlay["keyboard"]["layout"], "us,ru")
+
+
+class TomlWriterTests(unittest.TestCase):
+    def test_keys_that_are_not_bare_are_quoted_and_round_trip(self) -> None:
+        table = {"plain": "x", "my.key": ["a", "b"], "spaced key": True, "nested": {"dotted.name": 3, "ok": "y"}}
+        self.assertEqual(tomllib.loads(dump_toml(table)), table)
+
+    def test_long_lists_are_written_one_item_per_line(self) -> None:
+        table = {"apt": [f"p{i}" for i in range(6)]}
+        self.assertIn('  "p0",\n', dump_toml(table))
+        self.assertEqual(tomllib.loads(dump_toml(table)), table)
+
+
+class CommandTests(TempDirCase):
+    def run_capture(self, *flags: str, only: frozenset[str] = frozenset()) -> tuple[int, str]:
+        profile_dir = self.tmp / "profile"
+        profile_dir.mkdir(exist_ok=True)
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        parser = argparse.ArgumentParser()
+        capture_command.register(parser.add_subparsers(dest="command"))
+        args = parser.parse_args(["capture", *flags])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = capture_command.execute(
+                Context(REPO_ROOT, Profile(profile_dir, "testbox", "flag"), only),
+                args,
+                seeded_backend(),
+                fake_catalog(SCHEMAS),
+                home=home,
+                now=NOW,
+                run=fake_runner,
+                **sources(self),
+            )
+        return code, out.getvalue()
+
+    def test_preview_changes_nothing_and_writes_the_markdown_report(self) -> None:
+        write(self.tmp / "home/.config/mimeapps.list", "x\n")
+        code, out = self.run_capture("--report", str(self.tmp / "out/r.md"))
+        self.assertEqual(code, 0)
+        self.assertIn("mode: preview", out)
+        self.assertEqual(list((self.tmp / "profile").iterdir()), [])
+        self.assertFalse((self.tmp / "home/.config/mimeapps.list").is_symlink())
+        self.assertIn("# ubuntu-tweak capture", (self.tmp / "out/r.md").read_text())
+
+    def test_commit_flag_writes_the_profile_and_links_the_file(self) -> None:
+        write(self.tmp / "home/.config/mimeapps.list", "x\n")
+        code, out = self.run_capture("--commit")
+        self.assertEqual(code, 0)
+        self.assertIn("nothing was committed to git", out)
+        self.assertTrue((self.tmp / "home/.config/mimeapps.list").is_symlink())
+        self.assertTrue((self.tmp / "profile/settings/appearance.ini").is_file())
+
+    def test_an_unsafe_include_file_is_refused(self) -> None:
+        write(self.tmp / "profile/profile.toml", '[capture]\ninclude_files = ["../x"]\n')
+        with self.assertRaises(RefusedError):
+            self.run_capture()
+
+    def test_command_registers_itself(self) -> None:
+        parser = argparse.ArgumentParser()
+        capture_command.register(parser.add_subparsers(dest="command"))
+        parsed = parser.parse_args(["capture", "--commit", "--report", "x.md", "-v"])
+        self.assertEqual((parsed.commit, parsed.report, parsed.verbose), (True, "x.md", True))
+
+
+class ReviewRegressionTests(TempDirCase):
+    def test_dock_preferences_are_not_state_and_system_paths_are_not_machine_paths(self) -> None:
+        self.assertIsNone(load_rules().state_rule("/org/gnome/shell/extensions/dash-to-dock/animation-time"))
+        backend = seeded_backend()
+        command = parse_value(backend, "org.example.App", "mode", "'/usr/bin/flameshot gui'")
+        self.assertFalse(has_machine_path(command))
+
+    def test_corrupt_installer_baseline_falls_back_to_the_metapackages(self) -> None:
+        baseline = self.tmp / "initial-status.gz"
+        baseline.write_bytes(b"\x1f\x8b\x08\x00truncated")
+        _items, note = scan_packages(fake_runner, load_rules().packages, Packages(), installer_baseline=baseline)
+        self.assertIn("dependencies of", note)
+
+    def test_a_fully_unchanged_panel_still_reports_its_hidden_count(self) -> None:
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        again, _rules = make_plan(self)
+        report = render_text(build_document(again, machine="testbox", commit=False, verbose=False))
+        self.assertIn("already in the profile", report.split("= 2. Files")[0])
+
+    def test_state_keep_covers_preferences_whose_names_look_like_state(self) -> None:
+        rules = load_rules()
+        for full in (
+            "/org/gnome/desktop/a11y/mouse/dwell-time",
+            "/org/gnome/desktop/interface/cursor-blink-time",
+            "/org/gnome/shell/extensions/tiling-assistant/activate-window-layout1",
+        ):
+            self.assertIsNone(rules.state_rule(full), full)
+
+    def test_a_key_set_in_the_overlay_is_captured_into_the_overlay(self) -> None:
+        write(
+            self.tmp / "profile/machines/testbox/settings/appearance.ini",
+            "[org/gnome/desktop/interface]\ncolor-scheme='default'\n",
+        )
+        plan, _rules = make_plan(self)
+        assert plan.settings is not None
+        entry = next(e for e in plan.settings.entries if e.key == "color-scheme")
+        self.assertEqual((entry.target, entry.mark, entry.previous), ("machine", "~", "'default'"))
+
+    def test_only_accepts_the_shell_extensions_pseudo_panel(self) -> None:
+        plan, _rules = make_plan(self, only=frozenset({"shell-extensions"}))
+        assert plan.settings is not None
+        self.assertEqual(
+            {(s.cls, s.full) for s in plan.settings.skipped},
+            {("excluded-by-rule", "/org/gnome/shell/enabled-extensions")},
+        )
+
+    def test_a_linked_file_is_scanned_and_a_dangling_link_is_not_called_linked(self) -> None:
+        home = self.tmp / "home"
+        profile_copy = write(self.tmp / "profile/files/.config/mimeapps.list", f"token = {FAKE_TOKEN}\n")
+        write(home / ".config/x", "")
+        (home / ".config/mimeapps.list").symlink_to(profile_copy)
+        plan, rules = make_plan(self)
+        assert plan.files is not None
+        linked = next(a for a in plan.files.adopted if a.rel == ".config/mimeapps.list")
+        self.assertEqual((linked.status, [f.kind for f in linked.findings]), ("linked", ["api-token"]))
+        with self.assertRaises(RefusedError):
+            commit_plan(plan, rules, home)
+        profile_copy.unlink()
+        plan, _rules = make_plan(self)
+        assert plan.files is not None
+        self.assertNotIn(".config/mimeapps.list", {a.rel for a in plan.files.adopted})
+        self.assertIn(".config/mimeapps.list", {s.rel for s in plan.files.skipped})
+
+    def test_local_is_one_mixed_row_that_mentions_keyrings(self) -> None:
+        home = self.tmp / "home"
+        write(home / ".local/share/keyrings/login.keyring", "x")
+        plan, _rules = make_plan(self)
+        assert plan.files is not None
+        row = next(c for c in plan.files.candidates if c.rel == ".local")
+        self.assertEqual(row.cls, "mixed")
+        self.assertIn("keyrings", row.reason)
+
+    def test_an_identical_profile_copy_that_changed_since_the_preview_is_refused(self) -> None:
+        home = self.tmp / "home"
+        write(home / ".config/mimeapps.list", "a\n")
+        copy = write(self.tmp / "profile/files/.config/mimeapps.list", "a\n")
+        plan, rules = make_plan(self)
+        copy.write_text("b\n")  # a git pull in the profile
+        with self.assertRaises(RefusedError):
+            commit_plan(plan, rules, home)
+        self.assertFalse((home / ".config/mimeapps.list").is_symlink())
+
+    def test_adoption_symlink_is_absolute(self) -> None:
+        home = self.tmp / "home"
+        write(home / ".config/mimeapps.list", "a\n")
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        self.assertTrue(Path(os.readlink(home / ".config/mimeapps.list")).is_absolute())
+
+    def test_installer_baseline_and_snap_seed_are_subtracted(self) -> None:
+        baseline = self.tmp / "initial-status.gz"
+        with gzip.open(baseline, "wt", encoding="utf-8") as handle:
+            handle.write("Package: ripgrep\nStatus: install ok installed\n\nPackage: other\n")
+        seed = write(self.tmp / "seed.yaml", "snaps:\n  - name: firefox\n    channel: stable\n")
+        items, note = scan_packages(
+            fake_runner, load_rules().packages, Packages(), installer_baseline=baseline, snap_seed=seed
+        )
+        self.assertEqual(
+            [(i.manager, i.name) for i in items if i.manager != "flatpak"],
+            [("apt", "curl"), ("apt", "libssl-dev"), ("apt", "tmux"), ("snap", "code")],  # ripgrep: in the baseline
+        )
+        self.assertIn("initial-status.gz", note)
+
+    def test_text_report_clips_long_cells_but_markdown_keeps_them(self) -> None:
+        backend = seeded_backend()
+        long_value = "'" + "x" * 200 + "'"
+        backend.set_user("org.gnome.desktop.background", None, "picture-uri", long_value)
+        plan, _rules = make_plan(self, backend)
+        document = build_document(plan, machine="testbox", commit=False, verbose=False)
+        self.assertNotIn("x" * 200, render_text(document))
+        self.assertIn("…", render_text(document))
+        self.assertIn("x" * 200, render_markdown(document))
+
+
+if __name__ == "__main__":
+    unittest.main()
