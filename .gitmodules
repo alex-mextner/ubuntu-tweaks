@@ -1,4 +1,4 @@
 [submodule "gnome-extensions/dash2dock-lite@icedman.github.com"]
-	path = gnome-extensions/dash2dock-lite@icedman.github.com
+	path = gnome-extensions/hyperdock
 	url = https://github.com/alex-mextner/dash2dock-lite.git
 	branch = mac-tahoe
