@@ -53,4 +53,13 @@ for tests in modules/*/tests; do
   echo "== unittest $tests"
   (cd "$(dirname "$tests")" && python3 -B -m unittest discover -s tests) || status=1
 done
+# The ubuntu-tweak CLI: formatted code, and its unittest suite under an interpreter that has
+# PyGObject (a distro package, absent from a setup-python interpreter); tests/test_settings.py
+# skips itself when `gi` is missing.
+echo "== ruff format (ubuntu_tweaks, tests, bin)"
+ruff format --check ubuntu_tweaks tests bin/ubuntu-tweak || status=1
+tweak_python=python3
+if /usr/bin/python3 -c 'import gi' 2>/dev/null; then tweak_python=/usr/bin/python3; fi
+echo "== unittest tests ($tweak_python)"
+"$tweak_python" -B -m unittest discover -s tests -t . || status=1
 exit $status

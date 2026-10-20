@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Launcher: runs the ubuntu_tweaks package from the checkout this file lives in (also when
+reached through a symlink such as ~/.local/bin/ubuntu-tweak)."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubuntu_tweaks.cli import main  # noqa: E402
+
+raise SystemExit(main())

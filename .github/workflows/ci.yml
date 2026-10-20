@@ -21,9 +21,11 @@ jobs:
         with:
           node-version: "22"
       - name: Install tools
+        # python3-gi + dbus + dconf: tests/test_settings.py runs the GSettings backend in a scratch
+        # dbus-run-session; scripts/ci.sh runs the ubuntu_tweaks tests under /usr/bin/python3, which has gi.
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y shellcheck python3-gi gir1.2-glib-2.0 dbus dconf-cli dconf-service dconf-gsettings-backend libglib2.0-bin
           pip install ruff
       - name: Checks (scripts/ci.sh)
         run: scripts/ci.sh

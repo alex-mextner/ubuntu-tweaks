@@ -1,0 +1,5 @@
+description = "Switches the keyboard layout to us whenever the launcher opens"
+
+[source]
+kind = "local"
+path = "gnome-extensions/english-in-overview@ultra"

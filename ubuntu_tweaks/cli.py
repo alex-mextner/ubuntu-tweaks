@@ -1,0 +1,103 @@
+"""Argument parsing and command dispatch for ``bin/ubuntu-tweak``.
+
+Accessed via: ``bin/ubuntu-tweak`` calls ``main()``.
+
+Commands self-register: every ``ubuntu_tweaks/commands/<name>.py`` (names starting with ``_``
+excepted) exposes ``register(subparsers)``, which adds its sub-parser and sets
+``handler=<run>`` through ``set_defaults``. This file never names a command. Command modules
+import heavy dependencies (``gi``) lazily inside their handler so ``--help`` and cheap commands
+stay fast.
+
+Global flags ``--profile DIR``, ``--machine NAME`` and ``--only a,b`` are accepted before or
+after the command; they are added to every discovered sub-parser here, so a command must not
+define options of those names.
+
+Public API:
+
+- ``main(argv=None) -> int``: parse, build the ``Context``, run the handler and return its exit
+  code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; any other
+  exception prints a traceback and returns ``ExitCode.INTERNAL``.
+- ``build_parser() -> argparse.ArgumentParser`` and ``discover_commands() -> list[ModuleType]``.
+"""
+
+import argparse
+import importlib
+import pkgutil
+import sys
+import traceback
+from collections.abc import Sequence
+from types import ModuleType
+
+from ubuntu_tweaks import commands
+from ubuntu_tweaks.context import REPO_ROOT, Context
+from ubuntu_tweaks.errors import ConfigError, ExitCode, UbuntuTweakError
+from ubuntu_tweaks.profile import PROFILE_ENV, Profile
+
+
+def discover_commands() -> list[ModuleType]:
+    found: list[ModuleType] = []
+    for info in sorted(pkgutil.iter_modules(commands.__path__), key=lambda item: item.name):
+        if info.name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{commands.__name__}.{info.name}")
+        if not callable(getattr(module, "register", None)):
+            raise ConfigError(f"command module {module.__name__} has no register(subparsers)")
+        found.append(module)
+    return found
+
+
+def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> None:
+    parser.add_argument(
+        "--profile",
+        metavar="DIR",
+        default=default,
+        help=f"profile directory (default: ${PROFILE_ENV}, else ~/.files/ubuntu)",
+    )
+    parser.add_argument(
+        "--machine",
+        metavar="NAME",
+        default=default,
+        help="machine name for the overlay (default: contents of /etc/hostname)",
+    )
+    parser.add_argument(
+        "--only",
+        metavar="NAMES",
+        default=default,
+        help="comma-separated modules (panels for capture) to limit the command to",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ubuntu-tweak",
+        description="Install, configure and update Ubuntu tweaks and the personal settings profile.",
+    )
+    _add_global_flags(parser, default=None)
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    for module in discover_commands():
+        module.register(subparsers)
+    for subparser in subparsers.choices.values():
+        _add_global_flags(subparser, default=argparse.SUPPRESS)
+    return parser
+
+
+def _only(value: str | None) -> frozenset[str]:
+    return frozenset(name.strip() for name in (value or "").split(",") if name.strip())
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        context = Context(
+            repo_root=REPO_ROOT,
+            profile=Profile.resolve(args.profile, args.machine),
+            only=_only(args.only),
+        )
+        result = args.handler(context, args)
+    except UbuntuTweakError as error:
+        print(f"ubuntu-tweak: {error}", file=sys.stderr)
+        return int(error.exit_code)
+    except Exception:
+        traceback.print_exc()
+        return int(ExitCode.INTERNAL)
+    return int(result or ExitCode.OK)
