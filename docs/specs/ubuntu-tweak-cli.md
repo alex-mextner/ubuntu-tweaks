@@ -171,6 +171,22 @@ that is absolute or contains `..` are invalid config (exit 2).
     sudo/pkexec. A system module takes no `[extension]`, `[[settings]]`, `[[seeds]]` or
     `[[migrations]]`. An installer that cannot check itself gets a `--check` mode before its
     module is added.
+
+    Checker protocol: exit 0 = installed and matching, 3 = drift (the module is planned), any
+    other exit code, a launch failure or a 60-second timeout = the check crashed, which fails
+    `apply` / `status` with the module's name and output instead of guessing (exit 1). Both
+    commands run with the module directory as working directory and `argv[0]` resolved inside
+    it. The planner (`planners/system_modules.py`) emits one action per enabled `system`
+    module: kind `system-module`, phase SYSTEM, root, scope = the module name, preview line
+    `run <module>: sudo <command>`. Disabled modules (module default, profile or machine
+    overlay) emit nothing; `--no-sudo` skips them and says so like every root action.
+    `memguard` checks with `install.sh --check` (the `--dry-run` comparison: every installed
+    file byte-equal to the repo copy and its mode, timer enabled; `/etc/polkit-1/rules.d` is not
+    readable by the desktop user, so that one file is vouched for by
+    `/etc/memguard/installed.sha256` (mode, sha256, path per file), written by the root install;
+    `MEMGUARD_ROOT=DIR` points the check at a test root). `apple-hid-battery` checks the running
+    kernel: module present, loaded at
+    boot, livepatch enabled, or absent on kernels with the upstream fix (>= 7.3).
   - `ego`: an extension from extensions.gnome.org by uuid and optional version. The
     manifest schema reserves it and validation rejects it with "not supported yet (#20)"
     until it is implemented. Source kinds are one class each behind one interface

@@ -1,0 +1,7 @@
+description = "macOS-like memory-pressure guard: gated swap-drain, memguard CLI, polkit rule"
+enabled = true
+
+[source]
+kind = "system"
+install = "install.sh"
+check = "install.sh --check"

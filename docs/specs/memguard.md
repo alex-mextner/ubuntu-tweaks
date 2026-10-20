@@ -483,17 +483,30 @@ the C source and Makefile recovered from it are in the repo verbatim.
 - Fix: kernel livepatch (klp object `hid`) replacing that one function; it locates the
   battery field in the report and reads `buf[1 + report_offset / 8]`, scaled by
   `battery_min/max`. Nothing else in the kernel changes; no ABI change.
-- Build: never locally — `build.sh` runs on a Runpod pod via `runpod-run` (installs
-  `linux-headers-<k>` for every installed kernel, `make -C <headers> M=$PWD modules`,
-  `strip --strip-debug`); `--local` builds with the host headers for the running kernel.
+- Build: `install.sh` builds on the host, only for kernels that have `linux-headers-<k>` and no
+  module yet (it copies the C file and Makefile to a temp dir, `make KDIR=<headers>`,
+  `strip --strip-debug`); a kernel without headers is skipped with a message, except the
+  running one, which is an error. A `.ko` built elsewhere (a pod) can be dropped into
+  `/lib/modules/<k>/updates/` and the installer then skips that kernel.
 - Install (`install.sh`, root): `.ko` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`
-  for each kernel, `depmod -a`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`.
+  for each kernel with `depmod -a <k>`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`,
+  then `depmod -a <running>` and `modprobe` into the running kernel (a loaded but disabled
+  livepatch is `rmmod`-ed first, since `modprobe` does not re-enable it; the installer fails
+  when `enabled` is still not `1`). Idempotent: a second run prints "nothing to change".
   Rollback: `echo 0 > /sys/kernel/livepatch/livepatch_hid_battery_offset/enabled`, then
   `rmmod`. Unsigned → requires Secure Boot disabled (above).
-- `status.sh`: module in `lsmod` and `/sys/kernel/livepatch/*/enabled` = 1 → 0; present but
-  disabled → 3.
-- Self-remove: on a running kernel ≥ 7.3 (upstream fix present) the module is a no-op —
-  `install.sh` removes the `.ko` and the modules-load entry, `status.sh` exits 0.
+- `install.sh --check` (read-only, no root; the module's `check` in `module.toml`): the running
+  kernel has the `.ko`, the modules-load entry names the module, and
+  `/sys/kernel/livepatch/livepatch_hid_battery_offset/enabled` is `1` → 0; otherwise 3 with the
+  reasons. It does not compare the `.ko` with the C source: rebuilding after a source change
+  means deleting the stale `.ko` first. `APPLE_HID_ROOT` / `APPLE_HID_KVER` redirect it for tests.
+- Self-remove: on a kernel ≥ 7.3 (upstream fix present) the module is a no-op —
+  `install.sh` removes that kernel's `.ko` (and runs `depmod -a <k>`); the modules-load entry
+  goes only when no installed kernel carries the module any more (it is global, so booting a
+  fixed kernel while an old one keeps the module logs one harmless "module not found" from
+  `systemd-modules-load`). `--check` on a fixed kernel only requires its own `.ko` to be gone.
+- Per machine: `enabled = false` in `module.toml`; a machine with Apple HID devices sets
+  `[modules.apple-hid-battery] enabled = true` in `machines/<host>/machine.toml`.
 
 ### Principle: every system change lands here the same day
 
@@ -511,25 +524,22 @@ model of `ubuntu-tweak-cli.md` with one source kind and one action:
 
 ```toml
 # modules/memguard/module.toml
-description = "macOS-like memory-pressure guard: warn, freeze, dialog, kill"
+description = "macOS-like memory-pressure guard: gated swap-drain, memguard CLI, polkit rule"
 [source]
 kind = "system"                # install.sh run as root, idempotent, prints what it changed
-[system]
 install = "install.sh"         # ubuntu-tweak apply --commit runs: sudo install.sh
-status = "status.sh"           # exit 0 = installed and active, 3 = drift (used by check())
-[deps]
-apt = ["earlyoom", "python3-gi", "gir1.2-adw-1", "systemd-oomd"]
+check = "install.sh --check"   # read-only: exit 0 = installed and matching, 3 = drift
 ```
 
-The `system` action's `check()` runs `status.sh`; `run()` runs `sudo install.sh`. Until the
-CLI lands, the top-level `install.sh --system <module>` runs the same script (`install.sh`
-today only links extensions; the flag is additive).
+The `system` action (`planners/system_modules.py`, see `ubuntu-tweak-cli.md`) runs `check`
+to decide, and `sudo install.sh` to fix. Until the CLI lands, `sudo modules/<m>/install.sh`
+is the same step by hand.
 
 | Module | Files → target |
 |---|---|
 | `modules/memguard/` | `memguard.py` → `/usr/local/sbin/memguard`; `memguard.service` → `/etc/systemd/system/`; `memguard.toml` → `/etc/memguard/memguard.toml`; `policy.d/10-desktop.toml`, `20-docker.toml`, `00-protected.toml` → `/etc/memguard/policy.d/`; `memguard-dialog.py` → `/usr/local/libexec/memguard/dialog`; `memguard-dialog.service` → `/etc/systemd/user/`; `memguard` (CLI) → `/usr/local/bin/memguard`; `docker-name` → `/usr/local/libexec/memguard/`; `earlyoom.default` → `/etc/default/earlyoom`; `oomd/-.slice.conf` → `/etc/systemd/system/-.slice.d/90-memguard.conf`; `oomd/oomd.conf` → `/etc/systemd/oomd.conf.d/90-memguard.conf`; `docker-limited.slice` → `/etc/systemd/system/`; `92-memguard.sysctl.conf` → `/etc/sysctl.d/92-memguard.conf`; `swap-drain` → `/usr/local/sbin/`, `swap-drain.service` → `/etc/systemd/system/` (no timer); `memguard_swap.py` → `/usr/local/lib/memguard/`; `50-memguard-swap-drain.rules` → `/etc/polkit-1/rules.d/`; `mem-sentinel`, `mem-sentinel.service` → `/usr/local/sbin/`, `/etc/systemd/system/` (until the daemon replaces it); `logrotate` → `/etc/logrotate.d/memguard` |
 | `modules/hang-capture/` | `90-lockup-capture.conf`, `90-dirty-writeback.conf`, `91-hang-evidence.conf` → `/etc/sysctl.d/`; `hw-watchdog.service` → `/etc/systemd/system/`; `90-hw-watchdog.conf` → `/etc/systemd/system.conf.d/`; `90-hang.conf` → `/etc/systemd/journald.conf.d/`; `hang-probe.sh` → `/usr/local/sbin/hang-probe`; `hang-probe.service` → `/etc/systemd/system/`; `after-hang.sh` → `/usr/local/sbin/after-hang`; `logrotate` → `/etc/logrotate.d/hang-probe` |
-| `modules/apple-hid-battery/` | `livepatch_hid_battery_offset.c`, `Makefile` (source, in repo); `build.sh` → `.ko` per kernel; `install.sh` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`; `status.sh` |
+| `modules/apple-hid-battery/` | `livepatch_hid_battery_offset.c`, `Makefile` (source, in repo); `install.sh` builds the `.ko` per kernel with headers and installs it → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`; `install.sh --check` |
 | `machines/msi-pulse-gl66/` | per-machine profile, applied only when `dmidecode -s system-product-name` matches `profile.toml` `match`: `90-usb-stability.rules` → `/etc/udev/rules.d/` (keep hubs, JMS578 bridge, both xHCI awake; never applied so far); `usb-storage-quirks.modprobe.conf`, `nvidia-runtime-pm.modprobe.conf` → `/etc/modprobe.d/` + `update-initramfs -u -k all`; `kernel-15.sh` (applied, current state: pins 7.0.0-15); `BIOS.md`; `inventory/` (see *Per-machine profile*) |
 
 Every installed file carries a header `# installed by ubuntu-tweaks/<module>`; `status.sh`

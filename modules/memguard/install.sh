@@ -6,18 +6,29 @@
 #
 #   sudo modules/memguard/install.sh        show the diff of every change, then apply it
 #   modules/memguard/install.sh --dry-run   only show it (no root needed); exit 3 = changes pending
+#   modules/memguard/install.sh --check     same comparison for ubuntu-tweak (quiet footer):
+#                                           exit 0 = installed files match the repo, 3 = drift
 #
-# Idempotent: a second run prints "nothing to change". Spec: docs/specs/memguard.md.
+# MEMGUARD_ROOT=DIR prefixes every destination (tests; skips the systemd timer probe and the
+# user lookup) and is accepted only with --dry-run / --check. Idempotent: a second run prints
+# "nothing to change". Spec: docs/specs/memguard.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 dry=0
+check=0
+root=${MEMGUARD_ROOT:-}
 case "${1:-}" in
   --dry-run) dry=1 ;;
+  --check) dry=1; check=1 ;;
   "") ;;
-  -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
+  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "usage: $0 [--dry-run|--check]" >&2; exit 2 ;;
 esac
+if [ "$dry" = 0 ] && [ -n "$root" ]; then
+  echo "MEMGUARD_ROOT is only valid with --dry-run / --check" >&2
+  exit 2
+fi
 if [ "$dry" = 0 ] && [ "$(id -u)" != 0 ]; then
   echo "run with sudo (or --dry-run to only see the changes)" >&2
   exit 1
@@ -35,7 +46,7 @@ import memguard_swap
 memguard_swap.load_config(f"{here}/memguard.toml")
 EOF
 user=$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m; print(m.load_config(sys.argv[1] + "/memguard.toml")["user"])' "$here")
-getent passwd "$user" >/dev/null || { echo "memguard.toml: user '$user' does not exist" >&2; exit 1; }
+[ -n "$root" ] || getent passwd "$user" >/dev/null || { echo "memguard.toml: user '$user' does not exist" >&2; exit 1; }
 
 # source : target : mode
 files=(
@@ -52,15 +63,26 @@ render=$(mktemp -d)
 trap 'rm -rf "$render"' EXIT
 changed=()
 pending=0
+stamp_lines=()
+stamp="$root/etc/memguard/installed.sha256"
 for entry in "${files[@]}"; do
   IFS=: read -r src dst mode <<<"$entry"
+  dst="$root$dst"
   out="$render/$src"
   case "$src" in
     *.rules) sed "s/@USER@/$user/g" "$here/$src" >"$out" ;;
     *) cp "$here/$src" "$out" ;;
   esac
-  if [ -e "$dst" ] && [ ! -r "$dst" ]; then
-    echo "? $dst: not readable without sudo (compared on the real run)"
+  stamp_lines+=("$mode $(sha256sum <"$out" | cut -d' ' -f1) $dst")
+  parent=$(dirname "$dst")
+  # Only the polkit rules directory is root-only by design; a stamp vouches for files inside it
+  # and nothing else, so any other unreadable file is reported as drift.
+  if [ -d "$parent" ] && [ ! -x "$parent" ] && [ "$parent" = "$root/etc/polkit-1/rules.d" ] &&
+    grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
+    continue
+  fi
+  if { [ -d "$parent" ] && [ ! -x "$parent" ]; } || { [ -e "$dst" ] && [ ! -r "$dst" ]; }; then
+    echo "? $dst: not readable without sudo and the install stamp does not vouch for it"
     pending=1
     continue
   fi
@@ -77,7 +99,8 @@ for entry in "${files[@]}"; do
   fi
   changed+=("$src:$dst:$mode")
 done
-timer_on=$(systemctl is-enabled swap-drain.timer 2>/dev/null || true)
+timer_on=enabled
+[ -n "$root" ] || timer_on=$(systemctl is-enabled swap-drain.timer 2>/dev/null || true)
 enable_timer=0
 if [ "$timer_on" != enabled ]; then
   enable_timer=1
@@ -88,7 +111,7 @@ if [ "${#changed[@]}" = 0 ] && [ "$enable_timer" = 0 ] && [ "$pending" = 0 ]; th
   echo "memguard: nothing to change"
   [ "$dry" = 1 ] && exit 0
 elif [ "$dry" = 1 ]; then
-  echo "memguard: dry run, nothing changed; apply with: sudo $here/install.sh"
+  [ "$check" = 1 ] || echo "memguard: dry run, nothing changed; apply with: sudo $here/install.sh"
   exit 3
 fi
 
@@ -101,6 +124,13 @@ for entry in "${changed[@]}"; do
   case "$dst" in *.service|*.timer) reload=1 ;; esac
   case "$dst" in *.timer) restart_timer=1 ;; esac
 done
+# The polkit rules directory is unreadable for the desktop user, so `--check` cannot compare that
+# file; it trusts this stamp (mode, sha256, path per file) written by the last root install.
+printf '%s\n' "${stamp_lines[@]}" >"$render/stamp"
+if ! cmp -s "$render/stamp" "$stamp" 2>/dev/null; then
+  install -D -m 644 "$render/stamp" "$stamp"
+  echo "installed $stamp"
+fi
 [ "$reload" = 1 ] && systemctl daemon-reload
 systemctl enable --now swap-drain.timer >/dev/null 2>&1
 # a rewritten timer (e.g. the old hourly one) keeps its old schedule until restarted
