@@ -16,14 +16,13 @@ Public API: ``Requirement``, ``requirements(ctx)``, ``missing(requirements)``,
 from __future__ import annotations
 
 import argparse
-import importlib
-import importlib.util
 import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from ubuntu_tweaks.commands._support import has_gi
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.manifest import discover_modules, module_defaults
@@ -36,11 +35,6 @@ class Requirement:
     apt: str
     needed_by: str
     present: Callable[[], bool]
-
-
-def _has_gi() -> bool:
-    importlib.invalidate_caches()
-    return importlib.util.find_spec("gi") is not None
 
 
 def apt_installed(package: str) -> bool:
@@ -59,7 +53,7 @@ def _binary(name: str) -> Callable[[], bool]:
 
 def requirements(ctx: Context) -> list[Requirement]:
     found = [
-        Requirement("python3-gi (PyGObject)", "python3-gi", "the CLI", _has_gi),
+        Requirement("python3-gi (PyGObject)", "python3-gi", "the CLI", has_gi),
         Requirement("dconf", "dconf-cli", "settings", _binary("dconf")),
         Requirement("git", "git", "submodules, update", _binary("git")),
         Requirement("glib-compile-schemas", "libglib2.0-bin", "extension schemas", _binary("glib-compile-schemas")),

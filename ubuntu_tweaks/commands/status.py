@@ -39,6 +39,9 @@ def _section(title: str, lines: list[str]) -> None:
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    from ubuntu_tweaks.commands._support import require_gi
+
+    require_gi()
     from ubuntu_tweaks import reconcile
     from ubuntu_tweaks.planners import collect_extras, collect_warnings
 

@@ -24,6 +24,9 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    from ubuntu_tweaks.commands._support import require_gi
+
+    require_gi()
     from ubuntu_tweaks import reconcile
 
     return reconcile.apply(ctx, commit=args.commit, no_sudo=args.no_sudo)

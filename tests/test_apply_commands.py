@@ -15,7 +15,8 @@ try:
     from tests.actions_scenario import Scenario
     from ubuntu_tweaks import planners, reconcile
     from ubuntu_tweaks.actions import Action, ActionFailed, Phase
-    from ubuntu_tweaks.commands import doctor, init, status, update
+    from ubuntu_tweaks.commands import _support, apply, doctor, init, status, update
+    from ubuntu_tweaks.proc import CommandError
     from ubuntu_tweaks.context import Context
     from ubuntu_tweaks.errors import ExitCode, UnknownModuleError
     from ubuntu_tweaks.extension import RELOGIN_HINT
@@ -151,6 +152,12 @@ class ApplyTests(CommandScenario):
         self.assertEqual(code, 0)
         self.assertIn("[sudo, skipped: --no-sudo]", out)
         self.assertIn("Skipped 1 root action(s) because of --no-sudo", out)
+
+    def test_commands_that_need_pygobject_say_so_instead_of_a_traceback(self) -> None:
+        with mock.patch.object(_support, "has_gi", return_value=False):
+            for command in (apply, status, update):
+                with self.subTest(command=command.__name__), self.assertRaisesRegex(CommandError, "doctor --yes"):
+                    command.run(self.context(), argparse.Namespace(commit=False, no_sudo=False))
 
     def test_unknown_only_name_is_exit_4(self) -> None:
         ctx = self.context(frozenset({"nope"}))

@@ -55,6 +55,9 @@ def _apply_command(ctx: Context, *, no_sudo: bool) -> list[str]:
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     if not args.commit:
+        from ubuntu_tweaks.commands._support import require_gi
+
+        require_gi()
         from ubuntu_tweaks import reconcile
 
         print(f"Would run in {ctx.repo_root}:\n  {' '.join(PULL)}\n  {' '.join(SUBMODULES)}")

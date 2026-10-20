@@ -83,6 +83,11 @@ def _is_staged(plan: Plan) -> bool:
     return any(action.kind in SCHEMA_AFFECTING for action in plan.actions)
 
 
+def _before_settings(plan: Plan) -> Plan:
+    """The actions before any settings write: they may add schemas the backend cannot see yet."""
+    return Plan(tuple(a for a in plan.actions if a.phase < Phase.SETTINGS_MODULE), plan.satisfied)
+
+
 def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sudo: bool) -> None:
     print("\n".join(profile_lines(ctx)))
     print(plan.render(no_sudo=no_sudo))
@@ -122,19 +127,18 @@ def apply(
         print(f"  -> [{action.kind}] {action.describe()}", flush=True)
 
     changed = 0
-    for number in range(1, MAX_PASSES + 1):
+    number = 1
+    while True:
         staged = _is_staged(plan)
-        stage = (
-            Plan(tuple(a for a in plan.actions if a.phase < Phase.SETTINGS_MODULE), plan.satisfied) if staged else plan
-        )
+        if staged and number == MAX_PASSES:
+            raise ActionFailed(f"the plan still installs extension code after {MAX_PASSES - 1} passes")
+        stage = _before_settings(plan) if staged else plan
         result = stage.execute(no_sudo=no_sudo, on_start=announce)
         changed += result.changed
         if not staged:
             break
-        if number == MAX_PASSES:
-            raise ActionFailed(f"the plan did not converge after {MAX_PASSES} passes")
-        backend = backend_factory(ctx)
-        plan = build_plan(ctx, backend, extras)
+        number += 1
+        plan = build_plan(ctx, backend_factory(ctx), extras)
     print(f"{changed} changed")
     skipped = result.render_skipped()
     if skipped:
