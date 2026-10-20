@@ -14,6 +14,23 @@ symlinked into `~/.local/share/gnome-shell/extensions`, so the repo stays the
 source of truth. Re-running `install.sh` is safe; it re-applies
 `dconf/dock.ini` (change dock defaults there) but keeps your folder stacks.
 
+## `ubuntu-tweak` CLI
+
+`bin/ubuntu-tweak` is the umbrella CLI described in
+[`docs/specs/ubuntu-tweak-cli.md`](docs/specs/ubuntu-tweak-cli.md): the modules of this repo plus a
+private settings profile (default `~/.files/ubuntu`, override with `--profile DIR` or
+`$UBUNTU_TWEAK_PROFILE`; per-machine overlay named by `/etc/hostname` or `--machine`). Every
+mutating command previews first and changes nothing without `--commit`. Available now, both
+read-only:
+
+```sh
+bin/ubuntu-tweak list      # modules: kind, enabled, source
+bin/ubuntu-tweak machine   # machine name, overlay, where each setting comes from
+```
+
+`apply`, `status`, `init`, `update`, `doctor` and `capture` are specified there and tracked in
+[#25](https://github.com/alex-mextner/ubuntu-tweaks/issues/25). Tests: `scripts/ci.sh`.
+
 ## Tweaks
 
 | Tweak | Path | What it does |
