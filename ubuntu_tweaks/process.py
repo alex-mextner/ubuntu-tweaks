@@ -13,7 +13,7 @@ Public API:
 - ``CommandResult(returncode, stdout, stderr)`` with ``ok``.
 - ``CommandError`` (exit 1).
 - ``Process``: ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
-  missing, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
+  missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
   ``elevate(argv) -> list[str]`` (prefix with ``sudo --`` or ``pkexec``; unchanged when already
   root; ``CommandError`` when neither exists).
 - Module-level ``elevate(argv)`` (the same logic, for callers without a ``Process``) and
@@ -106,6 +106,8 @@ class Process:
             return CommandResult(127, "", f"{argv[0]}: command not found")
         except subprocess.TimeoutExpired:
             return CommandResult(124, "", f"{argv[0]}: timed out after {timeout:g} s")
+        except OSError as error:
+            return CommandResult(126, "", f"{argv[0]}: cannot run: {error.strerror or error}")
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
     def execute(self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None) -> None:
@@ -113,6 +115,8 @@ class Process:
             completed = subprocess.run(list(argv), cwd=cwd, input=input_text, text=True, check=False)
         except FileNotFoundError as error:
             raise CommandError(f"{argv[0]}: command not found") from error
+        except OSError as error:
+            raise CommandError(f"{argv[0]}: cannot run: {error.strerror or error}") from error
         if completed.returncode != 0:
             raise CommandError(f"{' '.join(argv)}: exited with status {completed.returncode}")
 

@@ -17,6 +17,7 @@ Public API: ``load_rules(profile_capture=None) -> Rules``; ``Rules`` and its par
 
 from __future__ import annotations
 
+import functools
 import re
 import tomllib
 from collections.abc import Mapping
@@ -210,6 +211,7 @@ def _parse_panels(data: Table) -> tuple[dict[str, PanelInfo], tuple[PanelRule, .
     return panels, tuple(rules), relocatable
 
 
+@functools.cache
 def relocatable_schemas() -> tuple[tuple[re.Pattern[str], str], ...]:
     """``(dconf path pattern, schema id)`` of every ``[[relocatable]]`` in ``panels.toml``.
 

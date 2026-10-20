@@ -13,7 +13,7 @@ except ModuleNotFoundError as error:
 from ubuntu_tweaks.actions import Plan
 from ubuntu_tweaks.backup import backup
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.errors import RefusedError
+from ubuntu_tweaks.errors import RefusedError, UbuntuTweakError
 from ubuntu_tweaks.planners import files as planner
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import FakeBackend
@@ -225,6 +225,18 @@ class BackupTests(TempDirCase):
     def test_missing_original_is_an_error(self) -> None:
         with self.assertRaises(FileNotFoundError):
             backup(self.tmp / "absent", now=NOW, state_home=self.tmp / "state")
+
+    def test_a_dangling_symlink_is_stored_as_a_symlink(self) -> None:
+        (self.tmp / "dangling").symlink_to(self.tmp / "gone")
+        copy = backup(self.tmp / "dangling", now=NOW, state_home=self.tmp / "state")
+
+        self.assertTrue(copy.is_symlink())
+        self.assertEqual(os.readlink(copy), str(self.tmp / "gone"))
+
+    def test_a_fifo_is_refused_instead_of_blocking_on_it(self) -> None:
+        os.mkfifo(self.tmp / "pipe")
+        with self.assertRaisesRegex(UbuntuTweakError, "not a regular file"):
+            backup(self.tmp / "pipe", now=NOW, state_home=self.tmp / "state")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ retire = ["compiz-alike-magic-lamp-effect@hermes83.github.com"]
 
 [[settings]]
 file = "dock.ini"
+schema = "org.gnome.shell.extensions.dash2dock-lite"  # its metadata.json has `schema-id`, not `settings-schema`
 mode = "enforce"
 
 [[seeds]]

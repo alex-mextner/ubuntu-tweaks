@@ -43,11 +43,33 @@ mutating command previews first and changes nothing without `--commit`.
 | `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
 | `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them |
 | `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
-| `capture` | specified in the spec, tracked in [#25](https://github.com/alex-mextner/ubuntu-tweaks/issues/25) |
+| `capture [--commit] [--report FILE] [--only …] [-v]` | read-only inventory of the live system, printed as the exact diff the profile would get; `--commit` writes it into the profile working tree (never runs git) |
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
 (local extension); `memguard` and `apple-hid-battery` are root-level `system` modules.
-Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf is `scripts/integration.sh`.
+Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf and HOME is `scripts/integration.sh`
+(module preset, profile panel file, machine overlay, linked files, `capture` preview; it never
+touches your dconf).
+
+### Settings workflow: preview → commit → review → PR
+
+What you configure in GNOME Settings (and the config files you keep under `~/.config`) lives in the
+private profile, `~/.files/ubuntu` (`settings/<panel>.ini`, `files/`, `packages.toml`,
+`system.toml`, and `machines/<hostname>/` for what differs per machine). The engine here holds no
+personal data.
+
+```sh
+ubuntu-tweak capture                  # 1. preview: exactly what the profile would receive (+ new, ~ differs, = same)
+ubuntu-tweak capture --commit         # 2. write it into ~/.files/ubuntu (no git commit, secrets refuse the write)
+git -C ~/.files diff                  # 3. second look, then commit and open a PR in .files
+ubuntu-tweak apply                    # 4. on any machine: preview what would change
+ubuntu-tweak apply --commit           # 5. do it; `status` reports drift, a second run says `0 changed`
+```
+
+`capture --commit` replaces each adopted file by a symlink into the profile (the original is copied to
+`~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/` first); `apply` links the same files on another
+machine. Keys that only make sense for one machine (power, touchpad, monitors) are captured into
+that machine's overlay.
 
 ## Tweaks
 

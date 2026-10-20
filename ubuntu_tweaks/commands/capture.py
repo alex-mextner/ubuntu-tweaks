@@ -62,9 +62,11 @@ def execute(
     home: Path,
     now: datetime,
     run: Runner,
+    state_home: Path | None = None,
     **sources: Path,
 ) -> int:
-    """``sources`` may carry ``installer_baseline``, ``snap_seed`` and ``keyboard_file``."""
+    """``state_home`` is where backups go (default ``<home>/.local/state``); ``sources`` may carry
+    ``installer_baseline``, ``snap_seed`` and ``keyboard_file``."""
     from ubuntu_tweaks.capture.commit import commit
     from ubuntu_tweaks.capture.plan import build_plan
     from ubuntu_tweaks.capture.report import build_document, render_markdown, render_text
@@ -80,16 +82,25 @@ def execute(
         report.write_text(render_markdown(document), encoding="utf-8")
         print(f"report written to {report}")
     if args.commit:
-        for line in commit(plan, email_exempt_keys=rules.email_exempt_keys, home=home, now=now):
+        for line in commit(plan, email_exempt_keys=rules.email_exempt_keys, home=home, now=now, state_home=state_home):
             print(line)
         print(f"nothing was committed to git: review `git diff` in {ctx.profile.root}")
     return 0
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    from ubuntu_tweaks.backup import default_state_home
     from ubuntu_tweaks.capture.system_scan import default_runner
     from ubuntu_tweaks.settings import GioBackend
 
     home = Path.home()
     backend = GioBackend.with_extensions(home)
-    return execute(ctx, args, backend, home=home, now=datetime.now(UTC), run=default_runner)
+    return execute(
+        ctx,
+        args,
+        backend,
+        home=home,
+        now=datetime.now(UTC),
+        run=default_runner,
+        state_home=default_state_home(),
+    )

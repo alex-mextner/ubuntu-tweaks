@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# End-to-end check of the CLI against a scratch dconf: `apply --commit` on an empty profile,
-# then `status` exits 0, then a second `apply --commit` reports `0 changed`.
+# End-to-end check of the CLI against a scratch dconf and a scratch HOME: a module settings preset,
+# a profile panel file, a machine overlay, two linked files and an extension module are applied
+# with `apply --commit`; then `status` exits 0, a second `apply --commit` reports `0 changed`,
+# and a `capture` preview reads the result back without writing.
 #
 # The scratch environment (temporary HOME, XDG_* incl. XDG_RUNTIME_DIR, DCONF_PROFILE) is exported
 # BEFORE `dbus-run-session` starts: the dconf service is activated by the bus daemon and inherits
 # the daemon's environment, so setting these only inside the session would let it write the
 # live user's dconf database (safety invariant 6). The inner run refuses to continue unless it is
-# inside that scratch environment. Limited to the english-in-overview module: the others need
-# network (hyperdock submodule) or root (memguard). Skips (exit 0, loudly) when the
-# org.gnome.shell schema is not installed.
+# inside that scratch environment and on a bus other than the parent's. It runs a scratch copy of
+# the engine with an extra fixture module, so it needs neither network (hyperdock submodule) nor
+# root (memguard). Skips (exit 0, loudly) when the org.gnome.shell schema is not installed.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +28,7 @@ if [[ "${UBUNTU_TWEAKS_SCRATCH:-}" != "1" ]]; then
     printf 'user-db:user\n' >"$tmp/dconf-profile"
     env -u UBUNTU_TWEAK_PROFILE -u DBUS_SESSION_BUS_ADDRESS \
         UBUNTU_TWEAKS_SCRATCH=1 \
+        UBUNTU_TWEAKS_PARENT_BUS="${DBUS_SESSION_BUS_ADDRESS:-}" \
         UBUNTU_TWEAKS_SCRATCH_ROOT="$tmp" \
         HOME="$tmp/home" \
         XDG_CONFIG_HOME="$tmp/home/.config" \
@@ -39,19 +42,64 @@ if [[ "${UBUNTU_TWEAKS_SCRATCH:-}" != "1" ]]; then
     exit $?
 fi
 
-# Inside the scratch session. Refuse to touch anything that is not under the scratch root.
+# Inside the scratch session. Refuse to touch anything that is not under the scratch root, and
+# refuse when the session bus is the parent's (a bus-activated dconf would then be the live one).
 root="${UBUNTU_TWEAKS_SCRATCH_ROOT:?}"
 [[ "$HOME" == "$root/home" && "$DCONF_PROFILE" == "$root/dconf-profile" && "$XDG_RUNTIME_DIR" == "$root/runtime" ]] ||
     { echo "integration: refusing to run outside the scratch environment" >&2; exit 2; }
+[[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" && "$DBUS_SESSION_BUS_ADDRESS" != "${UBUNTU_TWEAKS_PARENT_BUS:-}" ]] ||
+    { echo "integration: refusing to run on the parent's session bus" >&2; exit 2; }
 
 python="${PYTHON:-/usr/bin/python3}"
-flags=(--profile "$root/profile" --machine integration --only english-in-overview)
-tweak() { "$python" -B "$repo/bin/ubuntu-tweak" "$@"; }
 
-echo "== apply --commit (empty profile)"
+# A scratch copy of the engine with one extra fixture module, so the run needs neither network
+# (hyperdock submodule) nor root (memguard): english-in-overview (extension link + enable) plus
+# scratch-demo (module settings preset).
+scratch_repo="$root/repo"
+mkdir -p "$scratch_repo/modules" "$scratch_repo/gnome-extensions"
+cp -a "$repo/bin" "$repo/ubuntu_tweaks" "$scratch_repo/"
+cp -a "$repo/modules/english-in-overview" "$scratch_repo/modules/"
+cp -a "$repo/gnome-extensions/english-in-overview@ultra" "$scratch_repo/gnome-extensions/"
+mkdir -p "$scratch_repo/modules/scratch-demo"
+cat >"$scratch_repo/modules/scratch-demo/module.toml" <<'EOF'
+description = "integration fixture: a module settings preset"
+
+[source]
+kind = "builtin"
+
+[[settings]]
+file = "preset.ini"
+schema = "org.gnome.desktop.interface"
+EOF
+printf "[/]\nclock-show-seconds=true\n" >"$scratch_repo/modules/scratch-demo/preset.ini"
+
+# The profile: a shared panel file, a machine overlay (wins over shared, adds a key of its own),
+# a shared file and a machine file to link.
+profile="$root/profile"
+mkdir -p "$profile/settings" "$profile/files/.config" \
+    "$profile/machines/integration/settings" "$profile/machines/integration/files/.config"
+printf "[org/gnome/desktop/interface]\ncolor-scheme='prefer-dark'\nclock-show-date=false\n" >"$profile/settings/appearance.ini"
+printf "[org/gnome/desktop/interface]\ncolor-scheme='prefer-light'\ntext-scaling-factor=1.25\n" \
+    >"$profile/machines/integration/settings/appearance.ini"
+printf "shared = 1\n" >"$profile/files/.config/ubuntu-tweak-integration.conf"
+printf "machine = 1\n" >"$profile/machines/integration/files/.config/ubuntu-tweak-integration-machine.conf"
+
+flags=(--profile "$profile" --machine integration)
+tweak() { "$python" -B "$scratch_repo/bin/ubuntu-tweak" "$@"; }
+fail() { echo "integration: $*" >&2; exit 1; }
+
+echo "== machine"
+tweak machine "${flags[@]}"
+
+echo "== apply (preview changes nothing)"
+preview="$(tweak apply "${flags[@]}")"
+echo "$preview"
+[[ ! -e "$HOME/.config/ubuntu-tweak-integration.conf" ]] || fail "the preview linked a file"
+
+echo "== apply --commit (empty system)"
 first="$(tweak apply --commit "${flags[@]}")"
 echo "$first"
-grep -Eq '^[1-9][0-9]* changed$' <<<"$first" || { echo "integration: first apply changed nothing" >&2; exit 1; }
+grep -Eq '^[1-9][0-9]* changed$' <<<"$first" || fail "first apply changed nothing"
 
 echo "== status"
 tweak status "${flags[@]}"
@@ -59,10 +107,27 @@ tweak status "${flags[@]}"
 echo "== apply --commit again"
 second="$(tweak apply --commit "${flags[@]}")"
 echo "$second"
-grep -qx '0 changed' <<<"$second" || { echo "integration: second apply was not a no-op" >&2; exit 1; }
+grep -qx '0 changed' <<<"$second" || fail "second apply was not a no-op"
 
 link="$XDG_DATA_HOME/gnome-shell/extensions/english-in-overview@ultra"
-[[ -L "$link" ]] || { echo "integration: extension link missing: $link" >&2; exit 1; }
+[[ -L "$link" ]] || fail "extension link missing: $link"
 enabled="$(/usr/bin/gsettings get org.gnome.shell enabled-extensions)"
-[[ "$enabled" == *"english-in-overview@ultra"* ]] || { echo "integration: not enabled in scratch dconf: $enabled" >&2; exit 1; }
+[[ "$enabled" == *"english-in-overview@ultra"* ]] || fail "not enabled in scratch dconf: $enabled"
+
+interface=org.gnome.desktop.interface
+[[ "$(/usr/bin/gsettings get $interface clock-show-seconds)" == true ]] || fail "module preset key not applied"
+[[ "$(/usr/bin/gsettings get $interface clock-show-date)" == false ]] || fail "shared panel key not applied"
+[[ "$(/usr/bin/gsettings get $interface color-scheme)" == "'prefer-light'" ]] || fail "machine overlay did not win"
+[[ "$(/usr/bin/gsettings get $interface text-scaling-factor)" == 1.25 ]] || fail "machine-only key not applied"
+for name in ubuntu-tweak-integration ubuntu-tweak-integration-machine; do
+    [[ -L "$HOME/.config/$name.conf" ]] || fail "$name.conf is not a symlink"
+    [[ "$(readlink "$HOME/.config/$name.conf")" == "$profile"/* ]] || fail "$name.conf does not point into the profile"
+done
+
+echo "== capture (preview; the scratch dconf and HOME are all it can see)"
+capture="$(tweak capture "${flags[@]}" --report "$root/capture.md" -v)"
+echo "$capture"
+[[ -s "$root/capture.md" ]] || fail "capture wrote no report"
+grep -q "color-scheme" <<<"$capture" || fail "capture does not list the applied keys"
+[[ "$(cat "$profile/settings/appearance.ini")" == *"prefer-dark"* ]] || fail "capture preview modified the profile"
 echo "integration: OK"

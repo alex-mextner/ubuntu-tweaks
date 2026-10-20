@@ -35,7 +35,8 @@ from ubuntu_tweaks.settings import SettingsBackend
 CHECK_TIMEOUT_SECONDS = 60
 DRIFT_EXIT = 3
 MISSING_EXIT = 127  # Process.query's answer for a binary that does not exist
-TIMEOUT_EXIT = 124  # Process.query's answer for a command that outlived its timeout
+UNRUNNABLE_EXIT = 126  # ... for one that cannot be executed (no exec bit, bad cwd)
+TIMEOUT_EXIT = 124  # ... for a command that outlived its timeout
 _OUTPUT_TAIL_LINES = 10
 
 
@@ -66,7 +67,10 @@ class SystemModuleAction(Action):
             raise ActionFailed(f"{self._manifest.name}: {error}") from error
 
     def describe(self) -> str:
-        shown = self._install_argv()
+        try:
+            shown = self._process.elevate(self._argv(self._manifest.source.install))
+        except CommandError:
+            shown = ["sudo", "--", *self._argv(self._manifest.source.install)]  # run() reports the missing helper
         for index, part in enumerate(shown):
             try:
                 shown[index] = str(Path(part).relative_to(self._display_root))
@@ -85,8 +89,9 @@ class SystemModuleAction(Action):
             return False
         if result.returncode == TIMEOUT_EXIT:
             raise ActionFailed(f"{name}: check {shlex.join(argv)} did not finish within {CHECK_TIMEOUT_SECONDS}s")
-        if result.returncode == MISSING_EXIT:
-            raise ActionFailed(f"{name}: cannot run check {shlex.join(argv)}: {result.stderr.strip()}")
+        if result.returncode in (MISSING_EXIT, UNRUNNABLE_EXIT):
+            detail = _tail(result.stderr)
+            raise ActionFailed(f"{name}: cannot run check {shlex.join(argv)}" + (f"\n{detail}" if detail else ""))
         output = _tail(result.stderr) or _tail(result.stdout)
         raise ActionFailed(
             f"{name}: check {shlex.join(argv)} crashed (exit {result.returncode}, expected 0 or {DRIFT_EXIT})"

@@ -4,8 +4,8 @@ Accessed via: planner discovery (``planners/__init__.py``).
 
 Assumptions: the link name is the uuid from the extension's ``metadata.json`` (resolved lazily, so
 the action can be planned before a submodule is initialized). A real directory, a file or a symlink
-elsewhere in the way makes the action kind ``link-replace``: it is moved to
-``~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/`` first (``symlink.replace_with_symlink``).
+elsewhere in the way makes the action kind ``link-replace``: it is copied to
+``~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/`` and removed first (``symlink.replace_with_symlink``).
 ``extras()`` lists symlinks that point into this repository under a name no module declares.
 """
 

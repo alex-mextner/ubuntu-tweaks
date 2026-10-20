@@ -287,6 +287,7 @@ class GioBackendTests(unittest.TestCase):
                 GSETTINGS_BACKEND="dconf",
                 PYTHONPATH=str(REPO_ROOT),
                 UBUNTU_TWEAKS_SCRATCH="1",
+                UBUNTU_TWEAKS_PARENT_BUS=os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""),
             )
 
             result = subprocess.run(

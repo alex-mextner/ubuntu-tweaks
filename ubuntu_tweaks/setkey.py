@@ -9,7 +9,7 @@ Assumptions:
 
 - A keyfile section is a dconf directory (``org/gnome/desktop/interface``); the schema that owns
   it is looked up from ``SettingsBackend.schemas()`` (fixed paths) or, for the few relocatable
-  schemas GNOME Settings uses, from ``RELOCATABLE_PATHS``. A key whose directory has no installed
+  schemas GNOME Settings uses, from ``relocatable_schemas()``. A key whose directory has no installed
   schema is never guessed: the caller gets an ``Unresolved`` reason and shows it as a warning.
 - Effective values come from Gio, so a key whose value is pinned by the session's keyfile
   override is "satisfied" when the override already holds the wanted value and is never frozen
@@ -23,7 +23,7 @@ Assumptions:
 
 Public API:
 
-- ``RELOCATABLE_PATHS``: ``(compiled path pattern, schema id)`` pairs from ``panels.toml``'s ``[[relocatable]]``.
+- ``relocatable_schemas()`` (from ``capture.rules``): ``(compiled path pattern, schema id)`` pairs from ``panels.toml``'s ``[[relocatable]]``.
 - ``MODULE_OWNED_KEYS``: dconf keys no keyfile (panel file or module preset) may set
   (``enabled-extensions``, ``disabled-extensions``: the toggle planner owns them as single-item edits
   of the user value).
@@ -62,8 +62,6 @@ from ubuntu_tweaks.settings import (
 )
 
 from gi.repository import GLib  # noqa: E402  (ubuntu_tweaks.settings has pinned the GLib typelib version)
-
-RELOCATABLE_PATHS = relocatable_schemas()
 
 MODULE_OWNED_KEYS = frozenset({"/org/gnome/shell/enabled-extensions", "/org/gnome/shell/disabled-extensions"})
 
@@ -104,7 +102,7 @@ class SchemaIndex:
 
     def candidates(self, directory: str) -> list[tuple[str, str | None]]:
         found: list[tuple[str, str | None]] = [(schema, None) for schema in self._fixed.get(directory, ())]
-        for pattern, schema in RELOCATABLE_PATHS:
+        for pattern, schema in relocatable_schemas():
             if schema in self._paths and self._paths[schema] is None and pattern.fullmatch(directory):
                 found.append((schema, directory))
         return found

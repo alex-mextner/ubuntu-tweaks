@@ -19,8 +19,8 @@ Order and guarantees:
 4. ``packages.toml`` / ``system.toml`` are updated for ``+``/``~`` items (the file is regenerated
    from its parsed content: comments are not preserved, ticket #29).
 
-Public API: ``commit(plan, *, email_exempt_keys, home, now) -> list[str]`` (human-readable lines
-for what was written).
+Public API: ``commit(plan, *, email_exempt_keys, home, now, state_home=None) -> list[str]``
+(human-readable lines for what was written; ``state_home`` defaults to ``<home>/.local/state``).
 """
 
 from __future__ import annotations
@@ -112,7 +112,14 @@ def _planned_writes(plan: CapturePlan) -> list[tuple[Path, str]]:
     return writes
 
 
-def commit(plan: CapturePlan, *, email_exempt_keys: Sequence[str], home: Path, now: datetime) -> list[str]:
+def commit(
+    plan: CapturePlan,
+    *,
+    email_exempt_keys: Sequence[str],
+    home: Path,
+    now: datetime,
+    state_home: Path | None = None,
+) -> list[str]:
     profile = plan.profile
     writes = _planned_writes(plan)
 
@@ -149,7 +156,9 @@ def commit(plan: CapturePlan, *, email_exempt_keys: Sequence[str], home: Path, n
     for a in adopted:
         if a.status != "identical":
             _atomic_write(a.dest, a.content, mode_from=a.source)
-        backup = backup_file(a.source, now=now, state_home=home / ".local/state")
+        backup = backup_file(
+            a.source, now=now, state_home=state_home if state_home is not None else home / ".local/state"
+        )
         link = a.source.with_name(f".{a.source.name}.ubuntu-tweak-link")
         link.unlink(missing_ok=True)
         os.symlink(os.path.abspath(a.dest), link)

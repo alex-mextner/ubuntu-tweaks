@@ -5,12 +5,12 @@ Usage: ``gio_scenario.py <schema-dir>``; exits 0 when every check holds, prints 
 check and exits 1 otherwise.
 """
 
-import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from gi.repository import GLib
 
+from tests.scratch_guard import scratch_problem
 from ubuntu_tweaks.settings import GioBackend, SettingsError, is_satisfied, parse_value
 
 FIXED = "test.ubuntu.tweaks"
@@ -35,8 +35,9 @@ def raises(function: Callable[..., object], *args: object) -> bool:
 
 
 def main(schema_dir: Path) -> int:
-    if os.environ.get("UBUNTU_TWEAKS_SCRATCH") != "1" or "DCONF_PROFILE" not in os.environ:
-        print("refusing to write dconf outside a scratch session (see tests/test_settings.py)")
+    problem = scratch_problem(schema_dir.parent)
+    if problem:
+        print(f"refusing to run: {problem}")
         return 2
     backend = GioBackend([schema_dir])
     check(backend.schema_dirs == (schema_dir,), "schema_dirs lists the extra directory")

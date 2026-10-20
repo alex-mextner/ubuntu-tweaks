@@ -105,7 +105,8 @@ class SystemModulePlannerTests(TempDirCase):
         self.module("memguard")
         for code, stderr, pattern in (
             (124, "x: timed out after 60 s", r"memguard: check .* did not finish within 60s"),
-            (127, "x: command not found", r"memguard: cannot run check .*command not found"),
+            (127, "x: command not found", r"(?s)memguard: cannot run check .*command not found"),
+            (126, "x: cannot run: Permission denied", r"(?s)memguard: cannot run check .*Permission denied"),
         ):
             with self.subTest(code=code):
                 runner = Recorder(check_exit=code, stderr=stderr)
@@ -197,6 +198,29 @@ class DefaultRunnerTests(TempDirCase):
         plan = Plan.build(system_modules.build(Context(repo, profile), FakeBackend()))
 
         self.assertEqual([action.scope for action in plan.actions], ["demo"])
+
+    def test_a_checker_without_the_exec_bit_is_a_clear_failure_not_a_traceback(self) -> None:
+        repo = self.tmp / "repo"
+        write(repo / "modules/demo/module.toml", MANIFEST.format(enabled="true"))
+        write(repo / "modules/demo/install.sh", "#!/bin/sh\nexit 3\n")  # no chmod +x
+        profile = Profile(self.tmp / "profile", "home")
+        profile.root.mkdir()
+
+        with self.assertRaisesRegex(ActionFailed, r"demo: cannot run check .*install\.sh --check"):
+            Plan.build(system_modules.build(Context(repo, profile), FakeBackend()))
+
+    def test_preview_renders_without_sudo_or_pkexec_on_the_machine(self) -> None:
+        repo = self.tmp / "repo"
+        write(repo / "modules/demo/module.toml", MANIFEST.format(enabled="true"))
+        (action,) = system_modules.build(Context(repo, Profile(self.tmp / "profile", "home")), FakeBackend())
+
+        with (
+            mock.patch.object(process.os, "geteuid", return_value=1000),
+            mock.patch.object(process.shutil, "which", return_value=None),
+        ):
+            self.assertIn("sudo -- modules/demo/install.sh --now", action.describe())
+            with self.assertRaisesRegex(ActionFailed, "neither sudo nor pkexec"):
+                action.run()
 
 
 if __name__ == "__main__":
