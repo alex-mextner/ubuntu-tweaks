@@ -143,6 +143,16 @@ class InstallCheck(unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertIn(runtime, r.stdout)
 
+    @unittest.skipIf(os.geteuid() == 0, "root can read mode-000 files")
+    def test_the_stamp_does_not_mask_an_unreadable_polkit_rule_in_a_traversable_directory(self):
+        self.install_all()
+        self.write_stamp()
+        rule = os.path.join(self.root, "etc/polkit-1/rules.d/50-memguard-swap-drain.rules")
+        os.chmod(rule, 0)
+        r = self.check("--check")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn(rule, r.stdout)
+
     def test_root_override_is_refused_for_a_real_install(self):
         r = self.check()
         self.assertEqual(r.returncode, 2)

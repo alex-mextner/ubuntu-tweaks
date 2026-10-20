@@ -182,6 +182,13 @@ class InstallTests(unittest.TestCase):
         self.assertIn("depmod -a " + OLD, self.calls())
         self.assertNotIn("modprobe " + NAME, self.calls())
 
+    def test_a_fixed_running_kernel_never_gets_the_running_kernel_index_refresh(self):
+        self.kernel(FIXED)
+        self.kernel(OLD, ko=True)
+        r = self.run_install(kver=FIXED)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("depmod -a " + FIXED, self.calls())
+
     def test_a_dropped_in_module_gets_a_module_index_before_modprobe(self):
         self.kernel(OLD, ko=True)
         self.conf()

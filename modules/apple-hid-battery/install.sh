@@ -107,11 +107,12 @@ if [ "$any_ko" = 0 ]; then
     changed=1
   fi
 elif [ "$(cat "$conf" 2>/dev/null || true)" != "$name" ]; then
+  # a module loaded by hand or dropped in by a pod may be missing from the running kernel's
+  # index; index first, so a failed depmod leaves the conf unwritten and the next run retries
+  has_upstream_fix "$kver" || depmod -a "$kver"
   mkdir -p "$(dirname "$conf")"
   printf '%s\n' "$name" >"$conf"
   echo "installed $conf"
-  # a module loaded by hand or dropped in by a pod may be missing from the running kernel's index
-  has_upstream_fix "$kver" || depmod -a "$kver"
   changed=1
 fi
 

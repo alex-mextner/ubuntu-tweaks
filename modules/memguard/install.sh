@@ -74,12 +74,14 @@ for entry in "${files[@]}"; do
     *) cp "$here/$src" "$out" ;;
   esac
   stamp_lines+=("$mode $(sha256sum <"$out" | cut -d' ' -f1) $dst")
-  if { [ -d "$(dirname "$dst")" ] && [ ! -x "$(dirname "$dst")" ]; } || { [ -e "$dst" ] && [ ! -r "$dst" ]; }; then
-    # only the polkit rule lives in a root-only directory by design; any other unreadable file
-    # is real drift and must not be masked by a historical stamp
-    if [ "${src%.rules}" != "$src" ] && grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
-      continue
-    fi
+  parent=$(dirname "$dst")
+  # Only the polkit rules directory is root-only by design; a stamp vouches for files inside it
+  # and nothing else, so any other unreadable file is reported as drift.
+  if [ -d "$parent" ] && [ ! -x "$parent" ] && [ "$parent" = "$root/etc/polkit-1/rules.d" ] &&
+    grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
+    continue
+  fi
+  if { [ -d "$parent" ] && [ ! -x "$parent" ]; } || { [ -e "$dst" ] && [ ! -r "$dst" ]; }; then
     echo "? $dst: not readable without sudo and the install stamp does not vouch for it"
     pending=1
     continue
