@@ -12,6 +12,20 @@ class DconfPathTests(unittest.TestCase):
                 self.assertTrue(is_dconf_dir_path(good))
 
     def test_rejects_everything_else(self) -> None:
-        for bad in ("", "/", "//", "a/b/", "/a/b", "/a//b/", "/a/./b/", "/a/../b/", "a"):
+        for bad in (
+            "",
+            "/",
+            "//",
+            "///",
+            "//a/",
+            "/a//",
+            "///a///",
+            "a/b/",
+            "/a/b",
+            "/a//b/",
+            "/a/./b/",
+            "/a/../b/",
+            "a",
+        ):
             with self.subTest(path=bad):
                 self.assertFalse(is_dconf_dir_path(bad))

@@ -9,4 +9,4 @@ or a migration may address, so it is False. Kept free of ``gi`` so ``manifest.py
 def is_dconf_dir_path(path: str) -> bool:
     if not path.startswith("/") or not path.endswith("/"):
         return False
-    return all(component not in {"", ".", ".."} for component in path.strip("/").split("/"))
+    return all(component not in {"", ".", ".."} for component in path[1:-1].split("/"))
