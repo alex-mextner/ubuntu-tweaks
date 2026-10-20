@@ -12,7 +12,7 @@ from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.planners import settings as planner
 from ubuntu_tweaks.profile import Profile
-from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, parse_value
+from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema
 from tests.util import TempDirCase, write
 
 INTERFACE = "org.gnome.desktop.interface"
@@ -349,17 +349,6 @@ class ModulePresetTests(SettingsPlannerCase):
         actions = planner.build(self.context(), FakeBackend([*SCHEMAS, extension_schema()]))
 
         self.assertEqual(sorted(a.target.key for a in actions), ["gtk-theme", "size"])  # type: ignore[attr-defined]
-
-    def test_a_seed_whose_effective_value_comes_from_an_override_is_not_written(self) -> None:
-        class Overridden(FakeBackend):
-            def effective(self, schema, path, key):  # test double: the session override decides every key
-                return parse_value(self, schema, key, "'From-Override'")
-
-        self.builtin_module("tune", "[/]\ngtk-theme='Seeded'\n", mode="seed")
-        backend = Overridden(SCHEMAS)
-
-        self.assertEqual(len(Plan.build(planner.build(self.context(), backend))), 0)
-        self.assertEqual(backend.writes, [])
 
 
 class PendingExtensionSchemaTests(SettingsPlannerCase):

@@ -331,12 +331,7 @@ class SeedKeyAction(_KeyAction):
         if not self._installed():
             return False
         target = self.target
-        if self._backend.user_value(target.schema, target.path, target.key) is not None:
-            return True
-        # No user value, yet the effective value differs from the default: a session override
-        # (keyfile or defaults db) already decides it; writing would freeze it into dconf.
-        effective = self._backend.effective(target.schema, target.path, target.key)
-        return not effective.equal(self._backend.default(target.schema, target.path, target.key))
+        return self._backend.user_value(target.schema, target.path, target.key) is not None
 
     def describe(self) -> str:
         text = f"{self.target.full} = {short(self._wanted_text())} (only while unset)"

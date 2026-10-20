@@ -35,9 +35,34 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def scratch_problem(root: Path) -> str | None:
+    """Why this process must not touch dconf, or None when it is provably inside the scratch session.
+
+    Everything dconf-related must be rooted in the temp ``root`` and the bus must be the private one
+    ``dbus-run-session`` started: a bus-activated dconf-service inherits the *bus daemon's*
+    environment, so a bus address equal to the parent's would reach the live user's dconf."""
+    if os.environ.get("UBUNTU_TWEAKS_SCRATCH") != "1":
+        return "UBUNTU_TWEAKS_SCRATCH is not set"
+    resolved = os.path.realpath(root)
+    for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
+        value = os.environ.get(name, "")
+        if not value or not os.path.realpath(value).startswith(resolved + os.sep):
+            return f"{name}={value!r} is not under the scratch root {resolved}"
+    profile = os.environ.get("DCONF_PROFILE", "")
+    if not profile or not os.path.realpath(profile).startswith(resolved + os.sep):
+        return f"DCONF_PROFILE={profile!r} is not under the scratch root"
+    if os.environ.get("GSETTINGS_BACKEND") != "dconf":
+        return "GSETTINGS_BACKEND is not dconf"
+    bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if not bus or bus == os.environ.get("UBUNTU_TWEAKS_PARENT_BUS"):
+        return "the session bus is missing or is the parent's own bus"
+    return None
+
+
 def main(root: Path) -> int:
-    if os.environ.get("UBUNTU_TWEAKS_SCRATCH") != "1" or "DCONF_PROFILE" not in os.environ:
-        print("refusing to write dconf outside a scratch session (see tests/test_planner_gio.py)")
+    problem = scratch_problem(root)
+    if problem:
+        print(f"refusing to run: {problem}")
         return 2
     repo, profile_root = root / "repo", root / "profile"
     extension = repo / "gnome-extensions/ext@x"

@@ -183,9 +183,9 @@ that is absolute or contains `..` are invalid config (exit 2).
   settings schema (the first `[[settings]]` entry's `schema`, else the extension's
   `metadata.json` `settings-schema`); its provider is a function in `ubuntu_tweaks/seeds.py`
   returning GVariant text plus the directories to create. Its check is "the key has a user
-  value, or an override already makes its effective value differ from the default" (so a
-  session override is never frozen into dconf), and it is never drift-checked. An unknown
-  provider name is invalid config.
+  value" (a value that a defaults database or override already supplies counts as "at its
+  default", as Gio reports it), so it is never drift-checked. An unknown provider name is
+  invalid config.
 - **Migrations** run before settings: when `from_uuid` is still installed or `from_path`
   has user values and the module's current schema path has none, user values are copied
   to the new path, the old uuid is removed from `enabled-extensions`, and its symlink is
