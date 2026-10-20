@@ -19,7 +19,7 @@ while [ "$1" != -C ]; do shift; done
 echo fake-ko >"$2/{NAME}.ko"
 """
 FAKE_STRIP = '#!/bin/sh\necho "strip $*" >>"$FAKE_LOG"\n'
-FAKE_DEPMOD = '#!/bin/sh\necho "depmod $*" >>"$FAKE_LOG"\n'
+FAKE_DEPMOD = '#!/bin/sh\necho "depmod $*" >>"$FAKE_LOG"\n[ ! -e "$APPLE_HID_ROOT/depmod-fails" ]\n'
 FAKE_MODPROBE = f"""#!/bin/sh
 echo "modprobe $*" >>"$FAKE_LOG"
 mkdir -p "$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}"
@@ -181,6 +181,20 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("depmod -a " + OLD, self.calls())
         self.assertNotIn("modprobe " + NAME, self.calls())
+
+    def test_a_failed_depmod_leaves_the_conf_unwritten_so_the_next_run_retries(self):
+        self.kernel(OLD, ko=True)
+        self.live()
+        marker = self.path("depmod-fails")
+        with open(marker, "w"):
+            pass
+        failed = self.run_install()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(os.path.exists(self.path("etc/modules-load.d/livepatch-hid-battery-offset.conf")))
+        os.remove(marker)
+        retried = self.run_install()
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertTrue(os.path.exists(self.path("etc/modules-load.d/livepatch-hid-battery-offset.conf")))
 
     def test_a_fixed_running_kernel_never_gets_the_running_kernel_index_refresh(self):
         self.kernel(FIXED)
