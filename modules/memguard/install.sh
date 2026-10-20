@@ -75,7 +75,9 @@ for entry in "${files[@]}"; do
   esac
   stamp_lines+=("$mode $(sha256sum <"$out" | cut -d' ' -f1) $dst")
   if { [ -d "$(dirname "$dst")" ] && [ ! -x "$(dirname "$dst")" ]; } || { [ -e "$dst" ] && [ ! -r "$dst" ]; }; then
-    if grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
+    # only the polkit rule lives in a root-only directory by design; any other unreadable file
+    # is real drift and must not be masked by a historical stamp
+    if [ "${src%.rules}" != "$src" ] && grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
       continue
     fi
     echo "? $dst: not readable without sudo and the install stamp does not vouch for it"

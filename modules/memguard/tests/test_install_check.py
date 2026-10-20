@@ -133,6 +133,16 @@ class InstallCheck(unittest.TestCase):
             self.assertEqual(r.returncode, 3)
             self.assertIn("install stamp does not vouch for it", r.stdout)
 
+    @unittest.skipIf(os.geteuid() == 0, "root can read mode-000 files")
+    def test_the_stamp_does_not_mask_an_unreadable_runtime_file(self):
+        self.install_all()
+        self.write_stamp()
+        runtime = os.path.join(self.root, "usr/local/bin/memguard")
+        os.chmod(runtime, 0)
+        r = self.check("--check")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn(runtime, r.stdout)
+
     def test_root_override_is_refused_for_a_real_install(self):
         r = self.check()
         self.assertEqual(r.returncode, 2)

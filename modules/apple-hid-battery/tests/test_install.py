@@ -24,10 +24,11 @@ FAKE_MODPROBE = f"""#!/bin/sh
 echo "modprobe $*" >>"$FAKE_LOG"
 mkdir -p "$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}"
 echo 1 >"$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}/enabled"
+mkdir -p "$APPLE_HID_ROOT/sys/module/{NAME}"
 """
 FAKE_RMMOD = f"""#!/bin/sh
 echo "rmmod $*" >>"$FAKE_LOG"
-rm -rf "$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}"
+rm -rf "$APPLE_HID_ROOT/sys/kernel/livepatch/{NAME}" "$APPLE_HID_ROOT/sys/module/{NAME}"
 """
 
 
@@ -166,12 +167,20 @@ class InstallTests(unittest.TestCase):
     def test_a_loaded_but_disabled_livepatch_is_unloaded_before_modprobe(self):
         self.kernel(OLD, ko=True)
         self.conf()
-        self.live("0")
+        os.makedirs(self.path("sys/module", NAME))  # loaded; its livepatch directory is gone once disabled
         r = self.run_install()
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.calls()
         self.assertLess(calls.index("rmmod " + NAME), calls.index("modprobe " + NAME))
         self.assertEqual(self.run_install("--check").returncode, 0)
+
+    def test_writing_the_conf_refreshes_the_index_even_when_the_module_is_already_enabled(self):
+        self.kernel(OLD, ko=True)
+        self.live()
+        r = self.run_install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("depmod -a " + OLD, self.calls())
+        self.assertNotIn("modprobe " + NAME, self.calls())
 
     def test_a_dropped_in_module_gets_a_module_index_before_modprobe(self):
         self.kernel(OLD, ko=True)

@@ -110,6 +110,8 @@ elif [ "$(cat "$conf" 2>/dev/null || true)" != "$name" ]; then
   mkdir -p "$(dirname "$conf")"
   printf '%s\n' "$name" >"$conf"
   echo "installed $conf"
+  # a module loaded by hand or dropped in by a pod may be missing from the running kernel's index
+  has_upstream_fix "$kver" || depmod -a "$kver"
   changed=1
 fi
 
@@ -118,8 +120,9 @@ if [ "$running_without_headers" = 1 ]; then
   exit 1
 fi
 if ! has_upstream_fix "$kver" && [ "$(cat "$enabled_file" 2>/dev/null || true)" != 1 ]; then
-  # a loaded but disabled livepatch cannot be re-enabled by modprobe: unload it first
-  if [ -e "$enabled_file" ]; then
+  # a loaded but disabled livepatch cannot be re-enabled by modprobe (its sysfs directory is
+  # already gone, but /sys/module/<name> stays): unload it first
+  if [ -d "$root/sys/module/$name" ]; then
     rmmod "$name"
   fi
   depmod -a "$kver"
