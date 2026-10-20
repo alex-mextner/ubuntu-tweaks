@@ -25,7 +25,9 @@ Public API:
   ``key_type(schema, key) -> str``, ``effective(schema, path, key) -> Variant``,
   ``user_value(schema, path, key) -> Variant | None``, ``default(schema, path, key) ->
   Variant``, ``write(schema, path, key, value)``, ``reset(schema, path, key)``,
-  ``list_user_keys() -> tuple[UserKey, ...]``.
+  ``list_user_keys() -> tuple[UserKey, ...]``, ``schemas() -> tuple[SchemaInfo, ...]``.
+- ``SchemaInfo(id, path)``: an installed schema and its fixed dconf directory (``None`` when
+  relocatable); ``schemas()`` is how code maps a dconf directory back to the schema that owns it.
 - ``GioBackend(extra_schema_dirs=())``: the real backend (``Gio.SettingsSchemaSource`` chained
   over the system schemas and ``extra_schema_dirs``, a later directory taking precedence over
   an earlier one and over the system; ``Gio.Settings.new_full`` with a path for relocatable
@@ -71,6 +73,12 @@ from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError  # noqa: E402
 
 type Variant = GLib.Variant
 type KeyFileData = dict[str, dict[str, str]]
+
+
+@dataclass(frozen=True)
+class SchemaInfo:
+    id: str
+    path: str | None  # the fixed dconf directory; None for a relocatable schema
 
 
 class SettingsError(UbuntuTweakError):
@@ -124,6 +132,10 @@ class SettingsBackend(ABC):
     @abstractmethod
     def list_user_keys(self) -> tuple[UserKey, ...]:
         """Every key that has a user value, with or without an installed schema."""
+
+    @abstractmethod
+    def schemas(self) -> tuple[SchemaInfo, ...]:
+        """Every installed schema (system and extra directories), sorted by id."""
 
 
 def parse_value(backend: SettingsBackend, schema: str, key: str, text: str) -> Variant:
@@ -238,6 +250,14 @@ class GioBackend(SettingsBackend):
     def reset(self, schema: str, path: str | None, key: str) -> None:
         self._open(schema, path, key).reset(key)
         Gio.Settings.sync()
+
+    def schemas(self) -> tuple[SchemaInfo, ...]:
+        if self._source is None:
+            return ()
+        fixed, relocatable = self._source.list_schemas(True)
+        found = [SchemaInfo(name, self._schema(name).get_path()) for name in fixed]
+        found += [SchemaInfo(name, None) for name in relocatable]
+        return tuple(sorted(found, key=lambda info: info.id))
 
     def list_user_keys(self) -> tuple[UserKey, ...]:
         try:
@@ -365,6 +385,9 @@ class FakeBackend(SettingsBackend):
 
     def list_user_keys(self) -> tuple[UserKey, ...]:
         return tuple(UserKey(directory, key) for directory, key in sorted(self._user))
+
+    def schemas(self) -> tuple[SchemaInfo, ...]:
+        return tuple(SchemaInfo(schema.id, schema.path) for _, schema in sorted(self._schemas.items()))
 
 
 def section_to_path(section: str) -> str:
