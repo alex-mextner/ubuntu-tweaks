@@ -682,8 +682,9 @@ the exact clone command and applies the modules only.
   `dbus-run-session` starts, because the dconf service is activated by the bus daemon and
   inherits the daemon's environment: variables set only inside the session would let it write
   the user's real dconf database. The script refuses to run unless it sees the scratch
-  environment and a session bus other than its parent's, and skips itself when the
-  `org.gnome.shell` schema is not installed. Every test that writes through Gio/dconf
+  environment and a session bus other than its parent's, and skips itself (loudly, exit 0) when the
+  `org.gnome.shell` or `org.gnome.desktop.interface` schema is not installed (CI installs
+  `gnome-shell-common` and `gsettings-desktop-schemas`). Every test that writes through Gio/dconf
   (`tests/gio_scenario.py`, `tests/gio_planner_scenario.py`) calls `tests/scratch_guard.py`
   first and exits 2 on anything but a fully scratch HOME/XDG/DCONF_PROFILE and a private bus.
   Wired into CI
