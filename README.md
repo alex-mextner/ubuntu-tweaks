@@ -94,8 +94,19 @@ switch-to-workspace-left=['<Super><Alt>Left']
 
 `apply` prints the reason next to each key, `status` shows it for modified keys, and `capture --commit`
 rewrites only changed values, keeping every comment and the file's order. Capture puts a new key where
-the profile already holds it, else into the bundle named in `profile.toml` (`[capture.bundles]`
-`"dev-keyboard" = ["org/gnome/desktop/wm/keybindings/**"]`), else into the panel's own file.
+the profile already holds it, else into the bundle that `[capture.bundles]` in `profile.toml` routes it
+to, else into the panel's own file:
+
+```toml
+# profile.toml
+[capture.bundles]                      # first matching entry wins
+"dev-keyboard" = ["org/gnome/desktop/wm/keybindings/**", "org/gnome/shell/extensions/tiling-assistant/**"]
+"laptop/power" = ["org/gnome/settings-daemon/plugins/power/**"]
+```
+
+`packages.toml` keeps reasons too (`"tmux",  # shell tools`; `note packages:apt:tmux "reason"`) and takes
+two optional keys: `flatpak_remote = "flathub"` (the remote flatpaks install from) and
+`apt_update = true` (run `apt-get update` before the apt batch).
 
 ```sh
 ubuntu-tweak bundles                   # list bundles, what applies here, shadowed / duplicated / conflicting keys

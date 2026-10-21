@@ -765,7 +765,7 @@ class CommitTests(TempDirCase):
         home = self.setup_home()
         write(
             self.tmp / "profile/packages.toml",
-            '# my notes\nflatpak = ["org.keep.Me"]  # needed for X\nsnap = [\n  "firefox",  # the browser\n]\n',
+            '# my notes\nflatpak_remote = "flathub-beta"  # beta remote\napt_update = true\nflatpak = ["org.keep.Me"]  # needed for X\nsnap = [\n  "firefox",  # the browser\n]\n',
         )
         plan, rules = make_plan(self)
         commit_plan(plan, rules, home)
@@ -774,7 +774,9 @@ class CommitTests(TempDirCase):
         self.assertEqual(data["flatpak"], ["org.keep.Me", "org.example.Flat"])
         self.assertEqual(data["snap"], ["firefox", "code"])
         self.assertEqual(data["apt"], ["libssl-dev", "ripgrep", "tmux"])
-        for kept in ("# my notes", "# needed for X", '"firefox",  # the browser'):
+        self.assertEqual(data["flatpak_remote"], "flathub-beta")
+        self.assertIs(data["apt_update"], True)
+        for kept in ("# my notes", "# needed for X", "# beta remote", '"firefox",  # the browser'):
             self.assertIn(kept, text)
 
     def test_system_value_set_in_the_overlay_is_replaced_there_so_the_commit_converges(self) -> None:
