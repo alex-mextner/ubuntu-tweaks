@@ -94,6 +94,8 @@ def seeded_backend() -> FakeBackend:
 
 
 def fake_runner(argv: Sequence[str]) -> str | None:
+    if argv[0] == "env":  # `env NAME=value cmd ...`: the scan isolates flatpak's cache this way
+        return fake_runner(argv[2:])
     command = argv[0]
     if command == "apt-mark":
         return "curl\nlibssl-dev\nlibfoo1\nlinux-image-1\nripgrep\nubuntu-desktop\ntmux\n"
@@ -945,6 +947,41 @@ class ReviewRegressionTests(TempDirCase):
             [("apt", "curl"), ("apt", "libssl-dev"), ("apt", "tmux"), ("snap", "code")],  # ripgrep: in the baseline
         )
         self.assertIn("initial-status.gz", note)
+
+    def test_flatpak_scan_does_not_create_the_user_installation(self) -> None:
+        calls: list[Sequence[str]] = []
+
+        def recording(argv: Sequence[str]) -> str | None:
+            calls.append(argv)
+            return fake_runner(argv)
+
+        user_dir = self.tmp / "data/flatpak"
+        items, _note = scan_packages(
+            recording,
+            load_rules().packages,
+            Packages(),
+            installer_baseline=self.tmp / "none",
+            flatpak_user_dir=user_dir,
+        )
+
+        flatpak_calls = [c for c in calls if "flatpak" in c]
+        self.assertEqual(len(flatpak_calls), 1)
+        self.assertIn("--system", flatpak_calls[0])
+        self.assertNotIn("--user", flatpak_calls[0])
+        self.assertTrue(flatpak_calls[0][1].startswith("XDG_CACHE_HOME="))  # flatpak's cache stays out of $HOME
+        self.assertIn(("flatpak", "org.example.Flat"), [(i.manager, i.name) for i in items])
+
+        user_dir.mkdir(parents=True)  # an existing user installation is read too, without duplicates
+        calls.clear()
+        items, _note = scan_packages(
+            recording,
+            load_rules().packages,
+            Packages(),
+            installer_baseline=self.tmp / "none",
+            flatpak_user_dir=user_dir,
+        )
+        self.assertEqual([c[c.index("list") + 1] for c in calls if "flatpak" in c], ["--system", "--user"])
+        self.assertEqual([i.name for i in items if i.manager == "flatpak"], ["org.example.Flat"])
 
     def test_text_report_clips_long_cells_but_markdown_keeps_them(self) -> None:
         backend = seeded_backend()

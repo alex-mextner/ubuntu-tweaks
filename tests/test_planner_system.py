@@ -65,7 +65,7 @@ class Machine(FakeProcess):
             case ["snap", "install"]:
                 self.snaps |= set(words[2:])
             case ["flatpak", "install"]:
-                self.flatpaks |= set(words[words.index("flathub") + 1 :])
+                self.flatpaks |= set(words[words.index("--noninteractive") + 2 :])  # then the remote
             case ["timedatectl", "set-timezone"]:
                 self.timezone = words[2]
             case ["localectl", "set-locale"]:
@@ -129,6 +129,50 @@ class SystemRootTests(ProfileCase):
         with self.assertRaisesRegex(UbuntuTweakError, "not changing it"):
             action.run()
         self.assertEqual(self.machine.executed, [])
+
+    def test_run_reads_localectl_once_even_when_a_second_query_would_fail(self) -> None:
+        write(self.root / "system.toml", 'locale = "en_US.UTF-8"\n')
+        (action,) = self.build()
+        answers = iter([CommandResult(0, LOCALECTL), CommandResult(1, "", "dbus went away")])
+        self.machine.query = lambda argv, *, timeout=60.0: next(answers)  # type: ignore[method-assign]
+
+        action.run()
+
+        self.assertEqual(
+            [argv for argv, _ in self.machine.executed],
+            [("sudo", "--", "localectl", "set-locale", "LANG=en_US.UTF-8", "LC_TIME=de_DE.UTF-8")],
+        )
+
+    def test_locale_status_without_a_system_locale_block_is_unknown_and_not_changed(self) -> None:
+        write(self.root / "system.toml", 'locale = "en_US.UTF-8"\n')
+        (action,) = self.build()
+        self.machine.locale_status = "       VC Keymap: us\n      X11 Layout: us\n"
+
+        self.assertFalse(action.check())
+        self.assertIn("LANG=(unknown)", action.describe())
+        with self.assertRaisesRegex(UbuntuTweakError, "not changing it"):
+            action.run()
+        self.assertEqual(self.machine.executed, [])
+
+    def test_a_system_locale_block_that_cannot_be_parsed_is_unknown_and_not_changed(self) -> None:
+        write(self.root / "system.toml", 'locale = "en_US.UTF-8"\n')
+        (action,) = self.build()
+        self.machine.locale_status = "   System Locale: garbage\n       VC Keymap: us\n"
+
+        with self.assertRaisesRegex(UbuntuTweakError, "not changing it"):
+            action.run()
+        self.assertEqual(self.machine.executed, [])
+
+    def test_an_empty_system_locale_block_is_a_known_empty_locale(self) -> None:
+        write(self.root / "system.toml", 'locale = "en_US.UTF-8"\n')
+        (action,) = self.build()
+        self.machine.locale_status = "   System Locale: n/a\n       VC Keymap: us\n"
+
+        action.run()
+
+        self.assertEqual(
+            [argv for argv, _ in self.machine.executed], [("sudo", "--", "localectl", "set-locale", "LANG=en_US.UTF-8")]
+        )
 
     def test_no_sudo_skips_root_actions_and_says_so(self) -> None:
         write(self.root / "system.toml", 'timezone = "Europe/Belgrade"\n')
@@ -225,6 +269,56 @@ class PackagesTests(ProfileCase):
             ],
         )
         self.assertEqual(len(Plan.build(self.build())), 0)
+
+    def test_flatpak_remote_is_configurable_and_defaults_to_flathub(self) -> None:
+        write(self.root / "packages.toml", 'flatpak = ["org.gnome.Extensions"]\nflatpak_remote = "gnome-nightly"\n')
+        Plan.build(self.build()).execute()
+        self.assertEqual(
+            [argv for argv, _ in self.machine.executed],
+            [("flatpak", "install", "-y", "--noninteractive", "gnome-nightly", "org.gnome.Extensions")],
+        )
+
+        write(self.root / "machines/home/packages.toml", 'flatpak_remote = "flathub-beta"\n')
+        self.machine.flatpaks.clear()
+        self.machine.executed.clear()
+        Plan.build(self.build()).execute()  # the overlay scalar replaces the shared one
+        self.assertEqual(self.machine.executed[0][0][4], "flathub-beta")
+
+    def test_a_bad_flatpak_remote_is_invalid_config(self) -> None:
+        for bad in ('""', '"--user"', '"a b"', "3"):
+            with self.subTest(bad=bad):
+                write(self.root / "packages.toml", f"flatpak_remote = {bad}\n")
+                with self.assertRaisesRegex(ConfigError, "flatpak_remote"):
+                    self.build()
+
+    def test_apt_update_is_opt_in_and_runs_before_the_apt_batch(self) -> None:
+        write(self.root / "packages.toml", 'apt = ["tmux", "curl"]\n')
+        self.machine.apt = {"curl"}
+        Plan.build(self.build()).execute()
+        self.assertEqual(
+            [argv for argv, _ in self.machine.executed], [("sudo", "--", "apt-get", "install", "-y", "tmux")]
+        )
+
+        write(self.root / "packages.toml", 'apt = ["tmux", "curl", "htop"]\napt_update = true\n')
+        self.machine.executed.clear()
+        plan = Plan.build(self.build())
+        self.assertEqual(plan.actions[0].describe(), "apt: install htop (after apt-get update)")
+        self.assertEqual(self.machine.executed, [])
+        plan.execute()
+        self.assertEqual(
+            [argv for argv, _ in self.machine.executed],
+            [("sudo", "--", "apt-get", "update"), ("sudo", "--", "apt-get", "install", "-y", "htop")],
+        )
+
+    def test_apt_update_does_not_run_when_nothing_is_missing(self) -> None:
+        write(self.root / "packages.toml", 'apt = ["tmux"]\napt_update = true\n')
+        self.machine.apt = {"tmux"}
+        self.assertEqual(len(Plan.build(self.build())), 0)
+
+    def test_apt_update_must_be_a_boolean(self) -> None:
+        write(self.root / "packages.toml", 'apt = ["tmux"]\napt_update = "yes"\n')
+        with self.assertRaisesRegex(ConfigError, "apt_update"):
+            self.build()
 
     def test_overlay_names_are_unioned_and_nothing_is_ever_removed(self) -> None:
         write(self.root / "packages.toml", 'apt = ["tmux"]\n')

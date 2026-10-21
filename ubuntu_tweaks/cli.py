@@ -15,7 +15,8 @@ define options of those names.
 Public API:
 
 - ``main(argv=None) -> int``: parse, build the ``Context``, run the handler and return its exit
-  code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; any other
+  code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; a missing
+  ``gi`` module becomes a one-line "sudo apt install python3-gi" message with exit 1; any other
   exception prints a traceback and returns ``ExitCode.INTERNAL``.
 - ``build_parser() -> argparse.ArgumentParser`` and ``discover_commands() -> list[ModuleType]``.
 """
@@ -88,6 +89,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UbuntuTweakError as error:
         print(f"ubuntu-tweak: {error}", file=sys.stderr)
         return int(error.exit_code)
+    except ModuleNotFoundError as error:
+        if error.name != "gi":
+            traceback.print_exc()
+            return int(ExitCode.INTERNAL)
+        print(
+            f"ubuntu-tweak: PyGObject (Python module `gi`) is not available in {sys.executable}; "
+            "install it with: sudo apt install python3-gi",
+            file=sys.stderr,
+        )
+        return int(ExitCode.INTERNAL)
     except Exception:
         traceback.print_exc()
         return int(ExitCode.INTERNAL)

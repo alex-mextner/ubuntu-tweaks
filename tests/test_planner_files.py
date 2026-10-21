@@ -198,6 +198,44 @@ class ExtrasTests(FilesCase):
         self.assertTrue(any(line.startswith("~/.bashrc_orphan -> ") for line in lines))
         self.assertTrue(all("no longer has that file" in line for line in lines))
 
+    def test_an_orphan_three_levels_below_config_is_reported_and_nothing_is_removed(self) -> None:
+        gone = self.profile_root / "files/.config/a/b/c/gone.conf"
+        deep = self.home / ".config/a/b/c"
+        deep.mkdir(parents=True)
+        (deep / "gone.conf").symlink_to(gone)
+
+        lines = self.extras()
+
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("~/.config/a/b/c/gone.conf -> "))
+        self.assertTrue((deep / "gone.conf").is_symlink())  # reported, never removed
+
+    def test_orphans_below_a_managed_directory_outside_config_are_reported(self) -> None:
+        self.shared(".local/share/app/live.txt")
+        nested = self.home / ".local/share/app/x/y"
+        nested.mkdir(parents=True)
+        (nested / "gone").symlink_to(self.profile_root / "files/.local/share/app/x/y/gone")
+        elsewhere = self.home / ".local/share/other"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "gone").symlink_to(self.profile_root / "files/.local/share/other/gone")
+
+        lines = self.extras()
+
+        self.assertEqual(len(lines), 1)  # ~/.local/share/other was never managed, so it is not walked
+        self.assertTrue(lines[0].startswith("~/.local/share/app/x/y/gone -> "))
+
+    def test_caches_and_symlinked_directories_are_not_walked(self) -> None:
+        gone = self.profile_root / "files/.config/gone"
+        for name in ("Code/Cache/Cache_Data", "app/node_modules/pkg", "real"):
+            (self.home / ".config" / name).mkdir(parents=True)
+            (self.home / ".config" / name / "gone").symlink_to(gone)
+        (self.home / ".config/linked").symlink_to(self.home / ".config/real")
+
+        lines = self.extras()
+
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("~/.config/real/gone -> "))
+
     def test_a_clean_home_has_no_extras(self) -> None:
         self.shared(".config/kept.conf")
         self.plan().execute()

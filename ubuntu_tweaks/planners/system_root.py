@@ -92,7 +92,11 @@ class LocaleAction(_RootAction):
         self._wanted = wanted
 
     def _assignments(self) -> dict[str, str] | None:
-        """The ``System Locale:`` block of ``localectl status`` as ``{name: value}``; None when it fails."""
+        """The ``System Locale:`` block of ``localectl status`` as ``{name: value}``.
+
+        None (unknown) when the command fails or its output has no ``System Locale:`` block: the
+        locale then must not be changed, because ``set-locale`` would drop the other ``LC_*``.
+        """
         result = self._process.query(["localectl", "status"])
         if not result.ok:
             return None
@@ -105,31 +109,36 @@ class LocaleAction(_RootAction):
                 if not re.match(r"^\s+[A-Z_]+=", follow):
                     break
                 block.append(follow)
-            return dict(re.findall(r"\b([A-Z_]+)=(\S+)", " ".join(block)))
-        return {}
-
-    def _current(self) -> str | None:
-        assignments = self._assignments()
-        return None if assignments is None else assignments.get("LANG", "")
+            assignments = dict(re.findall(r"\b([A-Z_]+)=(\S+)", " ".join(block)))
+            # "n/a" is localectl's way to say that no locale is set; anything else without an
+            # assignment is output this parser does not understand.
+            return assignments if assignments or block[0].strip() == "n/a" else None
+        return None
 
     def check(self) -> bool:
-        return self._current() == self._wanted
+        assignments = self._assignments()
+        return assignments is not None and assignments.get("LANG", "") == self._wanted
 
-    def _kept(self) -> list[str]:
+    @staticmethod
+    def _kept(assignments: Mapping[str, str]) -> list[str]:
         """The other ``LC_*`` assignments: ``localectl set-locale`` replaces the whole set, so they are passed on."""
-        return [f"{name}={value}" for name, value in (self._assignments() or {}).items() if name != "LANG"]
+        return [f"{name}={value}" for name, value in assignments.items() if name != "LANG"]
 
     def describe(self) -> str:
-        now = self._current()
-        text = f"locale LANG={now if now is not None else '(unknown)'} -> LANG={self._wanted} (localectl set-locale)"
-        kept = self._kept()
+        assignments = self._assignments()
+        now = "(unknown)" if assignments is None else assignments.get("LANG", "")
+        text = f"locale LANG={now} -> LANG={self._wanted} (localectl set-locale)"
+        kept = self._kept(assignments or {})
         return text + (f", keeping {' '.join(kept)}" if kept else "")
 
     def run(self) -> None:
-        if self._assignments() is None:
+        assignments = self._assignments()  # one snapshot: the readable check and the kept LC_* agree
+        if assignments is None:
             # set-locale replaces the whole set; without knowing the current one it would drop LC_*.
-            raise UbuntuTweakError("cannot read the current locale (localectl status failed); not changing it")
-        argv = ["localectl", "set-locale", f"LANG={self._wanted}", *self._kept()]
+            raise UbuntuTweakError(
+                "cannot read the current locale (localectl status failed or has no System Locale block); not changing it"
+            )
+        argv = ["localectl", "set-locale", f"LANG={self._wanted}", *self._kept(assignments)]
         self._process.execute(self._process.elevate(argv))
 
 

@@ -22,8 +22,10 @@ Public API: ``Runner``, ``default_runner``, ``scan_packages``, ``scan_system``, 
 from __future__ import annotations
 
 import gzip
+import os
 import re
 import subprocess
+import tempfile
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -90,6 +92,23 @@ def _metapackage_baseline(run: Runner, metapackages: Sequence[str]) -> set[str]:
     return names
 
 
+def _flatpak_apps(run: Runner, user_dir: Path | None) -> set[str]:
+    """Installed flatpak applications without creating state: a plain ``flatpak list`` creates the
+    user installation (``~/.local/share/flatpak``), so the user scope is asked only when that
+    directory exists, the system scope otherwise, and the cache flatpak writes goes to a temporary
+    directory."""
+    if user_dir is None:
+        data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        user_dir = Path(data_home) / "flatpak"
+    scopes = ["--system", *(["--user"] if user_dir.is_dir() else [])]
+    names: set[str] = set()
+    with tempfile.TemporaryDirectory(prefix="ubuntu-tweak-flatpak-cache.") as cache:
+        for scope in scopes:
+            argv = ["env", f"XDG_CACHE_HOME={cache}", "flatpak", "list", scope, "--app", "--columns=application"]
+            names.update(_lines(run(argv)))
+    return names
+
+
 def scan_packages(
     run: Runner,
     rules: PackageRules,
@@ -97,6 +116,7 @@ def scan_packages(
     *,
     installer_baseline: Path = INSTALLER_BASELINE,
     snap_seed: Path = SNAP_SEED,
+    flatpak_user_dir: Path | None = None,
 ) -> tuple[list[PackageItem], str]:
     """Package proposals plus a one-line note on which apt baseline was used."""
     baseline = _installer_baseline(installer_baseline)
@@ -134,7 +154,7 @@ def scan_packages(
         if "base" in notes or "snapd" in notes or rules.ignore_snaps.matches(name) or name in seeded:
             continue
         items.append(PackageItem("snap", name, "=" if name in existing.snap else "+"))
-    for name in sorted(_lines(run(["flatpak", "list", "--app", "--columns=application"]))):
+    for name in sorted(_flatpak_apps(run, flatpak_user_dir)):
         items.append(PackageItem("flatpak", name, "=" if name in existing.flatpak else "+"))
     return items, note
 

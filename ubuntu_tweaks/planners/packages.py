@@ -8,12 +8,14 @@ Assumptions:
 - Never removes anything: a package that is installed but no longer listed is left alone.
 - ``apt`` and ``snap`` need root (``needs_root = True``): one ``apt-get install -y`` (or ``snap
   install``) batch through sudo/pkexec. ``flatpak`` runs as the user (polkit asks when a system
-  installation needs it) and installs from the ``flathub`` remote; a flatpak that is not on
-  Flathub is not supported.
+  installation needs it) and installs from one remote: ``flatpak_remote`` of ``packages.toml``
+  (default ``flathub``); the remote must already be configured.
 - Installed means: ``dpkg-query`` status ``ii``; a ``snap list`` row; a ``flatpak list`` row
   (apps and runtimes). A missing tool (no ``snap`` on the machine) means "not installed", and the
   install then fails with that tool's own error.
-- Package lists are not refreshed (no ``apt-get update``): the plan only installs.
+- Package lists are refreshed only when ``packages.toml`` sets ``apt_update = true`` (default
+  off): then ``apt-get update`` runs through sudo/pkexec right before the apt batch, and only
+  when some apt package is missing.
 
 Public API: ``build(ctx, backend, *, process=None)``, ``installed_apt``, ``installed_snap``,
 ``installed_flatpak`` (each returns the set of installed names among the ones asked about).
@@ -69,6 +71,7 @@ class PackageAction(Action):
         install_argv: Callable[[Sequence[str]], list[str]],
         *,
         needs_root: bool,
+        before: Sequence[str] | None = None,
     ) -> None:
         self._manager = manager
         self._names = tuple(names)
@@ -76,6 +79,7 @@ class PackageAction(Action):
         self._lister = lister
         self._install_argv = install_argv
         self.needs_root = needs_root
+        self._before = before
 
     def _missing(self) -> list[str]:
         present = self._lister(self._process, self._names)
@@ -85,12 +89,15 @@ class PackageAction(Action):
         return not self._missing()
 
     def describe(self) -> str:
-        return f"{self._manager}: install {', '.join(self._missing())}"
+        text = f"{self._manager}: install {', '.join(self._missing())}"
+        return text + (f" (after {' '.join(self._before)})" if self._before else "")
 
     def run(self) -> None:
         missing = self._missing()
         if not missing:
             return
+        if self._before:
+            self._process.execute(self._process.elevate(list(self._before)) if self.needs_root else list(self._before))
         argv = self._install_argv(missing)
         self._process.execute(self._process.elevate(argv) if self.needs_root else argv)
 
@@ -112,6 +119,7 @@ def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = N
                 installed_apt,
                 lambda names: ["apt-get", "install", "-y", *names],
                 needs_root=True,
+                before=["apt-get", "update"] if packages.apt_update else None,
             )
         )
     if packages.snap:
@@ -132,7 +140,7 @@ def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = N
                 packages.flatpak,
                 runner,
                 installed_flatpak,
-                lambda names: ["flatpak", "install", "-y", "--noninteractive", "flathub", *names],
+                lambda names: ["flatpak", "install", "-y", "--noninteractive", packages.flatpak_remote, *names],
                 needs_root=False,
             )
         )
