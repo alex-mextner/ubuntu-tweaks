@@ -72,17 +72,29 @@ def _plural(count: int, word: str) -> str:
     return f"{count} {word}{'' if count == 1 else 's'}"
 
 
+def _destination(target: str, bundle: str, machine: str) -> str:
+    return f"settings/{bundle}.ini" if target == "shared" else f"machines/{machine}/settings/{bundle}.ini"
+
+
+_FLAG_NOTE = {
+    "path": "absolute path",
+    "override": "keyfile override also set",
+    "other-machines": "kept off the shared layer: a bundle for other machines sets it",
+}
+_ROUTE_NOTE = {"rule": "[capture.bundles]"}
+
+
 def _settings_section(doc: Document, plan: CapturePlan, machine: str, verbose: bool) -> None:
     result = plan.settings
     assert result is not None
     doc.heading(2, "1. Settings")
     groups: dict[tuple[str, str], list[KeyEntry]] = {}
     for entry in result.entries:
-        groups.setdefault((entry.target, entry.panel), []).append(entry)
+        groups.setdefault((entry.target, entry.bundle), []).append(entry)
     if not groups:
         doc.lines("nothing to capture")
-    for (target, panel), entries in sorted(groups.items(), key=lambda item: (item[0][0] != "shared", item[0][1])):
-        destination = f"settings/{panel}.ini" if target == "shared" else f"machines/{machine}/settings/{panel}.ini"
+    for (target, bundle), entries in sorted(groups.items(), key=lambda item: (item[0][0] != "shared", item[0][1])):
+        destination = _destination(target, bundle, machine)
         shown = [e for e in entries if verbose or e.mark != "="]
         hidden = len(entries) - len(shown)
         if not shown:
@@ -92,37 +104,44 @@ def _settings_section(doc: Document, plan: CapturePlan, machine: str, verbose: b
         rows = []
         for entry in sorted(shown, key=lambda e: (e.directory, e.key)):
             notes = [f"was {_cell_text(entry.previous)}" if entry.previous is not None else ""]
-            notes += [{"path": "absolute path", "override": "keyfile override also set"}[f] for f in entry.flags]
+            notes.append(f"why: {_cell_text(entry.reason)}" if entry.reason else "")
+            notes.append(
+                _ROUTE_NOTE.get(entry.route, "")
+                or ("stays in its bundle" if entry.route == "profile" and bundle != entry.panel else "")
+            )
+            notes += [_FLAG_NOTE[f] for f in entry.flags]
             rows.append(
                 (
                     entry.mark,
                     Code(path_to_section(entry.directory)),
                     Code(entry.key),
                     Code(_cell_text(entry.value)),
+                    entry.panel,
                     "; ".join(n for n in notes if n),
                 )
             )
-        doc.table(("", "dconf path", "key", "value", "note"), rows)
+        doc.table(("", "dconf path", "key", "value", "panel", "note"), rows)
         if hidden:
             doc.lines(f"{hidden} already in the profile (= hidden, -v shows them)")
     if result.overrides:
-        doc.heading(3, "keyfile overrides (not captured)")
+        doc.heading(3, "keyfile overrides (not captured), per panel")
         doc.lines(
-            "~/.config/glib-2.0/settings/keyfile sets these keys to a value that differs from dconf. They are never "
-            "frozen into the profile; the keyfile itself is captured as a file."
+            "~/.config/glib-2.0/settings/keyfile sets these keys to a value that differs from dconf, so their "
+            "effective value comes from the override. They are never frozen into the profile; the keyfile itself is "
+            "captured as a file."
         )
         rows = []
-        for override in result.overrides:
+        for override in sorted(result.overrides, key=lambda o: (o.panel or "~", o.full)):
             rows.append(
                 (
-                    Code(override.full),
                     override.panel or "-",
+                    Code(override.full),
                     Code("[masked]" if override.masked else _cell_text(override.override_value)),
                     Code("[masked]" if override.masked else _cell_text(override.dconf_value)),
                     "effective here" if override.active else "not effective in this process",
                 )
             )
-        doc.table(("key", "panel", "keyfile value", "dconf value or default", "state"), rows)
+        doc.table(("panel", "key", "keyfile value", "dconf value or default", "state"), rows)
 
 
 def _file_status(adopted: AdoptedFile) -> str:
@@ -236,6 +255,12 @@ def _skipped_section(doc: Document, plan: CapturePlan) -> None:
         entries = sorted((s for s in result.skipped if s.cls == cls), key=lambda s: s.full)
         if entries:
             doc.heading(3, f"{cls} ({len(entries)})")
+            if cls == "auto":
+                doc.lines(
+                    "keys the system or an app registered by itself (ids, ordering lists, bookkeeping), not "
+                    'choices of yours; promote any of them with `[capture] include = ["<dconf path glob>"]` in '
+                    "profile.toml"
+                )
             doc.table(("key", "panel", "reason"), [(Code(s.full), s.panel or "-", s.reason) for s in entries])
     if result.unmapped:
         doc.heading(3, f"unmapped ({len(result.unmapped)})")
@@ -246,11 +271,11 @@ def totals_line(plan: CapturePlan) -> str:
     parts: list[str] = []
     if plan.settings is not None:
         s = plan.settings
-        panels = {e.panel for e in s.entries}
+        bundles = {(e.target, e.bundle) for e in s.entries}
         machine = sum(1 for e in s.entries if e.target == "machine")
         marks = Counter(e.mark for e in s.entries)
         parts.append(
-            f"settings: {len(s.entries)} keys in {_plural(len(panels), 'panel')} ({len(s.entries) - machine} shared, {machine} machine; "
+            f"settings: {len(s.entries)} keys in {_plural(len(bundles), 'bundle')} ({len(s.entries) - machine} shared, {machine} machine; "
             f"{marks['+']} new, {marks['~']} differ, {marks['=']} same), {len(s.unmapped)} unmapped, {len(s.skipped)} skipped, "
             f"{len(s.overrides)} keyfile overrides, {s.at_default} at default, {s.user_keys} user keys in scope"
         )
@@ -267,23 +292,133 @@ def totals_line(plan: CapturePlan) -> str:
     return "totals: " + "; ".join(parts)
 
 
-def build_document(plan: CapturePlan, *, machine: str, commit: bool, verbose: bool) -> Document:
+def _summary_section(doc: Document, plan: CapturePlan, machine: str) -> None:
+    """The block that opens the report: every count the user needs before reading a detail table."""
+    doc.heading(2, "SUMMARY")
+    result = plan.settings
+    if result is not None:
+        counts = Counter(s.cls for s in result.skipped)
+        doc.lines(
+            f"dconf user keys in scope: {result.user_keys} = {len(result.entries)} captured + "
+            f"{len(result.skipped)} skipped + {len(result.unmapped)} unmapped + {result.at_default} at schema default "
+            "(values equal to the default are never captured)"
+        )
+        destinations: dict[tuple[str, str], list[KeyEntry]] = {}
+        for entry in result.entries:
+            destinations.setdefault((entry.target, entry.bundle), []).append(entry)
+        doc.heading(3, "captured, per destination bundle")
+        if destinations:
+            rows = []
+            for (target, bundle), entries in sorted(destinations.items(), key=lambda i: (i[0][0] != "shared", i[0][1])):
+                marks = Counter(e.mark for e in entries)
+                rows.append(
+                    (
+                        Code(_destination(target, bundle, machine)),
+                        str(len(entries)),
+                        str(marks["+"]),
+                        str(marks["~"]),
+                        str(marks["="]),
+                        ", ".join(sorted({e.panel for e in entries})),
+                    )
+                )
+            doc.table(("destination", "keys", "new", "differ", "same", "panels"), rows)
+        else:
+            doc.lines("nothing to capture")
+        doc.heading(3, "per Settings panel")
+        panels = sorted(
+            {e.panel for e in result.entries}
+            | {s.panel for s in result.skipped if s.panel}
+            | {o.panel for o in result.overrides if o.panel}
+        )
+        doc.table(
+            ("panel", "captured", "skipped", "keyfile overrides"),
+            [
+                (
+                    panel,
+                    str(sum(1 for e in result.entries if e.panel == panel)),
+                    str(sum(1 for s in result.skipped if s.panel == panel)),
+                    str(sum(1 for o in result.overrides if o.panel == panel)),
+                )
+                for panel in panels
+            ],
+        )
+        doc.heading(3, "not captured, per class")
+        doc.table(
+            ("class", "keys"),
+            [
+                *((cls, str(counts.get(cls, 0))) for cls in SKIP_CLASSES),
+                ("unmapped", str(len(result.unmapped))),
+                ("at schema default", str(result.at_default)),
+            ],
+        )
+        if result.overrides:
+            captured_too = sum(1 for e in result.entries if "override" in e.flags)
+            doc.lines(
+                f"keyfile overrides: {len(result.overrides)} keys have their effective value from "
+                f"~/.config/glib-2.0/settings/keyfile (never written to the profile; {captured_too} of them are also "
+                "captured from dconf and carry the `override` note)"
+            )
+    if plan.files is not None:
+        f = plan.files
+        todo = sum(1 for a in f.adopted if a.status != "linked")
+        doc.lines(
+            f"files: {todo} to adopt, {len(f.skipped)} allow-listed but not adopted, {len(f.candidates)} candidates "
+            "(never adopted unless promoted)"
+        )
+    if plan.packages is not None:
+        new = Counter(i.manager for i in plan.packages if i.mark == "+")
+        doc.lines(
+            f"packages: {sum(new.values())} new ({new['apt']} apt, {new['snap']} snap, {new['flatpak']} flatpak), "
+            f"{sum(1 for i in plan.packages if i.mark != '+')} already in the profile"
+        )
+    if plan.system is not None:
+        todo_keys = [i.key for i in plan.system if i.mark != "="]
+        doc.lines(f"system: {len(todo_keys)} to write" + (f" ({', '.join(todo_keys)})" if todo_keys else ""))
+    doc.lines(f"secret findings in adopted items: {len(refusals(plan))}")
+    if result is not None:
+        doc.lines(
+            f"unmapped: {len(result.unmapped)}"
+            + (
+                " (" + ", ".join(sorted({u.schema for u in result.unmapped})) + "; schemas no panel claims)"
+                if result.unmapped
+                else ""
+            )
+        )
+
+
+def build_document(
+    plan: CapturePlan,
+    *,
+    machine: str,
+    commit: bool,
+    verbose: bool,
+    dry_run: bool = False,
+    summary_only: bool = False,
+) -> Document:
     doc = Document()
     doc.heading(1, "ubuntu-tweak capture")
     overlay = "exists" if plan.profile.has_overlay else "does not exist yet"
+    if commit:
+        mode = "COMMIT"
+    elif dry_run:
+        mode = "dry-run (nothing is written; the same as the default preview)"
+    else:
+        mode = "preview (nothing is written; --commit writes exactly this)"
     doc.lines(
-        f"mode: {'COMMIT' if commit else 'preview (nothing is written; --commit writes exactly this)'}",
+        f"mode: {mode}",
         f"profile: {plan.profile.root}",
         f"machine: {machine} (overlay {overlay})",
         "only: " + (", ".join(sorted(plan.only)) or "everything"),
     )
-    if plan.settings is not None:
-        _settings_section(doc, plan, machine, verbose)
-    if plan.files is not None:
-        _files_section(doc, plan, machine, verbose)
-    if plan.packages is not None or plan.system is not None:
-        _packages_section(doc, plan, verbose)
-    _skipped_section(doc, plan)
+    _summary_section(doc, plan, machine)
+    if not summary_only:
+        if plan.settings is not None:
+            _settings_section(doc, plan, machine, verbose)
+        if plan.files is not None:
+            _files_section(doc, plan, machine, verbose)
+        if plan.packages is not None or plan.system is not None:
+            _packages_section(doc, plan, verbose)
+        _skipped_section(doc, plan)
     doc.heading(2, "5. Totals")
     doc.lines(totals_line(plan))
     found = refusals(plan)

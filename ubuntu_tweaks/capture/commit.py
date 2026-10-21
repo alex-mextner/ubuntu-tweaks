@@ -10,14 +10,17 @@ Order and guarantees:
    would leave ``$HOME`` or the profile, a destination that is a symlink or a directory, and an
    adopted file that changed since the preview (its bytes differ from the scanned ones) are refused
    too, so what is written is exactly what was scanned and shown.
-2. Settings: ``settings/<panel>.ini`` / ``machines/<machine>/settings/<panel>.ini`` get the captured
-   keys merged into the existing file (keys the live system no longer has stay); written atomically.
+2. Settings: each captured key is written into the bundle chosen for it (``settings/<bundle>.ini`` /
+   ``machines/<machine>/settings/<bundle>.ini``): a changed value is rewritten in place, a new key is
+   appended to its section, and every comment, the key order and the layout of the file stay as they
+   are; written atomically.
 3. Files: the scanned bytes are written into ``files/`` (or the machine overlay), the original is
    backed up to ``~/.local/state/ubuntu-tweaks/backup/<UTC ts>/<abs path>``, then replaced
    atomically by a symlink to the profile copy. Each step is atomic per file; a failure stops at
    that file, files adopted before it stay adopted and a rerun finishes the rest.
-4. ``packages.toml`` / ``system.toml`` are updated for ``+``/``~`` items (the file is regenerated
-   from its parsed content: comments are not preserved, ticket #29).
+4. ``packages.toml`` / ``system.toml`` are edited in place (``toml_edit``): captured names are
+   appended to their array, captured values replace the old ones, comments and order stay; the
+   edited text is re-parsed and compared with the intended data before anything is written.
 
 Public API: ``commit(plan, *, email_exempt_keys, home, now, state_home=None) -> list[str]``
 (human-readable lines for what was written; ``state_home`` defaults to ``<home>/.local/state``).
@@ -26,34 +29,22 @@ Public API: ``commit(plan, *, email_exempt_keys, home, now, state_home=None) -> 
 from __future__ import annotations
 
 import os
-import shutil
-import tempfile
-from collections.abc import Sequence
+import tomllib
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
-from ubuntu_tweaks.capture.plan import CapturePlan, refusals
-from ubuntu_tweaks.capture.secrets import scan_text
-from ubuntu_tweaks.capture.settings_scan import KeyEntry
-from ubuntu_tweaks.capture.toml_io import dump_toml
+from ubuntu_tweaks.atomic_write import atomic_write
 from ubuntu_tweaks.backup import backup as backup_file
-from ubuntu_tweaks.errors import RefusedError
-from ubuntu_tweaks.profile import read_toml
-from ubuntu_tweaks.settings import KeyFileData, dump_keyfile, path_to_section, read_keyfile
-
-
-def _atomic_write(path: Path, data: bytes, mode_from: Path | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(handle, "wb") as stream:
-            stream.write(data)
-        if mode_from is not None:
-            shutil.copymode(mode_from, temp_name)
-        os.replace(temp_name, path)
-    except BaseException:
-        Path(temp_name).unlink(missing_ok=True)
-        raise
+from ubuntu_tweaks.capture.plan import CapturePlan, refusals
+from ubuntu_tweaks.capture.secrets import Finding, scan_text
+from ubuntu_tweaks.capture.settings_scan import KeyEntry
+from ubuntu_tweaks.capture.system_scan import SystemItem
+from ubuntu_tweaks.errors import RefusedError, UbuntuTweakError
+from ubuntu_tweaks.keyfile_doc import KeyfileDoc
+from ubuntu_tweaks.profile import TomlTable, read_toml
+from ubuntu_tweaks.settings import path_to_section
+from ubuntu_tweaks.toml_edit import TomlDoc
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -61,11 +52,31 @@ def _inside(path: Path, root: Path) -> bool:
     return real == base or real.startswith(base + os.sep)
 
 
-def _merged_ini(existing: KeyFileData, entries: list[KeyEntry]) -> KeyFileData:
-    merged = {section: dict(keys) for section, keys in existing.items()}
-    for entry in entries:
-        merged.setdefault(path_to_section(entry.directory), {})[entry.key] = entry.value
-    return merged
+def _bundle_text(path: Path, entries: list[KeyEntry]) -> str:
+    """The bundle with the captured keys applied in place: a changed value is rewritten where it stands
+    (comments, order and layout untouched), a new key is appended to its section."""
+    doc = KeyfileDoc.parse(path.read_text(encoding="utf-8") if path.is_file() else "", str(path))
+    for entry in sorted(entries, key=lambda e: (e.directory, e.key)):
+        section = path_to_section(entry.directory)
+        if doc.find(section, entry.key) is None:
+            doc.add(section, entry.key, entry.value)
+        else:
+            doc.set_value(section, entry.key, entry.value)
+    return doc.text()
+
+
+def _toml_text(path: Path, edit: Callable[[TomlDoc], None], expected: TomlTable) -> str:
+    """``path`` edited in place by ``edit``; the result is re-parsed and must equal ``expected``, so a
+    scanner mistake fails here instead of in the profile."""
+    doc = TomlDoc.parse(path.read_text(encoding="utf-8") if path.is_file() else "", str(path))
+    edit(doc)
+    try:
+        parsed = tomllib.loads(doc.text())
+    except tomllib.TOMLDecodeError as error:
+        raise UbuntuTweakError(f"internal error: the edited {path} is not valid TOML ({error})") from error
+    if parsed != expected:
+        raise UbuntuTweakError(f"internal error: the edit of {path} does not give the intended content")
+    return doc.text()
 
 
 def _planned_writes(plan: CapturePlan) -> list[tuple[Path, str]]:
@@ -76,23 +87,29 @@ def _planned_writes(plan: CapturePlan) -> list[tuple[Path, str]]:
         groups: dict[tuple[str, str], list[KeyEntry]] = {}
         for entry in plan.settings.entries:
             if entry.mark != "=":
-                groups.setdefault((entry.target, entry.panel), []).append(entry)
-        for (target, panel), entries in sorted(groups.items()):
+                groups.setdefault((entry.target, entry.bundle), []).append(entry)
+        for (target, bundle), entries in sorted(groups.items()):
             directory = profile.settings_dir if target == "shared" else profile.overlay_settings_dir
-            path = directory / f"{panel}.ini"
-            existing = read_keyfile(path) if path.is_file() else {}
-            writes.append((path, dump_keyfile(_merged_ini(existing, entries))))
+            path = directory / f"{bundle}.ini"
+            writes.append((path, _bundle_text(path, entries)))
 
     if plan.packages is not None:
         new = [item for item in plan.packages if item.mark == "+"]
         if new:
             data = read_toml(profile.packages_toml)
+            added: dict[str, list[str]] = {}
             for manager in ("apt", "snap", "flatpak"):
                 names = [item.name for item in new if item.manager == manager]
                 if names:
+                    added[manager] = names
                     current = data.get(manager, [])
-                    data[manager] = sorted({*(current if isinstance(current, list) else []), *names})
-            writes.append((profile.packages_toml, dump_toml(data)))
+                    data[manager] = [*(current if isinstance(current, list) else []), *names]
+
+            def add_packages(doc: TomlDoc) -> None:
+                for manager, names in added.items():
+                    doc.append_to_array((), manager, names)
+
+            writes.append((profile.packages_toml, _toml_text(profile.packages_toml, add_packages, data)))
 
     if plan.system is not None:
         for machine_level, path in ((False, profile.system_toml), (True, profile.overlay_system_toml)):
@@ -108,8 +125,30 @@ def _planned_writes(plan: CapturePlan) -> list[tuple[Path, str]]:
                         section[name] = item.value
                 else:
                     data[item.key] = item.value
-            writes.append((path, dump_toml(data)))
+
+            def set_values(doc: TomlDoc, items: list[SystemItem] = items) -> None:
+                for item in items:
+                    table, _, name = item.key.rpartition(".")
+                    doc.set_string(tuple(table.split(".")) if table else (), name, item.value)
+
+            writes.append((path, _toml_text(path, set_values, data)))
     return writes
+
+
+def _new_findings(path: Path, text: str, email_exempt_keys: Sequence[str]) -> list[Finding]:
+    """Secret findings in ``text``, except those on a full-line comment the file already had: a reason the
+    user wrote (a commit sha, a name) is theirs and was reviewed in git; values and new text are scanned."""
+    try:
+        old = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        old = []
+    known = {line for line in old if line.lstrip().startswith("#")}
+    lines = text.splitlines()
+    return [
+        finding
+        for finding in scan_text(text, exempt_email_keys=email_exempt_keys)
+        if not (finding.line <= len(lines) and lines[finding.line - 1] in known)
+    ]
 
 
 def commit(
@@ -126,7 +165,7 @@ def commit(
     findings = [
         (str(path), f.kind, f.cls, f.line)
         for path, text in writes
-        for f in scan_text(text, exempt_email_keys=email_exempt_keys)
+        for f in _new_findings(path, text, email_exempt_keys)
     ]
     findings += refusals(plan)
     if findings:
@@ -151,11 +190,11 @@ def commit(
 
     done: list[str] = []
     for path, text in writes:
-        _atomic_write(path, text.encode("utf-8"), mode_from=path if path.exists() else None)
+        atomic_write(path, text.encode("utf-8"), mode_from=path if path.exists() else None)
         done.append(f"wrote {path}")
     for a in adopted:
         if a.status != "identical":
-            _atomic_write(a.dest, a.content, mode_from=a.source)
+            atomic_write(a.dest, a.content, mode_from=a.source)
         backup = backup_file(
             a.source, now=now, state_home=state_home if state_home is not None else home / ".local/state"
         )

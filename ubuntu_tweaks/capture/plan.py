@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ubuntu_tweaks.capture.files_scan import FilesResult, scan_files
 from ubuntu_tweaks.capture.rules import PANEL_SELECTORS, Rules
-from ubuntu_tweaks.capture.settings_scan import SettingsResult, Target, scan_settings
+from ubuntu_tweaks.capture.settings_scan import SettingsResult, scan_settings
 from ubuntu_tweaks.capture.system_scan import (
     INSTALLER_BASELINE,
     KEYBOARD_FILE,
@@ -31,7 +31,8 @@ from ubuntu_tweaks.capture.system_scan import (
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.profile import Profile, read_toml
 from ubuntu_tweaks.setkey import SchemaIndex
-from ubuntu_tweaks.settings import KeyFileData, SettingsBackend, read_keyfile
+from ubuntu_tweaks.bundles import ModuleGate, load_bundles
+from ubuntu_tweaks.settings import SettingsBackend
 
 SECTION_NAMES = ("files", "packages", "system")
 
@@ -66,26 +67,18 @@ def build_plan(
     installer_baseline: Path = INSTALLER_BASELINE,
     snap_seed: Path = SNAP_SEED,
     keyboard_file: Path = KEYBOARD_FILE,
+    module_enabled: ModuleGate | None = None,
 ) -> CapturePlan:
     validate_only(only)
     panels = frozenset(only & set(PANEL_SELECTORS))
-    cache: dict[tuple[Target, str], KeyFileData] = {}
-
-    def existing(target: Target, panel: str) -> KeyFileData:
-        if (target, panel) not in cache:
-            directory = profile.settings_dir if target == "shared" else profile.overlay_settings_dir
-            path = directory / f"{panel}.ini"
-            cache[(target, panel)] = read_keyfile(path) if path.is_file() else {}
-        return cache[(target, panel)]
-
     wants_settings = not only or bool(panels)
-    settings = (
-        scan_settings(
-            backend, SchemaIndex(backend), rules, existing, home / ".config/glib-2.0/settings/keyfile", panels
+    settings = None
+    if wants_settings:
+        bundles = load_bundles(profile, module_enabled)
+        bundles.require_valid()
+        settings = scan_settings(
+            backend, SchemaIndex(backend), rules, bundles, home / ".config/glib-2.0/settings/keyfile", panels
         )
-        if wants_settings
-        else None
-    )
     files = scan_files(home, profile, rules) if not only or "files" in only else None
     packages, note = None, ""
     if not only or "packages" in only:

@@ -1,4 +1,4 @@
-"""Section 1 of `capture`: sort the user's dconf keys into panel files, skips and the unmapped bucket.
+"""Section 1 of `capture`: sort the user's dconf keys into bundles, skips and the unmapped bucket.
 
 Accessed via: ``plan.build_plan``. Read-only: only ``SettingsBackend`` reads and the
 ``glib-2.0/settings/keyfile`` override file are touched.
@@ -9,9 +9,11 @@ Every key that has a user value is accounted for exactly once:
 - otherwise one ``KeyEntry`` (captured), one ``Skipped`` (with its class) or one ``Unmapped``.
 
 Decision order per key: profile ``exclude`` -> built-in secret/identity/hardware excludes -> the
-panel rule (``skip`` rules give their own class) -> state (unless an explicit ``machine`` rule
-claims the key) -> no schema -> secret scan of the value -> no panel (``unmapped``) -> target
-(machine when a machine rule, the panel's disposition or an absolute path in the value says so).
+panel rule (``skip`` rules give their own class) -> state (unless an explicit ``machine`` rule or the
+profile's ``include`` claims the key) -> auto (same exemptions) -> no schema -> secret scan of the value
+-> no panel (``unmapped``) -> target (machine when a machine rule, the panel's disposition or an
+absolute path in the value says so) -> destination bundle: the bundle that already holds the key (never
+moved), else a ``[capture.bundles]`` match, else the panel's own bundle.
 
 The keyfile override (``~/.config/glib-2.0/settings/keyfile``) can make the effective value differ
 from dconf. It is never frozen into the profile; keys it changes are reported as ``Override``s
@@ -22,16 +24,17 @@ Public API: ``scan_settings(...) -> SettingsResult`` and the result dataclasses.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+from ubuntu_tweaks.bundles import BundleSet, Located
+from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.capture.rules import Mark, Rules
 from ubuntu_tweaks.capture.secrets import scan_text, scan_value
 from ubuntu_tweaks.setkey import ResolvedKey, SchemaIndex
 from ubuntu_tweaks.settings import (
-    KeyFileData,
     SettingsBackend,
     SettingsError,
     Variant,
@@ -43,19 +46,22 @@ from ubuntu_tweaks.settings import (
 )
 
 type Target = Literal["shared", "machine"]
-type ExistingReader = Callable[[Target, str], KeyFileData]
+type Route = Literal["profile", "rule", "panel"]  # the key was already in a bundle / [capture.bundles] / panel default
 
 
 @dataclass(frozen=True)
 class KeyEntry:
-    panel: str
+    panel: str  # the Settings panel the capture rules assign the key to
     target: Target
+    bundle: str  # the bundle it is written to: where the profile already holds it, a [capture.bundles] match, else the panel
     directory: str
     key: str
     value: str
     mark: Mark
     previous: str | None
     flags: tuple[str, ...]
+    route: Route
+    reason: str  # the comment above the key in the profile; "" for a new key
 
 
 @dataclass(frozen=True)
@@ -140,36 +146,29 @@ def _skip(result: SettingsResult, cls: str, full: str, reason: str, panel: str |
     result.skipped.append(Skipped(cls, full, reason, panel))
 
 
-def _diff(
-    existing: ExistingReader,
-    target: Target,
-    panel: str,
-    directory: str,
-    key: str,
+def _resolve(index: SchemaIndex, directory: str, key: str) -> ResolvedKey | None:
+    resolved = index.resolve(directory, key)
+    return resolved if isinstance(resolved, ResolvedKey) else None
+
+
+def _classify_existing(
+    held: Located,
     value: Variant,
     resolved: ResolvedKey,
     backend: SettingsBackend,
 ) -> tuple[Mark, str | None]:
-    text = existing(target, panel).get(path_to_section(directory), {}).get(key)
-    if text is None:
-        return "+", None
     try:
-        same = parse_value(backend, resolved.schema, key, text).equal(value)
+        same = parse_value(backend, resolved.schema, resolved.key, held.key.value).equal(value)
     except SettingsError:
         same = False
-    return ("=", None) if same else ("~", text)
-
-
-def _resolve(index: SchemaIndex, directory: str, key: str) -> ResolvedKey | None:
-    resolved = index.resolve(directory, key)
-    return resolved if isinstance(resolved, ResolvedKey) else None
+    return ("=", None) if same else ("~", held.key.value)
 
 
 def scan_settings(
     backend: SettingsBackend,
     index: SchemaIndex,
     rules: Rules,
-    existing: ExistingReader,
+    bundles: BundleSet,
     override_file: Path,
     only: frozenset[str] = frozenset(),
 ) -> SettingsResult:
@@ -199,9 +198,15 @@ def scan_settings(
             _skip(result, panel_rule.cls or "excluded-by-rule", full, panel_rule.reason, panel)
             continue
         machine_reason = rules.machine_rule(full)
-        state = None if machine_reason else rules.state_rule(full)
+        section = path_to_section(directory)
+        held = bundles.locate(section, key)  # a key the user keeps in a bundle is a choice, never state or auto
+        state = None if machine_reason or held else rules.state_rule(full)
         if state is not None:
             _skip(result, "state", full, state.reason, panel)
+            continue
+        auto = None if machine_reason or held else rules.auto_rule(full)
+        if auto is not None:
+            _skip(result, "auto", full, auto.reason, panel)
             continue
         if resolved is None or value is None:
             _skip(result, "no-schema", full, "no installed schema describes this key", panel)
@@ -216,15 +221,47 @@ def scan_settings(
         if panel is None or panel_rule is None:
             result.unmapped.append(Unmapped(full, resolved.schema))
             continue
-        flags: list[str] = []
-        target: Target = "machine" if machine_reason or panel_rule.to == "machine" else "shared"
-        if has_machine_path(value):
-            target = "machine"
-            flags.append("path")
-        if target == "shared" and key in existing("machine", panel).get(path_to_section(directory), {}):
-            target = "machine"  # the overlay wins at apply: a shared write would never take effect
-        mark, previous = _diff(existing, target, panel, directory, key, value, resolved, backend)
-        result.entries.append(KeyEntry(panel, target, directory, key, text, mark, previous, tuple(flags)))
+        flags: list[str] = ["path"] if has_machine_path(value) else []
+        if held is not None:
+            # (1) the profile already holds the key: it stays in its bundle, never moves
+            target: Target = "machine" if held.bundle.origin == "overlay" else "shared"
+            mark, previous = _classify_existing(held, value, resolved, backend)
+            entry = KeyEntry(
+                panel, target, held.bundle.name, directory, key, text, mark, previous, tuple(flags), "profile",
+                held.key.reason,
+            )  # fmt: skip
+        else:
+            routed = rules.bundle_route(full)  # (2) [capture.bundles], (3) the built-in panel file
+            target = "machine" if machine_reason or panel_rule.to == "machine" or flags else "shared"
+            if target == "shared" and (section, key) in bundles.inactive_shared:
+                # another machine's bundle holds this key: a shared write would conflict there
+                target = "machine"
+                flags.append("other-machines")
+            destination = bundles.find(routed or panel, "overlay" if target == "machine" else "shared")
+            if destination is not None and not destination.active:
+                raise ConfigError(
+                    f"capture would write {full} into {destination.source}, which does not apply on this machine "
+                    f"({destination.inactive}); route it elsewhere with [capture.bundles] or fix the bundle header"
+                )
+            entry = KeyEntry(
+                panel, target, routed or panel, directory, key, text, "+", None, tuple(flags),
+                "rule" if routed else "panel", "",
+            )  # fmt: skip
+        result.entries.append(entry)
+        if held is not None:
+            # identical duplicates in other bundles of the same layer must follow, or the profile would conflict
+            for clash in bundles.duplicates:
+                other = clash.second
+                if (
+                    clash.first.key.full == full
+                    and other.bundle.origin == held.bundle.origin
+                    and other.bundle.name != held.bundle.name
+                    and not any(
+                        e.bundle == other.bundle.name and e.target == entry.target and e.key == key
+                        for e in result.entries
+                    )
+                ):
+                    result.entries.append(replace(entry, bundle=other.bundle.name, reason=other.key.reason))
     _scan_overrides(result, backend, index, rules, override_file, only)
     return result
 
@@ -283,8 +320,5 @@ def _scan_overrides(
                 )
             )
     result.entries[:] = [
-        KeyEntry(e.panel, e.target, e.directory, e.key, e.value, e.mark, e.previous, (*e.flags, "override"))
-        if e.directory + e.key in flagged
-        else e
-        for e in result.entries
+        replace(e, flags=(*e.flags, "override")) if e.directory + e.key in flagged else e for e in result.entries
     ]

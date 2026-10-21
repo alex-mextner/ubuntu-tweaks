@@ -64,6 +64,8 @@ def main(schema_dir: Path) -> int:
     check(raises(backend.write, FIXED, None, "count", GLib.Variant("s", "5")), "wrong type refused")
     check(raises(backend.write, FIXED, None, "limited", GLib.Variant("i", 99)), "out of range refused")
     check(backend.user_value(FIXED, None, "limited") is None, "refused write stored nothing")
+    check(backend.in_range(FIXED, "limited", GLib.Variant("i", 5)), "in_range accepts a value inside the range")
+    check(not backend.in_range(FIXED, "limited", GLib.Variant("i", 99)), "in_range rejects a value outside the range")
     check(raises(backend.write, FIXED, "/other/path/", "count", GLib.Variant("u", 1)), "fixed path mismatch refused")
     check(raises(backend.effective, "no.such.schema", None, "k"), "missing schema raises")
     check(raises(backend.effective, FIXED, None, "nope"), "missing key raises")

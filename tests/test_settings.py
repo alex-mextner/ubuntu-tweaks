@@ -34,7 +34,6 @@ from ubuntu_tweaks.settings import (  # noqa: E402
     path_to_section,
     read_keyfile,
     section_to_path,
-    write_keyfile,
 )
 from tests.gio_scenario import FIXED, FIXED_PATH, ITEM, ITEM_PATH  # noqa: E402
 
@@ -116,6 +115,13 @@ class FakeBackendTests(unittest.TestCase):
                 backend.write(FIXED, None, "limited", GLib.Variant("i", outside))
         self.assertEqual(backend.user_value(FIXED, None, "limited").unpack(), 10)
 
+    def test_in_range_is_one_check_for_planning(self) -> None:
+        backend = fake_backend()
+        for value, inside in ((0, True), (10, True), (-1, False), (11, False)):
+            with self.subTest(value=value):
+                self.assertIs(backend.in_range(FIXED, "limited", GLib.Variant("i", value)), inside)
+        self.assertTrue(backend.in_range(FIXED, "count", GLib.Variant("u", 4_000_000_000)))  # no range: always inside
+
     def test_relocatable_schema_needs_a_path_and_keeps_values_per_path(self) -> None:
         backend = fake_backend()
         with self.assertRaisesRegex(SettingsError, "relocatable"):
@@ -193,16 +199,6 @@ class KeyfileTests(unittest.TestCase):
     def test_values_with_quotes_unicode_and_backslashes_survive(self) -> None:
         values = {"k1": "'it\\'s'", "k2": "'привет'", "k3": "'a\\\\b'", "k4": '"say \\"hi\\""'}
         self.assertEqual(parse_keyfile(dump_keyfile({"s": values}))["s"], values)
-
-    def test_file_round_trip_creates_parent_directories(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "settings" / "power.ini"
-            write_keyfile(path, {"org/gnome/x": {"k": "1"}})
-            self.assertEqual(read_keyfile(path), {"org/gnome/x": {"k": "1"}})
-            self.assertEqual([entry.name for entry in path.parent.iterdir()], ["power.ini"])
-            write_keyfile(path, {"org/gnome/x": {"k": "2"}})
-            self.assertEqual(read_keyfile(path), {"org/gnome/x": {"k": "2"}})
-            self.assertEqual([entry.name for entry in path.parent.iterdir()], ["power.ini"])
 
     def test_malformed_and_unreadable_files_are_config_errors(self) -> None:
         with self.assertRaisesRegex(ConfigError, "invalid keyfile"):

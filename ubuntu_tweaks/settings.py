@@ -46,8 +46,8 @@ Public API:
 - ``is_satisfied(backend, schema, path, key, wanted) -> bool``: effective value equals
   ``wanted``.
 - Keyfile: ``KeyFileData`` (``{section: {key: gvariant_text}}``), ``parse_keyfile(text)``,
-  ``read_keyfile(path)``, ``dump_keyfile(data)`` (sorted, ``dconf dump`` syntax),
-  ``write_keyfile(path, data)``; ``section_to_path(section)`` / ``path_to_section(path)``
+  ``read_keyfile(path)``, ``dump_keyfile(data)`` (sorted, ``dconf dump`` syntax); ``section_to_path(section)`` /
+  ``path_to_section(path)``
   convert ``org/gnome/x`` <-> ``/org/gnome/x/`` (root: ``/``).
 """
 
@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -121,6 +120,10 @@ class SettingsBackend(ABC):
 
     @abstractmethod
     def default(self, schema: str, path: str | None, key: str) -> Variant: ...
+
+    @abstractmethod
+    def in_range(self, schema: str, key: str, value: Variant) -> bool:
+        """True when ``value`` (already of the key's type) is inside the key's schema range or choices."""
 
     @abstractmethod
     def write(self, schema: str, path: str | None, key: str, value: Variant) -> None: ...
@@ -239,9 +242,12 @@ class GioBackend(SettingsBackend):
     def default(self, schema: str, path: str | None, key: str) -> Variant:
         return self._open(schema, path, key).get_default_value(key)
 
+    def in_range(self, schema: str, key: str, value: Variant) -> bool:
+        return self._key(schema, key).range_check(value)
+
     def write(self, schema: str, path: str | None, key: str, value: Variant) -> None:
         _check_value_type(schema, key, self.key_type(schema, key), value)
-        if not self._key(schema, key).range_check(value):
+        if not self.in_range(schema, key, value):
             raise SettingsError(f"{schema} {key}: {format_value(value)} is outside the allowed range")
         if not self._open(schema, path, key).set_value(key, value):
             raise SettingsError(f"{schema} {key}: {format_value(value)} is read-only")
@@ -364,16 +370,24 @@ class FakeBackend(SettingsBackend):
         location = self._location(schema, path, key)
         _check_value_type(schema, key, self.key_type(schema, key), value)
         definition = self._key(schema, key)
-        for bound, text, outside in (
-            ("minimum", definition.minimum, lambda low: value.unpack() < low),
-            ("maximum", definition.maximum, lambda high: value.unpack() > high),
-        ):
-            if text is not None and outside(parse_value(self, schema, key, text).unpack()):
+        for bound, text in (("minimum", definition.minimum), ("maximum", definition.maximum)):
+            if text is not None and not self._within(schema, key, value, bound, text):
                 raise SettingsError(
                     f"{schema} {key}: {format_value(value)} is outside the allowed range ({bound} {text})"
                 )
         self._user[location] = value
         self.writes.append((schema, path, key, value))
+
+    def _within(self, schema: str, key: str, value: Variant, bound: str, text: str) -> bool:
+        limit = parse_value(self, schema, key, text).unpack()
+        return value.unpack() >= limit if bound == "minimum" else value.unpack() <= limit
+
+    def in_range(self, schema: str, key: str, value: Variant) -> bool:
+        definition = self._key(schema, key)
+        return all(
+            text is None or self._within(schema, key, value, bound, text)
+            for bound, text in (("minimum", definition.minimum), ("maximum", definition.maximum))
+        )
 
     def reset(self, schema: str, path: str | None, key: str) -> None:
         self._user.pop(self._location(schema, path, key), None)
@@ -427,17 +441,3 @@ def dump_keyfile(data: Mapping[str, Mapping[str, str]]) -> str:
         for key in sorted(data[section]):
             keyfile.set_value(section, key, data[section][key])
     return keyfile.to_data()[0]
-
-
-def write_keyfile(path: Path, data: Mapping[str, Mapping[str, str]]) -> None:
-    """Write atomically (unique temp file in the same directory, then rename) so an interrupted or
-    concurrent write never leaves or publishes a truncated panel file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(dump_keyfile(data))
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise

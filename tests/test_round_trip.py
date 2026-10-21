@@ -89,5 +89,65 @@ class CaptureThenApplyTests(TempDirCase):
         self.assertEqual({key.full for key in backend.list_user_keys()}, set(captured))
 
 
+class BundlesRoundTripTests(TempDirCase):
+    """Hand-written bundles (two shared, one machine overlay, reasons, a header) -> apply -> capture back."""
+
+    FILES = {
+        "settings/dev-look.ini": (
+            '[ubuntu-tweak]\ndescription = "Look"\n\n[org/gnome/desktop/interface]\n'
+            "# dark on the OLED\ncolor-scheme='prefer-dark'\n"
+        ),
+        "settings/misc/battery.ini": "[org/gnome/desktop/interface]\n# I like to see it\nshow-battery-percentage=true\n",
+        "machines/testbox/settings/laptop/power.ini": (
+            "# this box only\n[org/gnome/settings-daemon/plugins/power]\n"
+            "# the render job must not be suspended\nsleep-inactive-ac-timeout=900\n"
+        ),
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.profile = self.tmp / "profile"
+        for relative, text in self.FILES.items():
+            write(self.profile / relative, text)
+        repo = self.tmp / "repo"
+        (repo / "modules").mkdir(parents=True)
+        self.ctx = Context(repo, Profile(self.profile, "testbox", "flag"))
+
+    def test_apply_shows_reasons_and_then_capture_finds_nothing_to_change(self) -> None:
+        backend = FakeBackend(SCHEMAS)
+        plan = Plan.build(settings_planner.build(self.ctx, backend))
+        described = {action.target.key: action.describe() for action in plan.actions}  # type: ignore[attr-defined]
+        self.assertIn("# dark on the OLED", described["color-scheme"])
+        self.assertIn("# the render job must not be suspended", described["sleep-inactive-ac-timeout"])
+        self.assertEqual({action.scope for action in plan.actions}, {"dev-look", "misc/battery", "laptop/power"})
+        plan.execute()
+        self.assertEqual(len(Plan.build(settings_planner.build(self.ctx, backend))), 0)
+
+        captured, rules = make_plan(self, backend)
+        assert captured.settings is not None
+        by_key = {e.key: (e.bundle, e.target, e.mark, e.reason) for e in captured.settings.entries}
+        self.assertEqual(by_key["color-scheme"], ("dev-look", "shared", "=", "dark on the OLED"))
+        self.assertEqual(by_key["show-battery-percentage"], ("misc/battery", "shared", "=", "I like to see it"))
+        self.assertEqual(
+            by_key["sleep-inactive-ac-timeout"],
+            ("laptop/power", "machine", "=", "the render job must not be suspended"),
+        )
+        commit_plan(captured, rules, self.tmp / "home")
+        for relative, text in self.FILES.items():
+            self.assertEqual((self.profile / relative).read_text(), text, relative)  # byte for byte
+
+    def test_a_changed_live_value_comes_back_into_the_same_bundle_keeping_the_reason(self) -> None:
+        backend = FakeBackend(SCHEMAS)
+        Plan.build(settings_planner.build(self.ctx, backend)).execute()
+        backend.set_user("org.gnome.settings-daemon.plugins.power", None, "sleep-inactive-ac-timeout", "7200")
+
+        captured, rules = make_plan(self, backend)
+        commit_plan(captured, rules, self.tmp / "home")
+
+        overlay = (self.profile / "machines/testbox/settings/laptop/power.ini").read_text()
+        self.assertEqual(overlay, self.FILES["machines/testbox/settings/laptop/power.ini"].replace("=900", "=7200"))
+        self.assertEqual(len(Plan.build(settings_planner.build(self.ctx, backend))), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

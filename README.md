@@ -43,18 +43,21 @@ mutating command previews first and changes nothing without `--commit`.
 | `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
 | `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them |
 | `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
-| `capture [--commit] [--report FILE] [--only …] [-v]` | read-only inventory of the live system, printed as the exact diff the profile would get; `--commit` writes it into the profile working tree (never runs git) |
+| `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | read-only inventory of the live system, printed as the exact diff the profile would get (SUMMARY block first; `--dry-run` is the explicit no-write mode, `--summary` prints only the summary); `--commit` writes it into the profile working tree (never runs git) |
+| `bundles [--show NAME]` | read-only: the settings bundles, where each applies, shadowed / duplicated / conflicting keys |
+| `bundle-move <bundle> <key-or-glob>... [--commit]` | group keys (with their comments) into one bundle; preview by default |
+| `note <bundle>:<key> "reason" [--commit]` | add, change or remove the reason of a setting (also `packages:apt:<name>`, `system:<key>`) |
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
 (local extension); `memguard` and `apple-hid-battery` are root-level `system` modules.
 Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf and HOME is `scripts/integration.sh`
-(module preset, profile panel file, machine overlay, linked files, `capture` preview; it never
+(module preset, two settings bundles with reasons, machine overlay, linked files, `capture` preview; it never
 touches your dconf).
 
 ### Settings workflow: preview → commit → review → PR
 
 What you configure in GNOME Settings (and the config files you keep under `~/.config`) lives in the
-private profile, `~/.files/ubuntu` (`settings/<panel>.ini`, `files/`, `packages.toml`,
+private profile, `~/.files/ubuntu` (`settings/**/*.ini` bundles, `files/`, `packages.toml`,
 `system.toml`, and `machines/<hostname>/` for what differs per machine). The engine here holds no
 personal data.
 
@@ -70,6 +73,41 @@ ubuntu-tweak apply --commit           # 5. do it; `status` reports drift, a seco
 `~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/` first); `apply` links the same files on another
 machine. Keys that only make sense for one machine (power, touchpad, monitors) are captured into
 that machine's overlay.
+
+#### Bundles and reasons
+
+Any `settings/**/*.ini` file in the profile is a *bundle*: a keyfile named by purpose
+(`dev-keyboard`, `laptop/power`) that may hold keys from any dconf path, merged with the others at
+load (the idea is Home Assistant's `packages:`). `machines/<hostname>/settings/**/*.ini` are bundles
+too and win key by key. The same key with different values in two bundles of one layer is an error
+(exit 2, both files and lines named); identical values only warn.
+
+```ini
+[ubuntu-tweak]                         # optional header, not a dconf section
+description = "Keys for the dev keyboard"
+machines = ["home"]                    # apply only on these hostnames (also: requires-module = "hyperdock")
+
+[org/gnome/desktop/wm/keybindings]
+# Super+arrows belong to the tiler, so workspaces move on Alt   <- the reason: comments above a key
+switch-to-workspace-left=['<Super><Alt>Left']
+```
+
+`apply` prints the reason next to each key, `status` shows it for modified keys, and `capture --commit`
+rewrites only changed values, keeping every comment and the file's order. Capture puts a new key where
+the profile already holds it, else into the bundle named in `profile.toml` (`[capture.bundles]`
+`"dev-keyboard" = ["org/gnome/desktop/wm/keybindings/**"]`), else into the panel's own file.
+
+```sh
+ubuntu-tweak bundles                   # list bundles, what applies here, shadowed / duplicated / conflicting keys
+ubuntu-tweak bundles --show dev-keyboard   # the merged result of one bundle
+ubuntu-tweak bundle-move dev-keyboard 'org/gnome/desktop/wm/keybindings/**'   # group keys (preview; --commit writes)
+ubuntu-tweak note dev-keyboard:org/gnome/desktop/wm/keybindings/close "why"   # add a reason (also packages:apt:<name>)
+ubuntu-tweak capture --dry-run         # the explicit no-write preview, SUMMARY block first (--summary: only that)
+```
+
+Only values you changed are captured (never schema defaults), and keys the system or an app registered
+by itself (notification app ids, Ptyxis profile uuids, portal shortcuts, input-source MRU order, ...) are
+listed in their own `auto` section instead; `[capture] include = ["org/gnome/..."]` promotes any of them.
 
 ## Tweaks
 

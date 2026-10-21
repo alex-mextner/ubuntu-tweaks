@@ -23,7 +23,9 @@ Public API:
   ``overlay_settings_dir``, ``files_dir``, ``overlay_files_dir``, ``packages_toml``,
   ``overlay_packages_toml``, ``system_toml``, ``overlay_system_toml``; ``exists``,
   ``has_overlay``;
-  ``settings_panels() -> tuple[PanelFiles, ...]``; ``files() -> tuple[ProfileFile, ...]`` (leaf
+  ``bundle_files() -> tuple[BundleFile, ...]`` (every ``settings/**/*.ini`` and
+  ``machines/<m>/settings/**/*.ini``, shared first, sorted by name), ``bundle_path(name, origin)`` /
+  ``bundle_relpath(name, origin)`` (where a bundle lives or would be created); ``files() -> tuple[ProfileFile, ...]`` (leaf
   files, sorted; an overlay entry replaces every shared entry equal to, inside or above it, so
   no two entries ever target nested paths); ``load_config(module_defaults=None) -> Config``
   (every ``[modules.<name>]`` must be a table in its own file, ``ConfigError`` otherwise);
@@ -36,7 +38,7 @@ Public API:
   ``[(Layer, table), ...]``, last wins; tables merge, scalars replace, lists replace (or union
   with ``union_lists=True``, shared order first).
 - ``Layer`` = ``"module"`` | ``"shared"`` | ``"overlay"``; ``Origin`` = ``"shared"`` | ``"overlay"``.
-- ``PanelFiles(panel, shared, overlay)`` and ``ProfileFile(rel, source, origin, shadows)``
+- ``BundleFile(name, origin, path)`` and ``ProfileFile(rel, source, origin, shadows)``
   (``shadows``: tuple of the shared files an overlay entry replaces).
 - ``Packages(apt, snap, flatpak, flatpak_remote, apt_update)``, ``Keyboard(model, layout, variant, options)``,
   ``SystemConfig(timezone, locale, keyboard)``: typed views of ``packages.toml`` and
@@ -172,12 +174,13 @@ def merge_layers(layers: Sequence[tuple[Layer, Mapping[str, TomlValue]]], *, uni
 
 
 @dataclass(frozen=True)
-class PanelFiles:
-    """The shared and/or overlay ``settings/<panel>.ini`` of one Settings panel."""
+class BundleFile:
+    """A settings bundle on disk: ``settings/<name>.ini`` (shared) or ``machines/<m>/settings/<name>.ini``
+    (overlay). ``name`` is the path under ``settings/`` without ``.ini`` (``dev-keyboard``, ``laptop/power``)."""
 
-    panel: str
-    shared: Path | None
-    overlay: Path | None
+    name: str
+    origin: Origin
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -394,17 +397,25 @@ class Profile:
     def has_overlay(self) -> bool:
         return self.overlay_dir.is_dir()
 
-    def settings_panels(self) -> tuple[PanelFiles, ...]:
-        def panels(directory: Path) -> dict[str, Path]:
-            if not directory.is_dir():
-                return {}
-            return {path.stem: path for path in directory.glob("*.ini") if path.is_file()}
+    def bundle_path(self, name: str, origin: Origin) -> Path:
+        """Where bundle ``name`` lives (or would be created) in the shared or the overlay layer."""
+        directory = self.settings_dir if origin == "shared" else self.overlay_settings_dir
+        return directory / f"{name}.ini"
 
-        shared = panels(self.settings_dir)
-        overlay = panels(self.overlay_settings_dir)
-        return tuple(
-            PanelFiles(name, shared.get(name), overlay.get(name)) for name in sorted(shared.keys() | overlay.keys())
-        )
+    def bundle_relpath(self, name: str, origin: Origin) -> str:
+        """``bundle_path`` relative to the profile root, as shown in previews."""
+        return self.bundle_path(name, origin).relative_to(self.root).as_posix()
+
+    def bundle_files(self) -> tuple[BundleFile, ...]:
+        found: list[BundleFile] = []
+        for origin, directory in (("shared", self.settings_dir), ("overlay", self.overlay_settings_dir)):
+            if not directory.is_dir():
+                continue
+            for path in directory.rglob("*.ini"):
+                relative = path.relative_to(directory)
+                if path.is_file() and not any(part.startswith(".") for part in relative.parts):
+                    found.append(BundleFile(relative.with_suffix("").as_posix(), origin, path))
+        return tuple(sorted(found, key=lambda entry: (entry.origin != "shared", entry.name)))
 
     def files(self) -> tuple[ProfileFile, ...]:
         shared = _leaves(self.files_dir)

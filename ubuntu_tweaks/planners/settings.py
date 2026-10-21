@@ -1,12 +1,15 @@
-"""Settings planner: module presets, profile panel files and the machine overlay as ``set-key``
-(and, for ``mode = "seed"`` presets, ``seed-key``) actions.
+"""Settings planner: module presets and the profile's settings bundles (shared, then machine overlay) as
+``set-key`` (and, for ``mode = "seed"`` presets, ``seed-key``) actions.
 
 Accessed via: planner discovery (``build``, ``warnings``).
 
 Layers, lowest first: ``SETTINGS_MODULE`` (an enabled module's ``[[settings]]`` keyfiles, with the
 profile's / machine's ``[modules.<m>.settings]`` overrides replacing single keys), ``SETTINGS_PROFILE``
-(``<profile>/settings/<panel>.ini``), ``SETTINGS_MACHINE`` (``machines/<m>/settings/<panel>.ini``).
-A key set in several layers is planned once, with the winning layer's value (``setkey.collapse``).
+(every active shared bundle, ``<profile>/settings/**/*.ini``), ``SETTINGS_MACHINE`` (every active overlay
+bundle, ``machines/<m>/settings/**/*.ini``). A key set in several layers is planned once, with the
+winning layer's value (``setkey.collapse``). Bundle loading, the ``[ubuntu-tweak]`` header, the
+``machines`` / ``requires-module`` filters and conflicts (``ConfigError``) are ``bundles.py``; a bundle's
+scope is its name, a key's comment becomes the reason shown next to its ``set-key``.
 
 Assumptions:
 
@@ -14,15 +17,16 @@ Assumptions:
 - Section ``/`` in a module file means "the module's schema at its own path"; every other section
   is a dconf directory resolved through the installed schemas (``SchemaIndex``).
 - A key without an installed schema (or without that key in the schema) is skipped and reported by
-  ``warnings``; it is never guessed. A value that does not parse as the key's type is invalid
-  config (``ConfigError``, exit 2); for a schema that is not installed yet the type comes from the
-  extension's schema XML.
+  ``warnings`` (which also reports duplicate keys across bundles); it is never guessed. A value that
+  does not parse as the key's type, or lies outside its schema range, is invalid config
+  (``ConfigError``, exit 2) at planning time; for a schema that is not installed yet the type comes
+  from the extension's schema XML.
 - ``enabled-extensions`` / ``disabled-extensions`` are skipped with a warning wherever they come
   from: the toggle planner owns them as single-item edits of the user value.
 - An override in ``[modules.<m>.settings]`` replaces the preset entry that has that key name (and
   keeps its ``mode``); when the preset has none, the key is looked up in the module's schema. Two
   preset entries with the same key name make the override ambiguous: it is skipped with a warning.
-  An override stays in the module layer, so panel files still win over it.
+  An override stays in the module layer, so bundles still win over it.
 
 Public API: ``build(ctx, backend)`` and ``warnings(ctx, backend)``.
 """
@@ -31,7 +35,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.context import Context
@@ -57,6 +60,7 @@ from ubuntu_tweaks.setkey import (
     validate_text,
 )
 from ubuntu_tweaks.settings import SettingsBackend, read_keyfile, section_to_path
+from ubuntu_tweaks.bundles import BundleSet, load_bundles, module_gate
 
 
 @dataclass
@@ -77,6 +81,7 @@ class _Resolution:
         source: str,
         seed: bool = False,
         rank: int = 0,
+        reason: str = "",
     ) -> None:
         """The one path every wanted value takes: skip it with a reason, or validate and keep it."""
         if isinstance(target, Unresolved):
@@ -87,7 +92,7 @@ class _Resolution:
             return
         where = f"{source} [{section}] {key}" if section else f"{source} {key}"
         validate_text(self.backend, target, text, where)
-        self.entries.append(Entry(phase, scope, source, target, text, seed, rank))
+        self.entries.append(Entry(phase, scope, source, target, text, seed, rank, reason))
 
 
 def _override_source(ctx: Context, config: Config, module: str, key: str) -> str:
@@ -170,50 +175,42 @@ def _module_entries(
         )
 
 
-def _panel_entries(ctx: Context, index: SchemaIndex, resolution: _Resolution) -> None:
+def _bundle_entries(ctx: Context, index: SchemaIndex, resolution: _Resolution) -> BundleSet:
     profile = ctx.profile
-    for panel in profile.settings_panels():
-        for path, phase, source in (
-            (panel.shared, Phase.SETTINGS_PROFILE, f"settings/{panel.panel}.ini"),
-            (panel.overlay, Phase.SETTINGS_MACHINE, f"machines/{profile.machine}/settings/{panel.panel}.ini"),
-        ):
-            if path is not None:
-                _file_entries(path, phase, panel.panel, source, index, resolution)
-
-
-def _file_entries(
-    path: Path, phase: Phase, scope: str, source: str, index: SchemaIndex, resolution: _Resolution
-) -> None:
-    for section, keys in read_keyfile(path).items():
-        directory = section_to_path(section)
-        for key, text in keys.items():
+    bundles = load_bundles(profile, module_gate(ctx.modules_dir, profile))
+    bundles.require_valid()
+    for bundle in bundles.active():
+        phase = Phase.SETTINGS_PROFILE if bundle.origin == "shared" else Phase.SETTINGS_MACHINE
+        for key in bundle.keys:
             resolution.accept(
-                index.resolve(directory, key),
-                section=section,
-                key=key,
-                text=text,
+                index.resolve(section_to_path(key.section), key.key),
+                section=key.section,
+                key=key.key,
+                text=key.value,
                 phase=phase,
-                scope=scope,
-                source=source,
+                scope=bundle.name,
+                source=bundle.source,
+                reason=key.reason,
             )
+    return bundles
 
 
-def _resolve(ctx: Context, backend: SettingsBackend) -> _Resolution:
+def _resolve(ctx: Context, backend: SettingsBackend) -> tuple[_Resolution, BundleSet]:
     resolution = _Resolution(backend)
     index = SchemaIndex(backend)
     manifests, config = enabled_modules(ctx)
     for manifest in manifests:
         _module_entries(ctx, index, manifest, config, resolution)
-    _panel_entries(ctx, index, resolution)
-    return resolution
+    return resolution, _bundle_entries(ctx, index, resolution)
 
 
 def build(ctx: Context, backend: SettingsBackend) -> Sequence[Action]:
     return [
         SeedKeyAction(backend, entry) if entry.seed else SetKeyAction(backend, entry)
-        for entry in collapse(_resolve(ctx, backend).entries)
+        for entry in collapse(_resolve(ctx, backend)[0].entries)
     ]
 
 
 def warnings(ctx: Context, backend: SettingsBackend) -> Sequence[str]:
-    return _resolve(ctx, backend).skips.lines()
+    resolution, bundles = _resolve(ctx, backend)
+    return [*bundles.duplicate_warnings(), *resolution.skips.lines()]

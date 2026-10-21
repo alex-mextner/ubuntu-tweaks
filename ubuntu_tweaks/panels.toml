@@ -133,6 +133,11 @@ title = "enabled/disabled lists and per-extension schemas"
 disposition = "modules"
 note = "handled by modules (hyperdock preset, enabled-extensions edits), not by panel files"
 
+[panels.wellbeing]
+title = "break reminders, screen time limits"
+disposition = "S"
+note = "the Settings Wellbeing panel (GNOME 48+)"
+
 # ---------------------------------------------------------------- relocatable schemas
 
 [[relocatable]]
@@ -358,6 +363,11 @@ paths = [
 ]
 
 [[rule]]
+panel = "wellbeing"
+to = "shared"
+paths = ["/org/gnome/desktop/break-reminders/**", "/org/gnome/desktop/screen-time-limits/**"]
+
+[[rule]]
 panel = "apps"
 to = "shared"
 paths = [
@@ -373,6 +383,17 @@ paths = [
   "/org/gnome/Loupe/**",
   "/org/gtk/settings/**",
   "/org/gtk/gtk4/settings/**",
+  # third-party and further GNOME apps whose schemas are installed here (ticket #28)
+  "/net/nokyan/Resources/**",
+  "/org/gnome/deja-dup/**",
+  "/apps/seahorse/**",
+  "/io/github/alex_mextner/Passwords/**",
+  "/org/gnome/Characters/**",
+  "/org/gnome/Disks/**",
+  "/org/gnome/calculator/**",
+  "/org/gnome/Showtime/**",
+  "/org/gnome/simple-scan/**",
+  "/org/gnome/logs/**",
 ]
 
 # everything under extensions that no rule above claimed: a module's business

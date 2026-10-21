@@ -61,15 +61,17 @@ def _format(value: TomlValue | None) -> str:
 
 
 def _panel_lines(profile: Profile) -> list[str]:
-    lines = ["", "settings panels:"]
-    panels = profile.settings_panels()
-    for panel in panels:
-        if panel.shared and panel.overlay:
+    lines = ["", "settings bundles:"]
+    origins: dict[str, set[str]] = {}
+    for bundle in profile.bundle_files():
+        origins.setdefault(bundle.name, set()).add(bundle.origin)
+    for name in sorted(origins):
+        if origins[name] == {"shared", "overlay"}:
             origin = "overlay over shared (key-level)"
         else:
-            origin = "overlay" if panel.overlay else "shared"
-        lines.append(f"  {panel.panel}: {origin}")
-    if not panels:
+            origin = "overlay" if "overlay" in origins[name] else "shared"
+        lines.append(f"  {name}: {origin}")
+    if not origins:
         lines.append("  (none)")
     return lines
 

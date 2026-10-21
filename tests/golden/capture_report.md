@@ -8,32 +8,80 @@ machine: testbox (overlay does not exist yet)
 
 only: everything
 
+## SUMMARY
+
+dconf user keys in scope: 13 = 5 captured + 5 skipped + 2 unmapped + 1 at schema default (values equal to the default are never captured)
+
+### captured, per destination bundle
+
+| destination | keys | new | differ | same | panels |
+|---|---|---|---|---|---|
+| `settings/appearance.ini` | 1 | 1 | 0 | 0 | appearance |
+| `settings/notifications.ini` | 1 | 1 | 0 | 0 | notifications |
+| `machines/testbox/settings/background.ini` | 1 | 1 | 0 | 0 | background |
+| `machines/testbox/settings/power.ini` | 2 | 2 | 0 | 0 | power |
+
+### per Settings panel
+
+| panel | captured | skipped | keyfile overrides |
+|---|---|---|---|
+| appearance | 1 | 0 | 0 |
+| apps | 0 | 1 | 0 |
+| background | 1 | 0 | 0 |
+| notifications | 1 | 0 | 0 |
+| power | 2 | 0 | 0 |
+| shell-extensions | 0 | 1 | 0 |
+
+### not captured, per class
+
+| class | keys |
+|---|---|
+| secret | 1 |
+| identity | 0 |
+| hardware | 0 |
+| state | 2 |
+| auto | 0 |
+| no-schema | 1 |
+| excluded-by-rule | 1 |
+| unmapped | 2 |
+| at schema default | 1 |
+
+files: 1 to adopt, 0 allow-listed but not adopted, 1 candidates (never adopted unless promoted)
+
+packages: 6 new (3 apt, 2 snap, 1 flatpak), 0 already in the profile
+
+system: 5 to write (timezone, locale, keyboard.model, keyboard.layout, keyboard.options)
+
+secret findings in adopted items: 0
+
+unmapped: 2 (org.example.App, org.example.Weird; schemas no panel claims)
+
 ## 1. Settings
 
 ### settings/appearance.ini (shared)
 
-|  | dconf path | key | value | note |
-|---|---|---|---|---|
-| + | `org/gnome/desktop/interface` | `color-scheme` | `'prefer-dark'` |  |
+|  | dconf path | key | value | panel | note |
+|---|---|---|---|---|---|
+| + | `org/gnome/desktop/interface` | `color-scheme` | `'prefer-dark'` | appearance |  |
 
 ### settings/notifications.ini (shared)
 
-|  | dconf path | key | value | note |
-|---|---|---|---|---|
-| + | `org/gnome/desktop/notifications/application/foo` | `enable` | `false` |  |
+|  | dconf path | key | value | panel | note |
+|---|---|---|---|---|---|
+| + | `org/gnome/desktop/notifications/application/foo` | `enable` | `false` | notifications |  |
 
 ### machines/testbox/settings/background.ini (machine)
 
-|  | dconf path | key | value | note |
-|---|---|---|---|---|
-| + | `org/gnome/desktop/background` | `picture-uri` | `'file:///home/me/Pictures/wall.jpg'` | absolute path |
+|  | dconf path | key | value | panel | note |
+|---|---|---|---|---|---|
+| + | `org/gnome/desktop/background` | `picture-uri` | `'file:///home/me/Pictures/wall.jpg'` | background | absolute path |
 
 ### machines/testbox/settings/power.ini (machine)
 
-|  | dconf path | key | value | note |
-|---|---|---|---|---|
-| + | `org/gnome/desktop/interface` | `show-battery-percentage` | `true` |  |
-| + | `org/gnome/settings-daemon/plugins/power` | `sleep-inactive-ac-timeout` | `3600` |  |
+|  | dconf path | key | value | panel | note |
+|---|---|---|---|---|---|
+| + | `org/gnome/desktop/interface` | `show-battery-percentage` | `true` | power |  |
+| + | `org/gnome/settings-daemon/plugins/power` | `sleep-inactive-ac-timeout` | `3600` | power |  |
 
 ## 2. Files
 
@@ -77,7 +125,7 @@ apt baseline: dependencies of ubuntu-desktop, ubuntu-desktop-minimal, ubuntu-min
 
 ## 4. Skipped
 
-classes: secret 1, identity 0, hardware 0, state 2, no-schema 1, excluded-by-rule 1
+classes: secret 1, identity 0, hardware 0, state 2, auto 0, no-schema 1, excluded-by-rule 1
 
 unmapped (user value, no panel owns it; nothing is captured for these): 2
 
@@ -117,4 +165,4 @@ at schema default (not listed): 1
 
 ## 5. Totals
 
-totals: settings: 5 keys in 4 panels (2 shared, 3 machine; 5 new, 0 differ, 0 same), 2 unmapped, 5 skipped, 0 keyfile overrides, 1 at default, 13 user keys in scope; files: 1 to adopt, 0 not adopted, 1 candidates; packages: 6 new; system: 5 to write; secret findings in adopted items: 0
+totals: settings: 5 keys in 4 bundles (2 shared, 3 machine; 5 new, 0 differ, 0 same), 2 unmapped, 5 skipped, 0 keyfile overrides, 1 at default, 13 user keys in scope; files: 1 to adopt, 0 not adopted, 1 candidates; packages: 6 new; system: 5 to write; secret findings in adopted items: 0

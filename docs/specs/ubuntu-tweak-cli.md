@@ -31,6 +31,13 @@ as any behavior change.
    если не доделано доделай. какой из проектов взять за основу сам подумай. я так понимаю
    как минимум надо все что в Settings настравается в системе. часть должно быть
    индивидуально для машины»
+8. «доделывай все. и покажи сводку что попадет на capture --dry-run. и мне важно чтобы
+   попадали только измененные значения а не все включая дефолты. и надо чтобы можно было
+   комменты с причинами настройки указывать. и еще я хочу иметь возможность группировать
+   настройки из разных мест в файлы по назначениям чтобы потом они мержились. в ha есть
+   подобная концепция, кажется packages называется» — answered by `capture --dry-run` with a
+   SUMMARY block, the changed-only rule and the `auto` skip class, reasons as comments, and
+   *bundles* (see *Settings bundles*).
 
 ## Requirements
 
@@ -106,8 +113,11 @@ Covered by `tests/test_launcher.py`.
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
 | `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
-| `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, panel file and linked file whether it comes from the shared profile or the machine overlay. |
-| `capture [--commit] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive (see *capture*). |
+| `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, settings bundle and linked file whether it comes from the shared profile or the machine overlay. |
+| `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive, SUMMARY block first (see *capture*). `--dry-run` is the explicit no-write mode (excludes `--commit`); `--summary` prints only the summary. |
+| `bundles [--show NAME]` | Read-only: the settings bundles with origin, key count, description, whether they apply here, and the shadowed, duplicated and conflicting keys; `--show` prints one bundle's merged result (see *Settings bundles*). |
+| `bundle-move <bundle> <key-or-glob>... [--commit]` | Moves matching keys, with their comments, from whichever bundle holds them into `<bundle>`. Preview by default. |
+| `note <target> "reason" [--origin shared\|overlay] [--commit]` | Adds, changes or removes the reason (comment) of a bundle key, a package or a system value. Preview by default. |
 
 Global flags, accepted before or after the command: `--profile DIR`, `--machine NAME`,
 `--only <name,…>` (modules for `apply`/`status`, panels for `capture`).
@@ -243,13 +253,13 @@ No other module is added until it has real content.
 <profile>/
   README.md
   profile.toml              # shared config: modules, capture rules
-  settings/<panel>.ini      # dconf keyfile per GNOME Settings panel, shared by all machines
+  settings/**/*.ini         # settings bundles: dconf keyfiles named by purpose, shared by all machines
   files/                    # mirrors $HOME: files/.config/mimeapps.list -> ~/.config/mimeapps.list
   packages.toml             # apt / snap / flatpak names
   system.toml               # root-level: timezone, locale, console keyboard
   machines/<machine>/       # overlay, one dir per machine
     machine.toml            # same schema as profile.toml; wins over it
-    settings/<panel>.ini    # key-level overlay on top of the shared panel files
+    settings/**/*.ini       # key-level overlay bundles on top of the shared bundles
     files/                  # path-level overlay: the same relative path wins over shared files/
     packages.toml  system.toml   # same schema, merged
 ```
@@ -270,14 +280,23 @@ This replaces the earlier per-user `~/.config/ubuntu-tweaks/config.toml`: user o
 live in the profile, so they are versioned with the rest. The `[update]` table owned by #19
 lives in `profile.toml` as well.
 
-#### `settings/<panel>.ini`
+#### `settings/**/*.ini`: settings bundles
+
+Any `settings/**/*.ini` file is a **bundle**: one file per purpose, holding keys from any dconf
+path or schema, merged with the others at load (Home Assistant's `packages:`; it is not called
+`packages` because `packages.toml` already means apt/snap/flatpak). The bundle's name is its path
+under `settings/` without `.ini` (`dev-keyboard`, `laptop/power`);
+`machines/<machine>/settings/**/*.ini` files are bundles of the overlay layer. The panel files
+`capture` creates by default (`appearance.ini`, `keyboard.ini`, ...) are just bundles named after
+the panel ids in *Panel coverage*.
 
 `dconf dump` keyfile syntax (section = dconf path without the leading `/`, values = GVariant
-text), one file per Settings panel, named by the panel id in *Panel coverage*. Apply
-semantic = **enforce only the keys present**; absent keys are never touched or reset. Values
-are compared as typed `GLib.Variant`s through the schema (effective value = user value, else
-default), exactly as in *Drift*. A key whose schema is not installed is skipped with a
-warning, never guessed. Relocatable schemas (custom keybindings, tiling-assistant paths) go
+text). Apply semantic = **enforce only the keys present**; absent keys are never touched or
+reset. Values are compared as typed `GLib.Variant`s read through the schema (effective value =
+user value, else default), exactly as in *Drift*. A key whose schema is not installed is skipped
+with a warning, never guessed. A value outside the key's schema range or choices is invalid
+config (exit 2) while planning (module presets too), never a failure in the middle of `--commit`
+(`SettingsBackend.in_range`). Relocatable schemas (custom keybindings, tiling-assistant paths) go
 through `Gio.Settings.new_with_path`.
 
 `~/.config/glib-2.0/settings/keyfile` on a machine is a GSettings keyfile override that
@@ -290,7 +309,7 @@ from the override rather than from the dconf user value. That file is itself a c
 Details of the planner (`ubuntu_tweaks/planners/settings.py`, helpers in `setkey.py`):
 
 - **Layers**, lowest first: module presets (an enabled module's `[[settings]]` files, section
-  `[/]` meaning the module's schema at its own path), the shared `settings/<panel>.ini`, the
+  `[/]` meaning the module's schema at its own path), the shared bundles (`settings/**/*.ini`), the
   machine overlay's. A key set in several layers is planned **once**, with the highest layer's
   value: otherwise a satisfied lower layer could be dropped from the plan while a higher one
   is kept, or the reverse. `[modules.<m>.settings]` in `profile.toml` / `machine.toml`
@@ -298,20 +317,80 @@ Details of the planner (`ubuntu_tweaks/planners/settings.py`, helpers in `setkey
   the schemas of the module's `[[settings]]` files, else in its `metadata.json` schema, first
   match; a name set in two preset directories is ambiguous and skipped with a warning); it
   keeps that entry's `mode`, beats every module's preset, and stays in the module layer, so
-  panel files still win over it. A value there must be a string of GVariant text.
-- **Preview**: each action reads `<path><key> = <value> (now <effective>) <- <source file>`.
+  bundles still win over it. A value there must be a string of GVariant text.
+- **Preview**: each action reads `<path><key> = <value> (now <effective>) <- <source file>`, plus
+  `  # <reason>` when the bundle has a comment above the key.
   A key that cannot be placed is not an action; it is a `skipped …` warning printed with the
   plan: no installed schema at that directory, or no such key in the schema. A value that does
   not parse as the key's type is invalid config (exit 2).
 - **Relocatable schemas** have no path of their own, so a small table in `setkey.py` maps
   known path patterns to schemas: custom keybindings, per-app notification settings, app
   folders, Terminal and Ptyxis profiles.
-- `enabled-extensions` and `disabled-extensions` in a panel file are skipped with a warning:
+- `enabled-extensions` and `disabled-extensions` in a bundle are skipped with a warning:
   the extension toggles own them as single-item edits of the user value.
 - A module whose extension schema is not installed yet (its link and schema compilation run
   earlier in the same plan) has its keys planned as unsatisfied, typed only when run; the
   directory and key names then come from the extension's `schemas/*.gschema.xml`. Panel
   keys for such a schema wait for the next planning pass.
+
+#### Bundle merge, header and reasons
+
+- **Merge.** All active shared bundles are merged key by key; machine bundles override shared
+  ones at the key level (the overlay key *shadows* the shared one; `bundles` lists the shadows).
+  The same key in two shared bundles, or in two machine bundles, with **different** values is
+  invalid config (exit 2) naming both files and lines (values compare as text); with identical
+  values it is a *duplicate* warning (shown by `apply`, `status` and `bundles`) and planned once.
+  Nothing is ever picked silently.
+- **Header.** An optional `[ubuntu-tweak]` section is the bundle's header, not a dconf section, and
+  never reaches a plan: `description = "..."` (bare text is accepted too), `machines = ["home"]`
+  (the whole bundle applies only on the listed machine names) and `requires-module = "hyperdock"`
+  (only while that module is enabled). An unknown header key, a wrong type or an unknown module is
+  invalid config (exit 2). A bundle that does not apply on this machine takes part in nothing: no
+  conflicts, no capture routing, no plan.
+- **Reasons.** The full-line `#` comments directly above a key (no blank line between) are its
+  reason; above a section header they are the section's; a comment separated by a blank line
+  belongs to nobody. Every tool that edits a bundle keeps them (below). `apply` prints a key's
+  reason, on one line and truncated to 80 characters, after the source of its `set-key` (`... <-
+  settings/dev-keyboard.ini  # why`), `status` shows it for Modified keys, `capture` shows it for
+  `~` and `=` entries.
+
+```ini
+[ubuntu-tweak]
+description = "Keys for working on the dev keyboard"
+machines = ["home", "work"]
+
+# Super+arrows are taken by the tiler, so workspaces move on Alt.
+[org/gnome/desktop/wm/keybindings]
+# the OLED panel: never a white flash
+switch-to-workspace-left=['<Super><Alt>Left']
+```
+
+The commands below are the only tools that rewrite a bundle besides `capture --commit`; each is a
+preview unless given `--commit`, computes the whole result before writing anything and writes each
+file atomically (a profile file that is a symlink is refused, exit 5):
+
+- `ubuntu-tweak bundles` lists the bundles (name, origin, key count, description, whether each
+  applies on this machine and why not) and the shadowed, duplicated and conflicting keys (exit 2
+  when any conflict); `bundles --show NAME` prints the merged result of one name: the shared
+  bundle with the overlay's keys on top, each key with its reason and the file and line it comes
+  from (and the value it overrides).
+- `ubuntu-tweak bundle-move <bundle> <key-or-glob>...` moves every key of the active bundles
+  matching a dconf key path or glob into `<bundle>` (created when missing), with the key's
+  comment block. A key stays in its layer (shared to `settings/`, overlay to
+  `machines/<machine>/settings/`), so a move never changes which machines see it. A section that
+  empties is dropped and its own comment goes along; a key the destination already holds with the
+  same value is merged (the other copy goes, its reason kept when the destination has none); a
+  pattern that matches nothing is invalid (exit 2). A move never changes where a key applies: it is
+  refused (exit 2) between bundles whose `machines` / `requires-module` headers differ, and a new
+  destination inherits the source's `machines` and `requires-module` (not its description). No
+  comment is lost and no key is duplicated. A capture that changes a key held identically in several
+  bundles of one layer rewrites all of them, so the profile never ends up in conflict.
+- `ubuntu-tweak note <bundle>:<dconf key path> "reason"` (also `packages:<apt|snap|flatpak>:<name>`
+  and `system:<key>`, e.g. `system:keyboard.layout`) adds, replaces or, with an empty text, removes
+  a reason without touching anything else; the target must exist (exit 2). `--origin
+  shared|overlay` chooses the layer when both hold it. A package's reason is a trailing comment
+  (an array with several names per line is spread to one per line first, which is refused when it
+  has comments, so none is lost); a bundle or system key's reason is the comment block above it.
 
 #### `files/`
 
@@ -367,6 +446,11 @@ exclude = ["/org/gnome/shell/app-picker-layout"]            # never captured
 machine = ["/org/gnome/settings-daemon/plugins/power/**"]   # captured into machines/<machine>/
 include_files = [".config/mimeapps.list", ".config/gtk-3.0/bookmarks"]   # file allow-list
 machine_files = [".config/monitors.xml"]                      # adopted into machines/<machine>/files/
+include = []                                                  # lifts the `state` and `auto` skips
+
+[capture.bundles]               # where captured keys go (first matching entry wins)
+"dev-keyboard" = ["org/gnome/desktop/wm/keybindings/**", "org/gnome/shell/extensions/tiling-assistant/**"]
+"laptop/power" = ["org/gnome/settings-daemon/plugins/power/**"]
 ```
 
 Disabling a module stops managing it; it does not uninstall. `ubuntu-tweak` never edits the
@@ -415,6 +499,10 @@ apt_update = false           # optional: run `apt-get update` before the apt bat
 when present, else minus the packages the `ubuntu-desktop` metapackage pulls in), so only
 deliberate installs show up.
 
+A comment above a name or after it on its line (`"tmux",  # shell tools`) is that name's reason,
+and `capture --commit` keeps all of them: it appends new names to the array and leaves the order
+and the comments alone. `ubuntu-tweak note packages:apt:<name> "reason"` adds or changes one.
+
 One `package` action per manager that has names, listing what is missing right now. apt and
 snap run as one batch through sudo (`apt-get install -y …`, `snap install …`); flatpak runs
 as the user from one remote, `flatpak_remote` (default `flathub`; a bare remote name, which must
@@ -462,13 +550,15 @@ matching rule wins**, specific before general) and a unit test fails when this t
 | `date-time` | `/org/gnome/desktop/datetime/**`, `interface/clock-*` (including `clock-format`), `/org/gnome/shell/world-clocks/**`; the `timezone` is a root adapter in the machine overlay's `system.toml` | `S/R` |
 | `about` | hostname and device name are not in dconf; `/etc/hostname` is never captured | `X` |
 | `ubuntu-desktop` | Ubuntu Dock (`dash-to-dock`), `ding`, tiling-assistant behaviour, app grid folders, `favorite-apps` | `S` |
+| `wellbeing` | `/org/gnome/desktop/break-reminders/**`, `/org/gnome/desktop/screen-time-limits/**` | `S` |
 | `shell-extensions` | enabled/disabled lists and every other extension schema: handled by *modules*, not by panel files (`excluded-by-rule`) | modules |
 
 Decisions where the contract listed a key twice: `clock-format` belongs to `date-time` (where
 GNOME Settings shows it); tiling-assistant's bindings go to `keyboard` and its behaviour keys
-to `ubuntu-desktop`; the Dock lives in `ubuntu-desktop`, not `appearance`; the Settings
-*Wellbeing* panel has no id in this table, so its keys land in the `unmapped` bucket until a
-panel is added.
+to `ubuntu-desktop`; the Dock lives in `ubuntu-desktop`, not `appearance`. The Settings
+*Wellbeing* panel has its own id (`wellbeing`); keys of installed third-party and further GNOME
+apps (Resources, Deja Dup, Seahorse, Passwords, Characters, Disks, Calculator, Showtime, Simple
+Scan, Logs) belong to `apps`, so `unmapped` only lists schemas no rule knows (ticket #28).
 
 ### Per-machine
 
@@ -483,15 +573,18 @@ panel is added.
   routes its keys to the overlay. An explicit `machine` match protects a key from the `state`
   globs, a panel `M` does not.
 - `ubuntu-tweak machine` prints the detected name, whether the overlay exists, and which
-  module setting, panel file and linked file comes from the overlay and which from the shared
-  profile. A panel file present in both is reported as `overlay over shared`; a linked file
+  module setting, bundle and linked file comes from the overlay and which from the shared
+  profile. A bundle name present in both layers is reported as `overlay over shared`; a linked file
   present in both is reported as `overlay (shadows shared)`.
 - Modules are per-machine too: `[modules.memguard] enabled = false` in a machine overlay.
 
 ### capture
 
 `ubuntu-tweak capture` is the read-only inventory of the live system, printed as the exact
-diff the profile would receive. With `--commit` it writes into the profile working tree and
+diff the profile would receive. `--dry-run` is the explicit no-write mode: the same as the
+default preview, and it excludes `--commit` (exit 2, "not allowed with argument"). `--summary`
+prints only the SUMMARY block and the totals line and cannot be combined with `--commit` (exit 2):
+nothing is written that was not shown in full. With `--commit` it writes into the profile working tree and
 does not run `git commit`: the user reviews `git diff` in `.files` (the second preview) and
 commits through the repo's PR flow. `--report FILE.md` writes the same report as markdown
 (full values; the terminal clips a cell at 80 characters). `-v` also lists entries equal to
@@ -500,17 +593,25 @@ the profile, already-linked files and every cache-state candidate. `--only` take
 `packages`, `system`; a section not named is not computed and an unknown name is invalid
 config (exit 2).
 
-Sections, in this order:
+The report opens with the **SUMMARY** block (also printed alone by `--summary`): the keys in scope
+accounted as captured + skipped + unmapped + at default; captured keys per destination bundle
+(new / differ / same) and per Settings panel (captured, skipped, keyfile overrides); the skipped
+classes with counts; the keyfile overrides (per panel: the keys whose effective value comes from
+`glib-2.0/settings/keyfile`); files, packages, system and secret-finding counts; the unmapped
+schemas. Then, in this order:
 
-1. **Settings → `settings/<panel>.ini`** (shared) and **→ `machines/<machine>/settings/…`**
-   (machine): per panel, per dconf path, every key that has a user value differing from the
-   schema default. Marks: `+` new in the profile, `~` differs from the profile value (the old
-   value is shown), `=` already in the profile (hidden unless `-v`). Values are read through
+1. **Settings → bundles**: `settings/<bundle>.ini` (shared) and `machines/<machine>/settings/<bundle>.ini`
+   (machine), grouped by destination bundle (default name = panel id; see the routing order
+   below): every key that has a user value differing from the schema default (a user value equal
+   to the default, as Gio computes it including system overrides, is only counted and is never
+   captured or written: the profile holds what the user changed). Marks: `+` new in the
+   profile, `~` differs from the profile value (the old value and the reason comment above the
+   key are shown), `=` already in the profile (hidden unless `-v`). Values are read through
    the schema (typed), written as GVariant text. **Keyfile overrides**:
    `~/.config/glib-2.0/settings/keyfile` is parsed through the schema; a key it sets to a value
    different from the dconf value (or the default) is listed in its own table with the keyfile
    value, the dconf-side value and whether the override is the effective value in the capturing
-   process. Overrides are never written into a panel file (that would freeze them into dconf);
+   process. Overrides are never written into a bundle (that would freeze them into dconf);
    a captured key that an override also touches carries the `override` note. The keyfile
    itself is an allow-listed file (section 2).
 2. **Files → `files/…`**: only allow-list candidates (`include_files` plus the built-ins
@@ -532,7 +633,11 @@ Sections, in this order:
    directory, because a plain `flatpak list` creates `~/.local/share/flatpak`) and **System** (a `system.toml` proposal:
    timezone into the machine overlay, locale and console keyboard shared).
 4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (window
-   geometry, recents, app-picker-layout, `last-*` timestamps), `no-schema`,
+   geometry, recents, app-picker-layout, `last-*` timestamps), `auto` (keys the system or an app
+   registered by itself: notification app ids and lists, Ptyxis profile uuids, Clocks UI state,
+   the Clocks mirror in `world-clocks`, portal global shortcuts, the input-source MRU order, the
+   Shell's seeded app-grid folders, an extension's version marker; the section lists each key with
+   its reason and says how to promote it), `no-schema`,
    `excluded-by-rule`; counts per class plus each key and its reason, never its value. The
    **`unmapped`** bucket lists user-valued keys that no panel rule claims (nothing is captured
    for them), so the user sees what the table misses. Keys equal to the schema default are
@@ -545,14 +650,23 @@ unmapped or at default); the totals line carries the number of user keys in scop
 `--only`, only the selected panels' keys are counted) so this is
 checkable. Decision order for one key: profile `exclude` → built-in `secret`/`identity`
 exclusion globs → the panel rule (a `skip` rule gives its own class) → `state` (unless an
-explicit `machine` rule claims the key) → no schema → value secret scan → no panel
-(`unmapped`) → target (machine when a machine rule, an `M` panel or an absolute path in the
-value says so). The `state` globs never apply under `[state_keep]` (keybindings, privacy,
+explicit `machine` rule or the profile's `include` claims the key) → `auto` (same exemptions) →
+no schema → value secret scan → no panel (`unmapped`) → target (machine when a machine rule, an
+`M` panel or an absolute path in the value says so) → **destination bundle**: (1) the bundle that
+already holds the key in the profile for this machine (it stays there, in its layer: a key the
+user grouped is never moved, and a key held under another panel's overlay file is marked `=` or
+`~`, never `+`: ticket #37), else (2) the first `[capture.bundles]` entry whose glob matches, else
+(3) the panel's own bundle. A key the profile already holds is never skipped as `state` or `auto`
+(it is the user's choice). A new key that a shared bundle *not applying here* (another machine's
+`machines` header, a disabled `requires-module`) already holds goes to the machine overlay, not the
+shared layer, so the other machine does not meet a conflict. A new key whose destination bundle
+exists but does not apply on this
+machine (`machines`, `requires-module`) is invalid config (exit 2). The preview shows the
+destination bundle of every key. The `state` globs never apply under `[state_keep]` (keybindings, privacy,
 accessibility, interface, peripherals, window-manager preferences, mutter and tiling-assistant
 keys: names such as `activate-window-menu`, `dwell-time` or `remember-recent-files` look like
-state but are preferences). A key already set in the machine overlay's panel file is captured
-into the overlay (the overlay wins at apply, so a shared write would never take effect). A
-value in the keyfile-override
+state but are preferences). `auto` is skipped like `state` unless a `machine` rule or the profile's
+`include` claims the key. A value in the keyfile-override
 table is masked when its key is excluded by the profile, a built-in `secret`/`identity`/
 `hardware` rule or a panel rule of such a class, or when it matches a secret pattern.
 
@@ -565,12 +679,13 @@ sets that key (a shared write would never take effect), in which case they repla
 hex (40+) and mixed-case base64 (40+, at most two `/`, so a long file path is not a token)
 runs → class `secret`; private LAN addresses → class
 `identity`. The scan runs on every dconf value, every adopted file and, at `--commit`, on the
-exact text about to be written (the merged panel files, `packages.toml`, `system.toml`). A
+exact text about to be written (the edited bundles, `packages.toml`, `system.toml`). A
 hit in a dconf value skips the key; a hit in an adopted file or in the output refuses the
 commit. A finding carries only its kind and line number, so reports and errors never contain
 the matched text. E-mail matches are ignored for the keys listed in `[secrets]
 email_exempt_keys` (`enabled-extensions`, `disabled-extensions`: extension uuids look like
-addresses).
+addresses). A full-line comment that the file already had before the commit (a reason the user wrote
+and reviewed in git) is not scanned again; every value and every new line is.
 
 **Candidate classes** (decided from name, size, extension and the *names* of keys inside small
 text files; values are scanned but never printed): `secret-bearing` (credential-looking file
@@ -581,25 +696,31 @@ with 60+ files: state and config interleaved), `portable-config` (everything els
 text). Directories named in `secret_dirs`, `cache_dirs` or `mixed_dirs` (`~/.local`, which holds
 the keyrings) are one row and are never read.
 
-**`--commit`** checks everything first and writes only then: panel files are merged key by key
-into the existing file (keys the live system no longer has stay, `~` values are replaced) and
-written atomically; an adopted file is copied into `files/` (or `machines/<machine>/files/`),
-the original is copied to the backup directory (invariant 5) and replaced atomically by an
-absolute symlink to the profile copy, so a failure before the last step leaves the original
-untouched; `packages.toml` gets the proposed names added (sorted union) and `system.toml`
-the proposed values; both are regenerated from the parsed file, so their comments are not
-preserved (ticket #29). Before anything is written the commit refuses (exit 5, nothing written)
-a directory that resolves outside `$HOME` or the profile, a destination that is a symlink or a
-directory, and an adopted file whose bytes differ from the ones scanned for the preview: what
-is written is exactly what was shown. Each file is written atomically; a failure part-way
-stops at that file and a rerun finishes the rest. The command never runs git.
+**`--commit`** checks everything first and writes only then: each captured key goes into its
+destination bundle **in place** (a changed value is rewritten where it stands, a new key is
+appended to the end of its section, a missing file or section is created; every comment, the key
+order, the spacing and the unrelated keys of the file stay as they are; keys the live system no
+longer has stay) and the file is written atomically; an adopted file is copied into `files/` (or
+`machines/<machine>/files/`), the original is copied to the backup directory (invariant 5) and
+replaced atomically by an absolute symlink to the profile copy, so a failure before the last step
+leaves the original untouched; `packages.toml` gets the proposed names appended to their array
+(existing order and comments untouched) and `system.toml` the proposed values replaced or added in
+place, both edited by `toml_edit.py` and re-parsed and compared with the intended data before
+anything is written (ticket #29). Before anything is written the commit refuses (exit 5, nothing
+written) a directory that resolves outside `$HOME` or the profile, a destination that is a symlink
+or a directory, and an adopted file whose bytes differ from the ones scanned for the preview: what
+is written is exactly what was shown. Each file is written atomically; a failure part-way stops at
+that file and a rerun finishes the rest. The command never runs git.
 
 Selection is deterministic rules (engine defaults plus `[capture]` in the profile), not an
 interactive picker, so a preview is reproducible and reviewable and the rules live in the
 repo. The profile's `[capture]` takes `exclude` (globs, `excluded-by-rule`, checked first),
-`machine` (globs), `include_files` and `machine_files` (`$HOME`-relative globs); an unknown
-key is invalid config. A profile cannot weaken the built-in `secret`/`identity`/`hardware`
-exclusions: they are evaluated before anything the profile adds.
+`machine` (globs), `include` (globs that lift the `state` and `auto` skips for the keys they
+match), `bundles` (a table, bundle name → list of globs: where new keys go), `include_files` and
+`machine_files` (`$HOME`-relative globs); dconf globs are written with or without the leading `/`
+(`org/gnome/x/**` is `/org/gnome/x/**`); an unknown key is invalid config. A profile cannot weaken
+the built-in `secret`/`identity`/`hardware` exclusions: they are evaluated before anything the
+profile adds, and `include` never lifts them.
 
 ### Plan and actions
 
@@ -609,8 +730,8 @@ check fails, so the preview is exactly what `--commit` will do. After an action 
 `check()` must hold; a plan that does not converge fails instead of reporting `changed`.
 
 Order: submodules → migrations → schemas → **packages** → **system (root)** → symlinks
-(extensions) → **files (links)** → enable/disable → settings (module presets, then profile
-panel files, then machine overlay) → seeds.
+(extensions) → **files (links)** → enable/disable → settings (module presets, then shared
+bundles, then machine overlay bundles) → seeds.
 
 | Action (`kind`) | Check | Run |
 |---|---|---|
@@ -624,7 +745,7 @@ panel files, then machine overlay) → seeds.
 | `link-replace` | same check; the destination exists as a real file/directory or a symlink elsewhere | copy it to `~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>` (one helper, `backup.py`, shared by extension links, profile files and `capture --commit`), remove it, then `ln -sfnT`; the plan line says `backup+replace` and whether the content is identical |
 | `enable` | uuid is in the user value of `enabled-extensions` and not in `disabled-extensions` | add / remove the one item |
 | `disable` | a conflict is not in `enabled-extensions` and is in `disabled-extensions`; a retired uuid is not in `enabled-extensions` | remove / add the one item |
-| `set-key` | effective value (user value, else schema default) equals the wanted typed value | write it |
+| `set-key` | effective value (user value, else schema default) equals the wanted typed value; the preview line ends with the bundle's reason comment when it has one | write it |
 | `seed-key` | key has a user value | write the provider's value |
 
 Root actions are marked `[sudo]` in the plan; `--no-sudo` skips them and reports them as
@@ -701,10 +822,19 @@ the exact clone command and applies the modules only.
   profile, then the settings and files planners against an empty fake machine must return the
   same keys as `set-key` actions (including relocatable schemas and machine-overlay keys) and
   the captured files as `link` actions; applying them converges to the captured keys.
+- Bundles (`tests/test_bundles.py`, `tests/test_keyfile_doc.py`, `tests/test_toml_edit.py`, no
+  PyGObject needed): discovery of nested bundles in both layers, header validation, `machines` and
+  `requires-module` filtering, conflict (exit 2, both files and lines) versus duplicate warning,
+  shadows, comment-preserving edits, `bundles`, `bundle-move` and `note`. Capture tests
+  (`tests/test_capture.py`) cover routing order (the #37 case included), `[capture.bundles]`,
+  `auto` and `include`, changed-only, the SUMMARY block, `--dry-run` / `--summary` exclusivity and a
+  `capture --commit` into a profile of hand-written, commented bundles that must come out
+  byte-identical except for the changed values.
 - Integration: `scripts/integration.sh` runs `dbus-run-session` with a scratch
   `DCONF_PROFILE` and a temporary `HOME`/`XDG_*` (including `XDG_RUNTIME_DIR`) against a scratch
   copy of the engine with a fixture module (so no network or root is needed): a module settings
-  preset, a shared panel file, a machine overlay that wins over it, a shared and a machine file
+  preset, two shared bundles (a header, a reason comment, a key from another schema) and a machine
+  overlay bundle that wins over them, a shared and a machine file
   to link and the `english-in-overview` extension are applied with `apply --commit`; `status`
   exits 0, a second `apply --commit` reports `0 changed`, and a `capture` preview reads the
   result back without writing. The scratch environment is exported **before**
@@ -735,13 +865,25 @@ the exact clone command and applies the modules only.
   in rig. The submodule commit recorded in git is the version lock.
 - **The repo's preset wins on `apply`** (enforce), the user's taste lives in the profile:
   otherwise every run would have to guess which side changed.
-- **Only the keys a panel file lists are enforced**: absent keys are never reset, so a
-  profile can be adopted panel by panel.
+- **Only the keys a bundle lists are enforced**: absent keys are never reset, so a
+  profile can be adopted bundle by bundle.
 - **Extras are never removed**: the tool only undoes what it declared. `packages.toml`
   installs and never removes for the same reason.
 - **Leaves, not directories, are linked** under `$HOME`: apps keep creating siblings in
   their own config directories.
 - **`capture` is rules, not a picker**: reproducible, reviewable, and the rules are versioned.
+- **Bundles, not one file per panel**: grouping by purpose is how a person thinks about
+  settings ("everything for my dev keyboard"), and Home Assistant's `packages:` shows that merging
+  many small files at load costs little. The merge is explicit and checked (a key in two bundles
+  with different values is an error, never a silent pick), and `bundle-move` makes regrouping one
+  command, so the layout stays the user's choice rather than the tool's.
+- **Reasons are comments, edited in place**: a profile is read by a person in `git diff`; a reason
+  stored anywhere else (a sidecar file, a key) would drift away from its key. The engine therefore
+  edits keyfiles and the two TOML files with line-oriented editors that change the least text and
+  verify the result, instead of regenerating files from parsed data.
+- **`auto` is a class, not silence**: keys an app or the Shell registers by itself (ids, ordering
+  lists) are not choices; dropping them quietly would hide what capture decides, so they get their
+  own counted section and a one-line way back (`[capture] include`).
 - **Auto-apply is off until #19**: `apply` enforces and must not overwrite live tweaks the
   user has not seen.
 - **The hyperdock uuid is read from `metadata.json`**: the umbrella works before and after

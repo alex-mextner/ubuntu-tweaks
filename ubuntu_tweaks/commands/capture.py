@@ -2,13 +2,14 @@
 
 Accessed via: ``cli.py`` discovers this module and calls ``register``.
 
-Preview is the default and is read-only. ``--commit`` writes the same plan into the profile
-working tree (settings panel files, allow-listed files with backup + symlink, packages.toml,
-system.toml) and never runs ``git commit``. ``--report FILE.md`` writes the report as markdown
-(full values; the terminal clips long cells); ``-v`` also lists entries already equal to the
-profile and every cache-state candidate; ``--only`` (global flag) takes panel ids and the section
-names ``files``, ``packages``, ``system``. Exit 0; 2 invalid config; 5 refused (secret finding or
-unsafe path, nothing written).
+Preview is the default and is read-only (``--dry-run`` is the same, spelled out; it excludes
+``--commit``). The report opens with a SUMMARY block; ``--summary`` prints only that block. ``--commit``
+writes the same plan into the profile working tree (settings bundles edited in place, allow-listed files
+with backup + symlink, packages.toml and system.toml edited in place) and never runs ``git commit``.
+``--report FILE.md`` writes the report as markdown (full values; the terminal clips long cells); ``-v``
+also lists entries already equal to the profile and every cache-state candidate; ``--only`` (global flag)
+takes panel ids and the section names ``files``, ``packages``, ``system``. Exit 0; 2 invalid config
+(including ``--dry-run`` with ``--commit``); 5 refused (secret finding or unsafe path, nothing written).
 
 Heavy imports (``gi`` through the settings backend) happen inside the functions so ``--help``
 stays fast. ``execute`` is the body with every system input injected (tests); ``run`` wires the
@@ -35,11 +36,15 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "capture",
         help="preview (or with --commit write) what the live system would add to the profile",
         description=(
-            "Read-only inventory of the live system, printed as the exact diff the profile would receive. "
-            "--commit writes it into the profile working tree (no git commit)."
+            "Read-only inventory of the live system, printed as the exact diff the profile would receive: a SUMMARY "
+            "block first, then the detail tables. --commit writes it into the profile working tree (no git commit); "
+            "--dry-run is the explicit no-write mode (the default preview, so the two exclude each other)."
         ),
     )
-    parser.add_argument("--commit", action="store_true", help="write the plan into the profile (default: preview only)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--commit", action="store_true", help="write the plan into the profile (default: preview only)")
+    mode.add_argument("--dry-run", action="store_true", help="explicit no-write mode; the same as the default preview")
+    parser.add_argument("--summary", action="store_true", help="print only the SUMMARY block, not the detail tables")
     parser.add_argument("--report", metavar="FILE.md", help="also write the report as markdown")
     parser.add_argument("-v", "--verbose", action="store_true", help="also list entries equal to the profile")
     parser.set_defaults(handler=run)
@@ -67,14 +72,35 @@ def execute(
 ) -> int:
     """``state_home`` is where backups go (default ``<home>/.local/state``); ``sources`` may carry
     ``installer_baseline``, ``snap_seed`` and ``keyboard_file``."""
+    from ubuntu_tweaks.bundles import module_gate
     from ubuntu_tweaks.capture.commit import commit
     from ubuntu_tweaks.capture.plan import build_plan
     from ubuntu_tweaks.capture.report import build_document, render_markdown, render_text
     from ubuntu_tweaks.capture.rules import load_rules
 
+    if args.commit and args.dry_run:
+        raise ConfigError("--dry-run and --commit are mutually exclusive: --dry-run never writes")
+    if args.commit and args.summary:
+        raise ConfigError("--summary prints only the summary; use --dry-run, or drop --summary to commit")
     rules = load_rules(_capture_table(ctx))
-    plan = build_plan(ctx.profile, rules, backend, home=home, only=ctx.only, run=run, **sources)
-    document = build_document(plan, machine=ctx.profile.machine, commit=args.commit, verbose=args.verbose)
+    plan = build_plan(
+        ctx.profile,
+        rules,
+        backend,
+        home=home,
+        only=ctx.only,
+        run=run,
+        module_enabled=module_gate(ctx.modules_dir, ctx.profile),
+        **sources,
+    )
+    document = build_document(
+        plan,
+        machine=ctx.profile.machine,
+        commit=args.commit,
+        verbose=args.verbose,
+        dry_run=args.dry_run,
+        summary_only=args.summary,
+    )
     print(render_text(document), end="")
     if args.report:
         report = Path(args.report)

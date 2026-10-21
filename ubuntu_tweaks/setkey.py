@@ -211,6 +211,7 @@ class Entry:
     text: str
     seed: bool = False
     rank: int = 0  # inside a phase, a higher rank wins (a module override beats every module preset)
+    reason: str = ""  # the bundle comment above the key, shown next to it in the preview
 
 
 def collapse(entries: Iterable[Entry]) -> list[Entry]:
@@ -250,7 +251,9 @@ def validate_text(backend: SettingsBackend, target: ResolvedKey, text: str, wher
     comes from the installed schema, else from the extension's schema XML (enum keys are not checked)."""
     try:
         if backend.has_key(target.schema, target.key):
-            parse_value(backend, target.schema, target.key, text)
+            wanted = parse_value(backend, target.schema, target.key, text)
+            if not backend.in_range(target.schema, target.key, wanted):
+                raise ConfigError(f"{where}: {text} is outside the allowed range of {target.schema} {target.key}")
         elif target.pending_type:
             GLib.Variant.parse(GLib.VariantType.new(target.pending_type), text)
     except SettingsError as error:
@@ -283,7 +286,8 @@ class _KeyAction(Action):
 
     def _tail(self) -> str:
         pending = "" if self._installed() else f" (schema {self.target.schema} is not installed yet)"
-        return f"{pending} <- {self.entry.source}"
+        reason = f"  # {short(self.entry.reason, 80)}" if self.entry.reason else ""
+        return f"{pending} <- {self.entry.source}{reason}"
 
 
 class SetKeyAction(_KeyAction):
