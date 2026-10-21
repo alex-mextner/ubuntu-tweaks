@@ -86,6 +86,17 @@ git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/x
 Commands self-register: `ubuntu_tweaks/commands/<name>.py` exposes
 `register(subparsers)`, and `cli.py` never names a command; dropping a file adds one.
 
+PyGObject (`gi`) is a distro package, so a pyenv/uv `python3` first in `PATH` lacks it. When the
+interpreter running the launcher cannot import `gi`, `bin/ubuntu-tweak` re-executes itself once
+under `/usr/bin/python3` (the invoked path is kept, so the `~/.local/bin` symlink keeps working).
+When that has no `gi` either the launcher still runs, so `doctor` (which installs `python3-gi`) and
+the commands that need no `gi` work; a command that needs it ends with exit 1 and
+`sudo apt install python3-gi` (`apply`, `status` and `update` through `require_gi`, anything else
+through `cli.main`'s handler of the missing module). The system interpreter path is overridable
+with `UBUNTU_TWEAK_SYSTEM_PYTHON` (a test seam); `UBUNTU_TWEAK_REEXEC` is the loop guard the
+launcher sets itself (to its pid, which `exec` keeps, so a stale value from the shell is ignored).
+Covered by `tests/test_launcher.py`.
+
 | Command | What it does |
 |---|---|
 | `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` prints the exact `gh repo clone alex-mextner/.files ~/.files` command and continues with the module-only plan. Re-running is safe. |
@@ -184,7 +195,8 @@ that is absolute or contains `..` are invalid config (exit 2).
     file byte-equal to the repo copy and its mode, timer enabled; `/etc/polkit-1/rules.d` is not
     readable by the desktop user, so that one file is vouched for by
     `/etc/memguard/installed.sha256` (mode, sha256, path per file), written by the root install;
-    `MEMGUARD_ROOT=DIR` points the check at a test root). `apple-hid-battery` checks the running
+    `MEMGUARD_ROOT=DIR` points the check, or a staged non-root install, at a test root; what only a
+    real root can verify is listed in `docs/specs/memguard.md`, *Real-root verification*). `apple-hid-battery` checks the running
     kernel: module present, loaded at
     boot, livepatch enabled, or absent on kernels with the upstream fix (>= 7.3).
   - `ego`: an extension from extensions.gnome.org by uuid and optional version. The
@@ -326,9 +338,12 @@ the real file lives in the profile.
   `ubuntu_tweaks/backup.py` first.
 - Refused before any plan exists (exit 5): a path containing `..`, and a destination whose
   nearest existing parent resolves outside `$HOME` (for example a symlinked `~/.config`).
-- Extras: dangling symlinks into the profile (their file was removed from it). Found in the
-  directories the profile manages plus `$HOME`, `~/.config` and the first level below
-  `~/.config`; deeper orphans are not found. Reported, never removed.
+- Extras: dangling symlinks into the profile (their file was removed from it). Found in
+  `$HOME` itself (its direct entries only), all of `~/.config` and the directory of every declared
+  link, each walked recursively (at most ten levels, symlinked directories not entered,
+  directories whose name contains `cache` and per-app stores such as `node_modules`, `.git`,
+  `IndexedDB`, `Local Storage` skipped), so an orphan at any depth below those is found.
+  Reported, never removed.
 
 #### `profile.toml` / `machine.toml`
 
@@ -373,6 +388,11 @@ says so.
 
 `locale` sets `LANG` and passes the other `LC_*` assignments of the current system locale
 through (`localectl set-locale` replaces the whole set); the locale must already be generated.
+`run()` takes one `localectl status` snapshot and uses it both for the readable check and for the
+preserved `LC_*` arguments. Output without a parseable `System Locale:` block (as well as a failing
+command) is *unknown*: the action refuses with an error and does not call `set-locale`, because
+that would drop the machine's other `LC_*`. A block with no `NAME=value` pair is unknown too, except
+`System Locale: n/a`, localectl's way to say that no locale is set.
 Keyboard values containing quotes, `$`, backticks, backslashes or control characters are
 invalid config. Only the keyboard fields
 listed are compared and written; the other lines of `/etc/default/keyboard` are kept, and
@@ -386,6 +406,8 @@ counts as "not satisfied". Timezone, locale and keyboard are three `system` acti
 apt = ["tmux", "ripgrep"]
 snap = ["firefox"]
 flatpak = ["org.gnome.Extensions"]
+flatpak_remote = "flathub"   # optional: the one remote flatpaks are installed from (default flathub)
+apt_update = false           # optional: run `apt-get update` before the apt batch (default false)
 ```
 
 `apply` installs the missing ones and never removes. `capture` proposes
@@ -395,9 +417,14 @@ deliberate installs show up.
 
 One `package` action per manager that has names, listing what is missing right now. apt and
 snap run as one batch through sudo (`apt-get install -y …`, `snap install …`); flatpak runs
-as the user from the `flathub` remote. Installed means: `dpkg-query` status `ii`, a
-`snap list` row, a `flatpak list` row. The package lists are not refreshed
-(`apt-get update` is not run) and a manager that is not on the machine means "not installed".
+as the user from one remote, `flatpak_remote` (default `flathub`; a bare remote name, which must
+already be configured; the overlay value replaces the shared one). Installed means: `dpkg-query`
+status `ii`, a `snap list` row, a `flatpak list` row. The apt lists are refreshed only with
+`apt_update = true` (boolean, default false; the overlay value replaces the shared one): then
+`apt-get update` runs through sudo right before the apt batch, only when an apt package is missing,
+and the plan line says `(after apt-get update)`. A manager that is not on the machine means "not
+installed". A `flatpak_remote` that is empty, starts with `-` or contains whitespace, and a
+non-boolean `apt_update`, are invalid config (exit 2).
 
 ### Panel coverage
 
@@ -500,7 +527,9 @@ Sections, in this order:
    non-UTF-8 or an unreadable file is listed as *not adopted* with the reason.
 3. **Packages** (a `packages.toml` proposal: `apt-mark showmanual` minus the installer
    baseline, minus `required`/`important` packages and the `[packages] ignore` globs; snaps
-   without base and seeded ones; flatpak apps) and **System** (a `system.toml` proposal:
+   without base and seeded ones; flatpak apps, listed per installation: `--system` always, `--user`
+   only when `$XDG_DATA_HOME/flatpak` exists, with flatpak's cache redirected to a temporary
+   directory, because a plain `flatpak list` creates `~/.local/share/flatpak`) and **System** (a `system.toml` proposal:
    timezone into the machine overlay, locale and console keyboard shared).
 4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (window
    geometry, recents, app-picker-layout, `last-*` timestamps), `no-schema`,
@@ -682,8 +711,9 @@ the exact clone command and applies the modules only.
   `dbus-run-session` starts, because the dconf service is activated by the bus daemon and
   inherits the daemon's environment: variables set only inside the session would let it write
   the user's real dconf database. The script refuses to run unless it sees the scratch
-  environment and a session bus other than its parent's, and skips itself when the
-  `org.gnome.shell` schema is not installed. Every test that writes through Gio/dconf
+  environment and a session bus other than its parent's, and skips itself (loudly, exit 0) when the
+  `org.gnome.shell` or `org.gnome.desktop.interface` schema is not installed (CI installs
+  `gnome-shell-common` and `gsettings-desktop-schemas`). Every test that writes through Gio/dconf
   (`tests/gio_scenario.py`, `tests/gio_planner_scenario.py`) calls `tests/scratch_guard.py`
   first and exits 2 on anything but a fully scratch HOME/XDG/DCONF_PROFILE and a private bus.
   Wired into CI

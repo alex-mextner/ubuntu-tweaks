@@ -438,6 +438,50 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   - `journalctl -t swap-drain` has one line per decision (`skip <reason>: …` or
     `drain start: …`, then `drain done|aborted in Ns …`).
 
+### Real-root verification of the system installers (ticket #26)
+
+Tests run both installers against a fake root and never as root:
+
+- `install.sh` of memguard accepts `MEMGUARD_ROOT=DIR` for a **staged install** too (no root
+  needed, writes the files and `etc/memguard/installed.sha256` under `DIR`, never calls
+  `systemctl` or `runuser`). `modules/memguard/tests/test_install_check.py` checks the seven files and
+  modes, the stamp lines (mode, sha256 of the rendered file, path), idempotency, drift repair, and
+  that `--check` exits 0 afterwards, also with `/etc/polkit-1/rules.d` unreadable (the stamp vouches).
+- `apple-hid-battery/install.sh` runs under `APPLE_HID_ROOT` / `APPLE_HID_KVER` with stub
+  `make`, `strip`, `depmod`, `modprobe`, `rmmod` (`modules/apple-hid-battery/tests/test_install.py`).
+- `planners/system_modules.py` is tested with `FakeProcess` (`tests/test_system_modules.py`).
+
+Only a real root on a disposable machine (container or VM with systemd for memguard, a VM with
+kernel headers and Secure Boot off for the HID module; never the workstation) can verify:
+
+1. memguard: files end up `root:root`; `/etc/polkit-1/rules.d` stays unreadable for the desktop
+   user and `install.sh --check` as that user still exits 0 through the stamp; `getent passwd`
+   resolves the configured `user`; `systemctl daemon-reload`, `enable --now swap-drain.timer` and
+   `restart` work; the closing `runuser -u <user> -- memguard swap-drain --dry-run` runs; polkitd
+   accepts the rule.
+2. apple-hid-battery: `make -C … KDIR=/lib/modules/<k>/build` builds the real `.ko`; `depmod -a`,
+   `modprobe` load it and `/sys/kernel/livepatch/livepatch_hid_battery_offset/enabled` reads `1`
+   (an unsigned module needs Secure Boot off).
+
+Manual checklist, as root in the disposable machine, from a checkout of this repo:
+
+- [ ] `sudo modules/memguard/install.sh` exits 0 and prints `installed` for the seven files plus
+      `installed /etc/memguard/installed.sha256`.
+- [ ] `ls -l /etc/memguard/installed.sha256 /usr/local/sbin/swap-drain` shows `root root`;
+      `cat /etc/memguard/installed.sha256` has seven `mode sha256 path` lines.
+- [ ] `modules/memguard/install.sh --check` as an unprivileged user exits 0
+      (`memguard: nothing to change`); `echo $?` prints 0.
+- [ ] `sudo modules/memguard/install.sh` again prints `memguard: nothing to change`.
+- [ ] `systemctl is-enabled swap-drain.timer` prints `enabled`; `systemctl list-timers swap-drain`
+      shows the next run.
+- [ ] `sudo modules/apple-hid-battery/install.sh` exits 0, then
+      `modules/apple-hid-battery/install.sh --check` exits 0 and
+      `cat /sys/kernel/livepatch/livepatch_hid_battery_offset/enabled` prints `1`
+      (skip on a kernel >= 7.3: the check then wants the module absent).
+- [ ] `sudo modules/apple-hid-battery/install.sh` again prints `apple-hid-battery: nothing to change`.
+
+Ticket #26 stays open until that checklist has run on a disposable root.
+
 ### Per-machine profile: `machines/msi-pulse-gl66/`
 
 Requirements of this laptop, each a file in the profile and a check in its `status.sh`:

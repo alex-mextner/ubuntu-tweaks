@@ -153,10 +153,72 @@ class InstallCheck(unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertIn(rule, r.stdout)
 
-    def test_root_override_is_refused_for_a_real_install(self):
-        r = self.check()
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("only valid with --dry-run / --check", r.stderr)
+    def stage(self, **extra_env):
+        """A real (non-dry) install into the scratch root, with systemctl/runuser that fail loudly."""
+        bin_dir = self.root.rstrip("/") + "-bin"
+        os.makedirs(bin_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, bin_dir, ignore_errors=True)
+        for tool in ("systemctl", "runuser"):
+            path = os.path.join(bin_dir, tool)
+            with open(path, "w") as f:
+                f.write(f"#!/bin/sh\necho {tool} called >&2\nexit 99\n")
+            os.chmod(path, 0o755)
+        env = dict(os.environ, MEMGUARD_ROOT=self.root, PATH=bin_dir + os.pathsep + os.environ["PATH"], **extra_env)
+        return subprocess.run([INSTALL], env=env, capture_output=True, text=True, timeout=60)
+
+    def test_a_staged_install_writes_every_file_with_its_mode_and_the_stamp(self):
+        r = self.stage()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("called", r.stderr)  # systemctl/runuser are real-root only
+        self.assertIn("installed " + self.root + "/etc/memguard/installed.sha256", r.stdout)
+        for src, dst, mode in FILES:
+            target = os.path.join(self.root, dst)
+            self.assertEqual(os.stat(target).st_mode & 0o777, mode, dst)
+        stamp = os.path.join(self.root, "etc/memguard/installed.sha256")
+        with open(stamp) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), len(FILES))
+        for line, (_, dst, mode) in zip(lines, FILES):
+            recorded_mode, digest, path = line.split(" ", 2)
+            self.assertEqual((recorded_mode, path), (f"{mode:o}", os.path.join(self.root, dst)))
+            with open(path, "rb") as f:
+                self.assertEqual(digest, hashlib.sha256(f.read()).hexdigest(), dst)
+        with open(os.path.join(self.root, FILES[-1][1])) as f:
+            self.assertNotIn("@USER@", f.read())
+
+    def test_check_passes_after_a_staged_install_also_through_the_stamp(self):
+        self.assertEqual(self.stage().returncode, 0)
+        r = self.check("--check")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "memguard: nothing to change"), r.stderr)
+        if os.geteuid() != 0:
+            self.hide_rules_dir()  # the desktop user cannot read /etc/polkit-1/rules.d: the stamp vouches
+            r = self.check("--check")
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "memguard: nothing to change"), r.stderr)
+
+    def test_a_second_staged_install_changes_nothing(self):
+        self.assertEqual(self.stage().returncode, 0)
+        before = snapshot(self.root)
+        r = self.stage()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing to change", r.stdout)
+        self.assertNotIn("installed ", r.stdout)
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_a_staged_install_repairs_drift(self):
+        self.assertEqual(self.stage().returncode, 0)
+        target = os.path.join(self.root, "usr/local/sbin/swap-drain")
+        with open(target, "a") as f:
+            f.write("# local edit\n")
+        self.assertEqual(self.check("--check").returncode, 3)
+        self.assertEqual(self.stage().returncode, 0)
+        self.assertEqual(self.check("--check").returncode, 0)
+
+    @unittest.skipIf(os.geteuid() == 0, "root may install")
+    def test_a_real_install_without_a_root_override_needs_root(self):
+        r = subprocess.run([INSTALL], env={k: v for k, v in os.environ.items() if k != "MEMGUARD_ROOT"},
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("run with sudo", r.stderr)
 
     def test_unknown_flag_is_a_usage_error(self):
         self.assertEqual(self.check("--bogus").returncode, 2)

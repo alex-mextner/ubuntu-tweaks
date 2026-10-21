@@ -38,7 +38,7 @@ Public API:
 - ``Layer`` = ``"module"`` | ``"shared"`` | ``"overlay"``; ``Origin`` = ``"shared"`` | ``"overlay"``.
 - ``PanelFiles(panel, shared, overlay)`` and ``ProfileFile(rel, source, origin, shadows)``
   (``shadows``: tuple of the shared files an overlay entry replaces).
-- ``Packages(apt, snap, flatpak)``, ``Keyboard(model, layout, variant, options)``,
+- ``Packages(apt, snap, flatpak, flatpak_remote, apt_update)``, ``Keyboard(model, layout, variant, options)``,
   ``SystemConfig(timezone, locale, keyboard)``: typed views of ``packages.toml`` and
   ``system.toml`` after the shared + overlay union-merge.
 - ``TomlValue`` / ``TomlTable``: the value types of parsed TOML.
@@ -199,6 +199,8 @@ class Packages:
     apt: tuple[str, ...] = ()
     snap: tuple[str, ...] = ()
     flatpak: tuple[str, ...] = ()
+    flatpak_remote: str = "flathub"
+    apt_update: bool = False
 
 
 @dataclass(frozen=True)
@@ -237,11 +239,19 @@ def _str_tuple(table: Mapping[str, TomlValue], key: str, where: str) -> tuple[st
 
 
 def _parse_packages(table: TomlTable, where: str) -> Packages:
-    _reject_unknown(table, ("apt", "snap", "flatpak"), where)
+    _reject_unknown(table, ("apt", "snap", "flatpak", "flatpak_remote", "apt_update"), where)
+    remote = _optional_str(table, "flatpak_remote", where)
+    if remote is not None and (not remote or remote.startswith("-") or any(char.isspace() for char in remote)):
+        raise ConfigError(f"{where}: flatpak_remote must be a remote name, got {remote!r}")
+    apt_update = table.get("apt_update", False)
+    if not isinstance(apt_update, bool):
+        raise ConfigError(f"{where}: apt_update must be true or false, got {apt_update!r}")
     return Packages(
         apt=_str_tuple(table, "apt", where),
         snap=_str_tuple(table, "snap", where),
         flatpak=_str_tuple(table, "flatpak", where),
+        flatpak_remote=remote or "flathub",
+        apt_update=apt_update,
     )
 
 

@@ -10,7 +10,8 @@
 #                                           exit 0 = installed files match the repo, 3 = drift
 #
 # MEMGUARD_ROOT=DIR prefixes every destination (tests; skips the systemd timer probe and the
-# user lookup) and is accepted only with --dry-run / --check. Idempotent: a second run prints
+# user lookup). With it the install is *staged*: it needs no root, writes the files and the stamp
+# under DIR and never touches systemd or runuser. Idempotent: a second run prints
 # "nothing to change". Spec: docs/specs/memguard.md.
 set -euo pipefail
 
@@ -25,11 +26,7 @@ case "${1:-}" in
   -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $0 [--dry-run|--check]" >&2; exit 2 ;;
 esac
-if [ "$dry" = 0 ] && [ -n "$root" ]; then
-  echo "MEMGUARD_ROOT is only valid with --dry-run / --check" >&2
-  exit 2
-fi
-if [ "$dry" = 0 ] && [ "$(id -u)" != 0 ]; then
+if [ "$dry" = 0 ] && [ -z "$root" ] && [ "$(id -u)" != 0 ]; then
   echo "run with sudo (or --dry-run to only see the changes)" >&2
   exit 1
 fi
@@ -130,6 +127,10 @@ printf '%s\n' "${stamp_lines[@]}" >"$render/stamp"
 if ! cmp -s "$render/stamp" "$stamp" 2>/dev/null; then
   install -D -m 644 "$render/stamp" "$stamp"
   echo "installed $stamp"
+fi
+if [ -n "$root" ]; then
+  echo "memguard: staged install into $root; systemd and the user lookup are real-root only"
+  exit 0
 fi
 [ "$reload" = 1 ] && systemctl daemon-reload
 systemctl enable --now swap-drain.timer >/dev/null 2>&1

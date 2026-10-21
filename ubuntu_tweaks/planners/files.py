@@ -16,9 +16,11 @@ Assumptions:
 - Unsafe destinations are refused up front (``RefusedError``, exit 5), before any plan exists: a
   relative path with ``..`` and a destination whose nearest existing parent resolves outside
   ``$HOME`` (a symlinked ``~/.config`` that leads elsewhere, for instance).
-- ``extras`` looks for symlinks into the profile whose file was removed from it. It scans the
-  directories the profile manages plus ``$HOME``, ``~/.config`` and the first level below
-  ``~/.config``; a deeper orphan is not found. It never removes anything.
+- ``extras`` looks for symlinks into the profile whose file was removed from it. It scans ``$HOME``
+  itself, ``~/.config`` and the directory of every declared link, each with everything below it
+  (at most ten levels, symlinked directories not entered, directories whose name contains
+  ``cache`` and a few per-app stores such as ``node_modules`` or ``IndexedDB`` skipped). It never
+  removes anything.
 
 Public API: ``build(ctx, backend, *, home=None, clock=None, state_home=None)``,
 ``extras(ctx, backend, *, home=None)``, ``FileLinkAction``.
@@ -221,19 +223,65 @@ def build(
     ]
 
 
+_MAX_DEPTH = 10
+_SKIPPED_NAMES = frozenset(
+    name.casefold()
+    for name in (
+        "node_modules",
+        ".git",
+        "IndexedDB",
+        "Service Worker",
+        "blob_storage",
+        "Local Storage",
+        "Session Storage",
+        "logs",
+        "Trash",
+    )
+)
+
+
+def _is_heavy(name: str) -> bool:
+    """Directories an orphan scan never enters: caches and per-app stores that hold no profile links."""
+    lowered = name.casefold()
+    return "cache" in lowered or lowered in _SKIPPED_NAMES
+
+
+def _walk(root: Path, depth: int = 0) -> list[Path]:
+    """``root`` and every real directory below it, up to ``_MAX_DEPTH`` levels, skipping caches.
+
+    Symlinked directories are listed by the caller as entries but never entered.
+    """
+    found = [root]
+    if depth >= _MAX_DEPTH:
+        return found
+    try:
+        children = sorted(os.scandir(root), key=lambda item: item.name)
+    except OSError:
+        return found
+    for child in children:
+        try:
+            enterable = child.is_dir(follow_symlinks=False) and not _is_heavy(child.name)
+        except OSError:
+            continue
+        if enterable:
+            found += _walk(Path(child.path), depth + 1)
+    return found
+
+
 def _scan_directories(home: Path, declared: set[Path]) -> list[Path]:
+    """``$HOME`` itself, the directories the profile manages with everything below them, and all of
+    ``~/.config``: any orphan of a removed profile file that lived under them is found at any depth."""
     found: dict[Path, None] = {home: None}
-    for destination in declared:
-        for parent in destination.parents:
-            if parent == home or home not in parent.parents:
-                break
-            found[parent] = None
     config = home / ".config"
-    found[config] = None
-    if config.is_dir() and not config.is_symlink():
-        for child in sorted(config.iterdir()):
-            if child.is_dir() and not child.is_symlink():
-                found[child] = None
+    roots = {config}
+    for destination in declared:
+        if destination.parent != home and home in destination.parent.parents:
+            roots.add(destination.parent)
+    for root in sorted(roots):
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for directory in _walk(root):
+            found[directory] = None
     return list(found)
 
 

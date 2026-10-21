@@ -10,17 +10,19 @@
 # live user's dconf database (safety invariant 6). The inner run refuses to continue unless it is
 # inside that scratch environment and on a bus other than the parent's. It runs a scratch copy of
 # the engine with an extra fixture module, so it needs neither network (hyperdock submodule) nor
-# root (memguard). Skips (exit 0, loudly) when the org.gnome.shell schema is not installed.
+# root (memguard). Skips (exit 0, loudly) when the org.gnome.shell or org.gnome.desktop.interface schema is not installed.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ "${UBUNTU_TWEAKS_SCRATCH:-}" != "1" ]]; then
     schemas="$(/usr/bin/gsettings list-schemas 2>/dev/null || true)"
-    if ! grep -qx org.gnome.shell <<<"$schemas"; then
-        echo "integration: SKIPPED, schema org.gnome.shell is not installed (package gnome-shell-common)"
-        exit 0
-    fi
+    for schema_package in org.gnome.shell:gnome-shell-common org.gnome.desktop.interface:gsettings-desktop-schemas; do
+        if ! grep -qx "${schema_package%%:*}" <<<"$schemas"; then
+            echo "integration: SKIPPED, schema ${schema_package%%:*} is not installed (package ${schema_package##*:})"
+            exit 0
+        fi
+    done
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp/home" "$tmp/profile" "$tmp/runtime"
