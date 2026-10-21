@@ -252,20 +252,26 @@ class OverlayInventoryTests(ProfileCase):
 
         self.assertEqual([str(entry.rel) for entry in profile.files()], [".config/linked"])
 
-    def test_settings_panels_merge_shared_and_overlay_ids(self) -> None:
+    def test_bundle_files_list_every_ini_below_settings_in_both_layers(self) -> None:
         profile = self.profile()
         write(profile.settings_dir / "appearance.ini")
-        write(profile.settings_dir / "power.ini")
-        write(profile.overlay_settings_dir / "power.ini")
+        write(profile.settings_dir / "laptop/power.ini")
+        write(profile.settings_dir / "notes.txt")
+        write(profile.settings_dir / ".draft.ini")
+        write(profile.overlay_settings_dir / "laptop/power.ini")
         write(profile.overlay_settings_dir / "sound.ini")
 
-        panels = {panel.panel: panel for panel in profile.settings_panels()}
+        found = [(bundle.name, bundle.origin) for bundle in profile.bundle_files()]
 
-        self.assertEqual(list(panels), ["appearance", "power", "sound"])
-        self.assertIsNone(panels["appearance"].overlay)
-        self.assertIsNotNone(panels["power"].shared)
-        self.assertIsNotNone(panels["power"].overlay)
-        self.assertIsNone(panels["sound"].shared)
+        self.assertEqual(
+            found,
+            [
+                ("appearance", "shared"),
+                ("laptop/power", "shared"),
+                ("laptop/power", "overlay"),
+                ("sound", "overlay"),
+            ],
+        )
 
     def test_overlay_presence(self) -> None:
         profile = self.profile("home")

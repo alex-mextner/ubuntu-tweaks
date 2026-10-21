@@ -83,6 +83,26 @@ printf "[org/gnome/desktop/interface]\ncolor-scheme='prefer-light'\ntext-scaling
     >"$profile/machines/integration/settings/appearance.ini"
 printf "shared = 1\n" >"$profile/files/.config/ubuntu-tweak-integration.conf"
 printf "machine = 1\n" >"$profile/machines/integration/files/.config/ubuntu-tweak-integration-machine.conf"
+# Two more bundles: a shared one in a subdirectory (header, reasons, keys of two schemas) and a machine overlay
+# bundle of the same name that wins for one key.
+mkdir -p "$profile/settings/dev" "$profile/machines/integration/settings/dev"
+cat >"$profile/settings/dev/look.ini" <<'EOF'
+[ubuntu-tweak]
+description = "integration bundle"
+
+[org/gnome/desktop/interface]
+# I want the weekday
+clock-show-weekday=true
+
+[org/gnome/desktop/wm/preferences]
+# focus follows the mouse
+focus-mode='sloppy'
+EOF
+cat >"$profile/machines/integration/settings/dev/look.ini" <<'EOF'
+[org/gnome/desktop/wm/preferences]
+# pointer focus only on this machine
+focus-mode='mouse'
+EOF
 
 flags=(--profile "$profile" --machine integration)
 tweak() { "$python" -B "$scratch_repo/bin/ubuntu-tweak" "$@"; }
@@ -95,6 +115,8 @@ echo "== apply (preview changes nothing)"
 preview="$(tweak apply "${flags[@]}")"
 echo "$preview"
 [[ ! -e "$HOME/.config/ubuntu-tweak-integration.conf" ]] || fail "the preview linked a file"
+grep -q "# pointer focus only on this machine" <<<"$preview" || fail "the apply preview does not show the reason of a key"
+grep -q "# I want the weekday" <<<"$preview" || fail "the apply preview does not show the reason of a shared bundle key"
 
 echo "== apply --commit (empty system)"
 first="$(tweak apply --commit "${flags[@]}")"
@@ -123,6 +145,36 @@ for name in ubuntu-tweak-integration ubuntu-tweak-integration-machine; do
     [[ -L "$HOME/.config/$name.conf" ]] || fail "$name.conf is not a symlink"
     [[ "$(readlink "$HOME/.config/$name.conf")" == "$profile"/* ]] || fail "$name.conf does not point into the profile"
 done
+
+echo "== bundles: merge, shadows, reasons"
+listing="$(tweak bundles "${flags[@]}")"
+echo "$listing"
+grep -q "dev/look" <<<"$listing" || fail "bundles does not list the nested bundle"
+grep -q "shadowed" <<<"$listing" || fail "bundles does not report the overlay shadowing the shared key"
+merged="$(tweak bundles --show dev/look "${flags[@]}")"
+echo "$merged"
+grep -q "focus-mode=" <<<"$merged" || fail "bundles --show lost a key"
+grep -q "# I want the weekday" <<<"$merged" || fail "bundles --show lost a reason"
+wm=org.gnome.desktop.wm.preferences
+[[ "$(/usr/bin/gsettings get $wm focus-mode)" == "'mouse'" ]] || fail "overlay bundle key did not win over the shared bundle key"
+[[ "$(/usr/bin/gsettings get $interface clock-show-weekday)" == true ]] || fail "shared bundle key (other schema) not applied"
+
+echo "== bundle-move and note (regroup without changing what applies)"
+look_before="$(cat "$profile/settings/dev/look.ini")"
+moves="$(tweak bundle-move regrouped 'org/gnome/desktop/wm/preferences/**' org/gnome/desktop/interface/clock-show-weekday "${flags[@]}")"
+echo "$moves"
+grep -q "preview" <<<"$moves" || fail "bundle-move did not say it was a preview"
+[[ "$(cat "$profile/settings/dev/look.ini")" == "$look_before" ]] || fail "the bundle-move preview wrote a file"
+[[ ! -e "$profile/settings/regrouped.ini" ]] || fail "the bundle-move preview created a bundle"
+tweak bundle-move regrouped 'org/gnome/desktop/wm/preferences/**' org/gnome/desktop/interface/clock-show-weekday "${flags[@]}" --commit
+grep -q "# I want the weekday" "$profile/settings/regrouped.ini" || fail "the moved key lost its reason"
+grep -q "# pointer focus only on this machine" "$profile/machines/integration/settings/regrouped.ini" || fail "the overlay key lost its reason"
+tweak status "${flags[@]}" || fail "regrouping changed what applies"
+again="$(tweak apply --commit "${flags[@]}")"
+grep -qx '0 changed' <<<"$again" || fail "apply after bundle-move was not a no-op"
+tweak note regrouped:org/gnome/desktop/interface/clock-show-weekday "the weekday matters on this desk" "${flags[@]}" --commit
+grep -q "# the weekday matters on this desk" "$profile/settings/regrouped.ini" || fail "note did not write the reason"
+tweak status "${flags[@]}" || fail "a note changed what applies"
 
 echo "== capture (preview; the scratch dconf and HOME are all it can see)"
 # Every file and symlink of the profile and of HOME before and after, but for dconf's own database

@@ -95,11 +95,13 @@ class DispatchTests(TempDirCase):
         self.assertIn("machine:  m1 (from --machine)", before[1])
 
     def test_only_is_a_global_flag_of_every_command(self) -> None:
-        names = [module.__name__.rsplit(".", 1)[1] for module in discover_commands()]
+        names = [module.__name__.rsplit(".", 1)[1].replace("_", "-") for module in discover_commands()]
         self.assertGreaterEqual(len(names), 2)
+        required = {"note": ["target", "reason"], "bundle-move": ["bundle", "key"]}  # positionals with no default
         for name in names:
             with self.subTest(command=name):
-                self.assertEqual(build_parser().parse_args([name, "--only", "a,b"]).only, "a,b")
+                parsed = build_parser().parse_args([name, *required.get(name, []), "--only", "a,b"])
+                self.assertEqual(parsed.only, "a,b")
 
     def test_expected_errors_map_to_their_exit_codes(self) -> None:
         self.drop_commands(failing=FAILING_COMMANDS)
@@ -227,7 +229,7 @@ class MachineCommandTests(TempDirCase):
         report = machine_command.render(Context(self.tmp / "repo", profile))
         self.assertIn("profile:  " + str(profile.root) + " (missing: module defaults only)", report)
         self.assertIn("(absent: shared profile only)", report)
-        self.assertIn("settings panels:\n  (none)", report)
+        self.assertIn("settings bundles:\n  (none)", report)
 
 
 class RepoSmokeTests(unittest.TestCase):

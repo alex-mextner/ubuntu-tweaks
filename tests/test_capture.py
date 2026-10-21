@@ -23,7 +23,6 @@ from ubuntu_tweaks.capture.report import build_document, render_markdown, render
 from ubuntu_tweaks.capture.rules import PANEL_IDS, PANELS_TOML, Rules, load_rules
 from ubuntu_tweaks.capture.secrets import key_names, scan_text, scan_value
 from ubuntu_tweaks.capture.system_scan import scan_packages
-from ubuntu_tweaks.capture.toml_io import dump_toml
 from ubuntu_tweaks.capture.settings_scan import has_machine_path
 from ubuntu_tweaks.commands import capture as capture_command
 from ubuntu_tweaks.context import REPO_ROOT, Context
@@ -584,10 +583,17 @@ class ReportTests(TempDirCase):
 
     def test_text_report_has_the_sections_in_contract_order(self) -> None:
         report = self.render()
-        order = ["= 1. Settings", "= 2. Files", "= 3. Packages and System", "= 4. Skipped", "= 5. Totals"]
+        order = [
+            "= SUMMARY",
+            "= 1. Settings",
+            "= 2. Files",
+            "= 3. Packages and System",
+            "= 4. Skipped",
+            "= 5. Totals",
+        ]
         positions = [report.index(heading) for heading in order]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("totals: settings: 5 keys in 4 panels", report)
+        self.assertIn("totals: settings: 5 keys in 4 bundles", report)
 
     def test_only_scopes_the_totals_to_the_selected_panels(self) -> None:
         plan, _rules = make_plan(self, only=frozenset({"power"}))
@@ -753,15 +759,21 @@ class CommitTests(TempDirCase):
             commit_plan(plan, rules, home)
         self.assertEqual(target.read_text(), "x\n")
 
-    def test_existing_packages_of_other_managers_survive_a_commit(self) -> None:
+    def test_existing_packages_keep_their_order_and_comments_and_new_ones_are_appended(self) -> None:
         home = self.setup_home()
-        write(self.tmp / "profile/packages.toml", '# my notes\nflatpak = ["org.keep.Me"]\nsnap = ["firefox"]\n')
+        write(
+            self.tmp / "profile/packages.toml",
+            '# my notes\nflatpak = ["org.keep.Me"]  # needed for X\nsnap = [\n  "firefox",  # the browser\n]\n',
+        )
         plan, rules = make_plan(self)
         commit_plan(plan, rules, home)
-        data = tomllib.loads((self.tmp / "profile/packages.toml").read_text())
-        self.assertEqual(data["flatpak"], ["org.example.Flat", "org.keep.Me"])
-        self.assertEqual(data["snap"], ["code", "firefox"])
+        text = (self.tmp / "profile/packages.toml").read_text()
+        data = tomllib.loads(text)
+        self.assertEqual(data["flatpak"], ["org.keep.Me", "org.example.Flat"])
+        self.assertEqual(data["snap"], ["firefox", "code"])
         self.assertEqual(data["apt"], ["libssl-dev", "ripgrep", "tmux"])
+        for kept in ("# my notes", "# needed for X", '"firefox",  # the browser'):
+            self.assertIn(kept, text)
 
     def test_system_value_set_in_the_overlay_is_replaced_there_so_the_commit_converges(self) -> None:
         home = self.setup_home()
@@ -778,18 +790,7 @@ class CommitTests(TempDirCase):
         self.assertEqual(overlay["keyboard"]["layout"], "us,ru")
 
 
-class TomlWriterTests(unittest.TestCase):
-    def test_keys_that_are_not_bare_are_quoted_and_round_trip(self) -> None:
-        table = {"plain": "x", "my.key": ["a", "b"], "spaced key": True, "nested": {"dotted.name": 3, "ok": "y"}}
-        self.assertEqual(tomllib.loads(dump_toml(table)), table)
-
-    def test_long_lists_are_written_one_item_per_line(self) -> None:
-        table = {"apt": [f"p{i}" for i in range(6)]}
-        self.assertIn('  "p0",\n', dump_toml(table))
-        self.assertEqual(tomllib.loads(dump_toml(table)), table)
-
-
-class CommandTests(TempDirCase):
+class CaptureRunner(TempDirCase):
     def run_capture(self, *flags: str, only: frozenset[str] = frozenset()) -> tuple[int, str]:
         profile_dir = self.tmp / "profile"
         profile_dir.mkdir(exist_ok=True)
@@ -811,6 +812,8 @@ class CommandTests(TempDirCase):
             )
         return code, out.getvalue()
 
+
+class CommandTests(CaptureRunner):
     def test_preview_changes_nothing_and_writes_the_markdown_report(self) -> None:
         write(self.tmp / "home/.config/mimeapps.list", "x\n")
         code, out = self.run_capture("--report", str(self.tmp / "out/r.md"))
@@ -955,6 +958,475 @@ class ReviewRegressionTests(TempDirCase):
         self.assertNotIn("x" * 200, render_text(document))
         self.assertIn("…", render_text(document))
         self.assertIn("x" * 200, render_markdown(document))
+
+
+class BundleRoutingTests(TempDirCase):
+    """Where a captured key goes: the bundle that already holds it, then [capture.bundles], then the panel."""
+
+    def entry(self, plan: CapturePlan, key: str):  # noqa: ANN202
+        assert plan.settings is not None
+        return next(e for e in plan.settings.entries if e.key == key)
+
+    def test_a_key_already_in_a_bundle_stays_there_and_shows_its_reason(self) -> None:
+        write(
+            self.tmp / "profile/settings/mine.ini",
+            "[org/gnome/desktop/interface]\n# dark on the OLED\ncolor-scheme='default'\n",
+        )
+        plan, _rules = make_plan(self, capture={"bundles": {"dev": ["org/gnome/desktop/interface/**"]}})
+        found = self.entry(plan, "color-scheme")
+        self.assertEqual(
+            (found.bundle, found.target, found.mark, found.previous, found.reason, found.route),
+            ("mine", "shared", "~", "'default'", "dark on the OLED", "profile"),
+        )
+        report = render_text(build_document(plan, machine="testbox", commit=False, verbose=False))
+        self.assertIn("settings/mine.ini (shared)", report)
+        self.assertIn("was 'default'; why: dark on the OLED; stays in its bundle", report)
+
+    def test_a_key_held_by_an_overlay_bundle_under_another_panel_is_not_proposed_again(self) -> None:
+        # ticket #37: show-battery-percentage belongs to the power panel but the profile keeps it in an
+        # overlay file named after another panel
+        write(
+            self.tmp / "profile/machines/testbox/settings/appearance.ini",
+            "[org/gnome/desktop/interface]\nshow-battery-percentage=true\n",
+        )
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        found = self.entry(plan, "show-battery-percentage")
+        self.assertEqual((found.mark, found.target, found.bundle, found.panel), ("=", "machine", "appearance", "power"))
+        commit_plan(plan, rules, home)
+        self.assertEqual(
+            "[org/gnome/desktop/interface]\nshow-battery-percentage=true\n",
+            (self.tmp / "profile/machines/testbox/settings/appearance.ini").read_text(),
+        )
+        power = read_keyfile(self.tmp / "profile/machines/testbox/settings/power.ini")
+        self.assertNotIn("show-battery-percentage", {k for keys in power.values() for k in keys})
+        again, _rules = make_plan(self)
+        self.assertEqual(self.entry(again, "show-battery-percentage").mark, "=")
+
+    def test_a_different_value_for_a_key_in_an_other_panels_bundle_is_a_change_not_a_new_key(self) -> None:
+        write(
+            self.tmp / "profile/machines/testbox/settings/appearance.ini",
+            "[org/gnome/desktop/interface]\nshow-battery-percentage=false\n",
+        )
+        plan, _rules = make_plan(self)
+        found = self.entry(plan, "show-battery-percentage")
+        self.assertEqual((found.mark, found.previous), ("~", "false"))
+
+    def test_capture_bundles_routes_new_keys_first_match_wins_and_the_panel_is_the_fallback(self) -> None:
+        table = {
+            "bundles": {
+                "dev-keyboard": ["org/gnome/desktop/interface/color-scheme"],
+                "late": ["org/gnome/desktop/interface/**", "/org/gnome/settings-daemon/plugins/power/**"],
+            }
+        }
+        plan, _rules = make_plan(self, capture=table)
+        self.assertEqual(
+            {e.key: (e.bundle, e.target, e.route) for e in plan.settings.entries},  # type: ignore[union-attr]
+            {
+                "color-scheme": ("dev-keyboard", "shared", "rule"),
+                "show-battery-percentage": ("late", "machine", "rule"),
+                "sleep-inactive-ac-timeout": ("late", "machine", "rule"),
+                "picture-uri": ("background", "machine", "panel"),
+                "enable": ("notifications", "shared", "panel"),
+            },
+        )
+
+    def test_commit_writes_routed_keys_into_the_named_bundle_in_the_right_layer(self) -> None:
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(
+            self,
+            capture={
+                "bundles": {"laptop/mix": ["org/gnome/settings-daemon/**", "org/gnome/desktop/interface/color-scheme"]}
+            },
+        )
+        commit_plan(plan, rules, home)
+        profile = self.tmp / "profile"
+        self.assertEqual(
+            read_keyfile(profile / "settings/laptop/mix.ini"),
+            {"org/gnome/desktop/interface": {"color-scheme": "'prefer-dark'"}},
+        )
+        self.assertEqual(
+            read_keyfile(profile / "machines/testbox/settings/laptop/mix.ini"),
+            {"org/gnome/settings-daemon/plugins/power": {"sleep-inactive-ac-timeout": "3600"}},
+        )
+        again, _rules = make_plan(self, capture={"bundles": {"laptop/mix": ["org/gnome/settings-daemon/**"]}})
+        self.assertEqual({e.mark for e in again.settings.entries}, {"="})  # type: ignore[union-attr]
+
+    def test_a_bad_capture_bundles_table_is_invalid_config(self) -> None:
+        for bad in ({"bundles": ["x"]}, {"bundles": {"../x": ["a/**"]}}, {"bundles": {"ok": "a/**"}}):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                load_rules(bad)
+
+    def test_routing_into_a_bundle_that_does_not_apply_here_is_refused(self) -> None:
+        write(self.tmp / "profile/settings/dev.ini", '[ubuntu-tweak]\nmachines = ["laptop"]\n')
+        with self.assertRaisesRegex(ConfigError, "does not apply on this machine"):
+            make_plan(self, capture={"bundles": {"dev": ["org/gnome/desktop/interface/**"]}})
+
+    def test_profile_bundles_that_conflict_stop_capture_with_exit_2(self) -> None:
+        write(self.tmp / "profile/settings/a.ini", "[org/x]\nk=1\n")
+        write(self.tmp / "profile/settings/b.ini", "[org/x]\nk=2\n")
+        with self.assertRaises(ConfigError):
+            make_plan(self)
+
+
+class CommitKeepsHandWrittenBundlesTests(TempDirCase):
+    SHARED = (
+        '[ubuntu-tweak]\ndescription = "My settings"\n\n'
+        "# Dark everywhere, white hurts.\n[org/gnome/desktop/interface]\n"
+        "# keep dark\ncolor-scheme='default'\n"
+        "# set by hand, capture knows nothing about it\nicon-theme='Old'\n\n"
+        "# free-floating note\n"
+    )
+    OVERLAY = (
+        "# this box only\n[org/gnome/settings-daemon/plugins/power]\n"
+        "# AC must never sleep: the render job\nsleep-inactive-ac-timeout=1800\n"
+    )
+
+    def test_commit_changes_only_the_values_and_keeps_every_comment_and_the_order(self) -> None:
+        shared = write(self.tmp / "profile/settings/mine.ini", self.SHARED)
+        overlay = write(self.tmp / "profile/machines/testbox/settings/laptop.ini", self.OVERLAY)
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        assert plan.settings is not None
+        marks = {e.key: e.mark for e in plan.settings.entries}
+        self.assertEqual((marks["color-scheme"], marks["sleep-inactive-ac-timeout"]), ("~", "~"))
+
+        commit_plan(plan, rules, home)
+
+        self.assertEqual(
+            shared.read_text(), self.SHARED.replace("color-scheme='default'", "color-scheme='prefer-dark'")
+        )
+        self.assertEqual(overlay.read_text(), self.OVERLAY.replace("=1800", "=3600"))
+        again, _rules = make_plan(self)
+        assert again.settings is not None
+        self.assertEqual({e.mark for e in again.settings.entries}, {"="})
+
+    def test_new_keys_for_an_existing_bundle_section_are_appended_after_its_last_key(self) -> None:
+        shared = write(
+            self.tmp / "profile/settings/mine.ini",
+            "[org/gnome/desktop/interface]\n# why\ncolor-scheme='prefer-dark'\n\n[org/other]\nz=1\n",
+        )
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(
+            self, capture={"bundles": {"mine": ["org/gnome/desktop/interface/show-battery-percentage"]}}
+        )
+        commit_plan(plan, rules, home)
+        self.assertEqual(
+            read_keyfile(self.tmp / "profile/machines/testbox/settings/mine.ini"),
+            {"org/gnome/desktop/interface": {"show-battery-percentage": "true"}},
+        )
+        self.assertEqual(
+            shared.read_text(), "[org/gnome/desktop/interface]\n# why\ncolor-scheme='prefer-dark'\n\n[org/other]\nz=1\n"
+        )
+
+
+class CommitKeepsTomlCommentsTests(TempDirCase):
+    def test_system_toml_keeps_its_comments_and_order_when_values_are_added_and_replaced(self) -> None:
+        system = write(
+            self.tmp / "profile/system.toml",
+            '# root-level settings of my boxes\nlocale = "de_DE.UTF-8"  # the old one\n\n'
+            '[keyboard]\n# two layouts\nlayout = "us"\n',
+        )
+        overlay = write(self.tmp / "profile/machines/testbox/system.toml", '# this box\ntimezone = "UTC"  # server\n')
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+
+        text = system.read_text()
+        for kept in (
+            "# root-level settings of my boxes",
+            '"en_US.UTF-8"  # the old one',
+            "# two layouts",
+            'layout = "us,ru"',
+        ):
+            self.assertIn(kept, text)
+        self.assertLess(text.index("locale"), text.index("[keyboard]"))
+        data = tomllib.loads(text)
+        self.assertEqual(
+            (data["locale"], data["keyboard"]["layout"], data["keyboard"]["model"]), ("en_US.UTF-8", "us,ru", "pc105")
+        )
+        self.assertEqual(overlay.read_text(), '# this box\ntimezone = "Europe/Belgrade"  # server\n')
+
+
+class ReviewFixCaptureTests(TempDirCase):
+    def test_a_key_that_only_another_machines_bundle_holds_is_captured_into_the_overlay(self) -> None:
+        write(
+            self.tmp / "profile/settings/laptop.ini",
+            "[ubuntu-tweak]\nmachines = [\"laptop\"]\n[org/gnome/desktop/interface]\ncolor-scheme='default'\n",
+        )
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        assert plan.settings is not None
+        found = next(e for e in plan.settings.entries if e.key == "color-scheme")
+        self.assertEqual((found.target, found.mark, found.flags), ("machine", "+", ("other-machines",)))
+        commit_plan(plan, rules, home)
+        self.assertFalse((self.tmp / "profile/settings/appearance.ini").exists())
+        # both layers now apply on each machine without a conflict
+        from ubuntu_tweaks.bundles import load_bundles
+
+        load_bundles(Profile(self.tmp / "profile", "laptop", "flag")).require_valid()
+        load_bundles(Profile(self.tmp / "profile", "testbox", "flag")).require_valid()
+
+    def test_a_key_the_profile_holds_is_not_dropped_as_auto_or_state(self) -> None:
+        schemas = (
+            *SCHEMAS,
+            FakeSchema(
+                "org.gnome.clocks.state.window", {"panel-id": FakeKey("s", "''")}, "/org/gnome/clocks/state/window/"
+            ),
+        )
+        backend = FakeBackend(schemas)
+        backend.set_user("org.gnome.clocks.state.window", None, "panel-id", "'timer'")
+        write(
+            self.tmp / "profile/settings/mine.ini",
+            "[org/gnome/clocks/state/window]\n# I want this one\npanel-id='alarm'\n",
+        )
+        plan, _rules = make_plan(self, backend)
+        assert plan.settings is not None
+        found = next(e for e in plan.settings.entries if e.key == "panel-id")
+        self.assertEqual((found.bundle, found.mark, found.previous), ("mine", "~", "'alarm'"))
+        self.assertEqual([s for s in plan.settings.skipped if s.cls == "auto"], [])
+
+    def test_a_section_only_capture_does_not_read_the_settings_bundles(self) -> None:
+        write(self.tmp / "profile/settings/a.ini", "[org/x]\nk=1\n")
+        write(self.tmp / "profile/settings/b.ini", "[org/x]\nk=2\n")
+        plan, _rules = make_plan(self, only=frozenset({"files"}))
+        self.assertIsNone(plan.settings)
+        with self.assertRaises(ConfigError):
+            make_plan(self)
+
+    def test_a_comment_the_profile_already_has_never_blocks_the_commit(self) -> None:
+        reason = "# see upstream commit " + "a1b2c3d4e5" * 4 + " and ask bob@example.com"
+        shared = write(
+            self.tmp / "profile/settings/mine.ini", f"[org/gnome/desktop/interface]\n{reason}\ncolor-scheme='default'\n"
+        )
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        self.assertIn(reason, shared.read_text())
+        self.assertIn("color-scheme='prefer-dark'", shared.read_text())
+
+    def test_identical_duplicates_all_follow_a_live_change_so_the_profile_never_conflicts(self) -> None:
+        for name in ("a", "b"):
+            write(self.tmp / f"profile/settings/{name}.ini", "[org/gnome/desktop/interface]\ncolor-scheme='default'\n")
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        commit_plan(plan, rules, home)
+        from ubuntu_tweaks.bundles import load_bundles
+
+        bundles = load_bundles(Profile(self.tmp / "profile", "testbox", "flag"))
+        bundles.require_valid()
+        self.assertEqual({b.keys[0].value for b in bundles.bundles if b.name in ("a", "b")}, {"'prefer-dark'"})
+
+    def test_a_secret_in_a_value_of_a_touched_bundle_still_refuses(self) -> None:
+        write(
+            self.tmp / "profile/settings/appearance.ini", f"[org/gnome/desktop/interface]\nicon-theme='{FAKE_TOKEN}'\n"
+        )
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        with self.assertRaises(RefusedError):
+            commit_plan(plan, rules, home)
+
+
+class ChangedOnlyTests(TempDirCase):
+    """R1: a value the user did not change is never captured and never written."""
+
+    def test_a_user_value_equal_to_the_default_is_counted_never_captured_never_written(self) -> None:
+        home = self.tmp / "home"
+        home.mkdir()
+        plan, rules = make_plan(self)
+        assert plan.settings is not None
+        self.assertEqual(plan.settings.at_default, 1)  # clock-format = '24h' is the schema default
+        self.assertNotIn("clock-format", {e.key for e in plan.settings.entries})
+        self.assertNotIn("/org/gnome/desktop/interface/clock-format", {s.full for s in plan.settings.skipped})
+        commit_plan(plan, rules, home)
+        written = "\n".join(p.read_text() for p in (self.tmp / "profile").rglob("*.ini"))
+        self.assertNotIn("clock-format", written)
+
+    def test_the_default_is_whatever_the_backend_computes_including_overrides(self) -> None:
+        class OverriddenDefaults(FakeBackend):
+            def default(self, schema: str, path: str | None, key: str):  # noqa: ANN202
+                if key == "color-scheme":
+                    return parse_value(self, schema, key, "'prefer-dark'")  # a system override changed the default
+                return super().default(schema, path, key)
+
+        backend = OverriddenDefaults(SCHEMAS)
+        backend.set_user("org.gnome.desktop.interface", None, "color-scheme", "'prefer-dark'")
+        plan, _rules = make_plan(self, backend)
+        assert plan.settings is not None
+        self.assertEqual((len(plan.settings.entries), plan.settings.at_default), (0, 1))
+
+
+class AutoClassTests(TempDirCase):
+    AUTO_SCHEMAS = (
+        *SCHEMAS,
+        FakeSchema(
+            "org.gnome.clocks.state.window", {"panel-id": FakeKey("s", "''")}, "/org/gnome/clocks/state/window/"
+        ),
+        FakeSchema("org.gnome.Ptyxis.Extra", {"profile-uuids": FakeKey("as", "@as []")}, "/org/gnome/Ptyxis/"),
+    )
+
+    def backend(self) -> FakeBackend:
+        backend = FakeBackend(self.AUTO_SCHEMAS)
+        backend.set_user("org.gnome.clocks.state.window", None, "panel-id", "'timer'")
+        backend.set_user("org.gnome.Ptyxis.Extra", None, "profile-uuids", "['5291476bbbd7289aa32a7bf96a09e10c']")
+        backend.set_user("org.gnome.desktop.interface", None, "color-scheme", "'prefer-dark'")
+        return backend
+
+    def test_registered_by_itself_keys_are_skipped_as_auto_with_a_reason(self) -> None:
+        plan, _rules = make_plan(self, self.backend())
+        assert plan.settings is not None
+        auto = {s.full: s.reason for s in plan.settings.skipped if s.cls == "auto"}
+        self.assertEqual(set(auto), {"/org/gnome/clocks/state/window/panel-id", "/org/gnome/Ptyxis/profile-uuids"})
+        self.assertTrue(all(auto.values()))
+        self.assertEqual({e.key for e in plan.settings.entries}, {"color-scheme"})
+        self.assertEqual(plan.settings.unmapped, [])
+
+    def test_auto_has_its_own_counted_section_in_the_report(self) -> None:
+        plan, _rules = make_plan(self, self.backend())
+        report = render_text(build_document(plan, machine="testbox", commit=False, verbose=False))
+        self.assertIn("auto 2", report)
+        self.assertIn("- auto (2)", report)
+        self.assertIn("[capture] include", report)
+        self.assertRegex(report, r"auto\s+2\n")  # the summary table row
+
+    def test_include_promotes_an_auto_key_back_and_accepts_a_relative_glob(self) -> None:
+        for glob in ("/org/gnome/clocks/state/**", "org/gnome/clocks/state/**"):
+            with self.subTest(glob=glob):
+                plan, _rules = make_plan(self, self.backend(), capture={"include": [glob]})
+                assert plan.settings is not None
+                self.assertIn("panel-id", {e.key for e in plan.settings.entries})
+                self.assertEqual(
+                    {s.full for s in plan.settings.skipped if s.cls == "auto"}, {"/org/gnome/Ptyxis/profile-uuids"}
+                )
+
+    def test_include_never_lifts_a_secret_exclude(self) -> None:
+        rules = load_rules({"include": ["/**"]})
+        self.assertIsNotNone(rules.hard_exclude("/org/gnome/desktop/remote-desktop/rdp/tls-key"))
+
+    def test_every_auto_rule_has_a_reason_and_the_shipped_keys_are_covered(self) -> None:
+        rules = load_rules()
+        self.assertTrue(rules.auto and all(rule.reason for rule in rules.auto))
+        for full in (
+            "/org/gnome/desktop/notifications/application-children",
+            "/org/gnome/desktop/notifications/application/firefox/application-id",
+            "/org/gnome/Ptyxis/default-profile-uuid",
+            "/org/gnome/clocks/state/window/panel-id",
+            "/org/gnome/shell/world-clocks/locations",
+            "/org/gnome/settings-daemon/global-shortcuts/applications",
+            "/org/gnome/settings-daemon/global-shortcuts/com.anthropic.Claude/shortcuts",
+            "/org/gnome/desktop/input-sources/mru-sources",
+        ):
+            self.assertIsNotNone(rules.auto_rule(full), full)
+        for full in (  # real user choices stay
+            "/org/gnome/desktop/notifications/application/firefox/enable",
+            "/org/gnome/desktop/input-sources/sources",
+            "/org/gnome/desktop/interface/color-scheme",
+            "/org/gnome/shell/extensions/tiling-assistant/tile-left-half",
+            "/org/gnome/nautilus/preferences/default-folder-viewer",
+            "/org/gnome/settings-daemon/plugins/color/night-light-enabled",
+        ):
+            self.assertIsNone(rules.auto_rule(full), full)
+
+
+class WellbeingPanelTests(unittest.TestCase):
+    def test_wellbeing_and_installed_third_party_apps_have_a_panel(self) -> None:
+        rules = load_rules()
+
+        def panel(full: str) -> str | None:
+            rule = rules.panel_rule(full)
+            return rule.panel if rule else None
+
+        self.assertEqual(panel("/org/gnome/desktop/break-reminders/movement/duration-seconds"), "wellbeing")
+        self.assertEqual(panel("/org/gnome/desktop/screen-time-limits/daily-limit-seconds"), "wellbeing")
+        for full in (
+            "/net/nokyan/Resources/apps-sort-by",
+            "/org/gnome/deja-dup/backend",
+            "/org/gnome/deja-dup/local/folder",
+            "/apps/seahorse/listing/keyrings-selected",
+        ):
+            self.assertEqual(panel(full), "apps", full)
+
+
+class SummaryAndModesTests(CaptureRunner):
+    def test_dry_run_is_the_preview_and_writes_nothing(self) -> None:
+        write(self.tmp / "home/.config/mimeapps.list", "x\n")
+        code, out = self.run_capture("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("mode: dry-run (nothing is written", out)
+        self.assertEqual(list((self.tmp / "profile").iterdir()), [])
+        self.assertFalse((self.tmp / "home/.config/mimeapps.list").is_symlink())
+        self.assertNotIn("nothing was committed to git", out)
+
+    def test_dry_run_and_commit_exclude_each_other_with_a_clear_error(self) -> None:
+        parser = argparse.ArgumentParser()
+        capture_command.register(parser.add_subparsers(dest="command"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            parser.parse_args(["capture", "--dry-run", "--commit"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("not allowed with argument", err.getvalue())
+        # called programmatically the command refuses too
+        namespace = argparse.Namespace(commit=True, dry_run=True, summary=False, report=None, verbose=False)
+        with self.assertRaisesRegex(ConfigError, "mutually exclusive"):
+            capture_command.execute(
+                Context(REPO_ROOT, Profile(self.tmp / "profile", "testbox", "flag")),
+                namespace,
+                seeded_backend(),
+                home=self.tmp / "home",
+                now=NOW,
+                run=fake_runner,
+                **sources(self),
+            )
+
+    def test_summary_opens_the_output_before_any_detail_table(self) -> None:
+        _code, out = self.run_capture()
+        self.assertLess(out.index("= SUMMARY"), out.index("= 1. Settings"))
+        summary = out.split("= 1. Settings")[0]
+        for needle in (
+            "dconf user keys in scope: 13 = 5 captured + 5 skipped + 2 unmapped + 1 at schema default",
+            "captured, per destination bundle",
+            "settings/appearance.ini",
+            "machines/testbox/settings/power.ini",
+            "per Settings panel",
+            "not captured, per class",
+            "files:",
+            "packages: 6 new (3 apt, 2 snap, 1 flatpak)",
+            "system: 5 to write",
+            "secret findings in adopted items: 0",
+            "unmapped: 2",
+        ):
+            self.assertIn(needle, summary)
+
+    def test_summary_flag_prints_only_the_summary_and_the_totals(self) -> None:
+        _code, out = self.run_capture("--summary")
+        self.assertIn("= SUMMARY", out)
+        self.assertNotIn("= 1. Settings", out)
+        self.assertNotIn("= 4. Skipped", out)
+        self.assertIn("totals:", out)
+
+    def test_summary_cannot_be_combined_with_commit(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "--summary"):
+            self.run_capture("--summary", "--commit")
+        self.assertEqual(list((self.tmp / "profile").iterdir()), [])
+
+    def test_summary_counts_keyfile_overrides_per_panel(self) -> None:
+        write(
+            self.tmp / "home/.config/glib-2.0/settings/keyfile",
+            "[org/gnome/settings-daemon/plugins/power]\nsleep-inactive-ac-timeout=0\n",
+        )
+        _code, out = self.run_capture()
+        summary = out.split("= 1. Settings")[0]
+        self.assertRegex(summary, r"power\s+2\s+0\s+1")
+        self.assertIn("1 keys have their effective value from", summary)
 
 
 if __name__ == "__main__":

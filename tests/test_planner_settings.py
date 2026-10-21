@@ -440,5 +440,119 @@ class PendingExtensionSchemaTests(SettingsPlannerCase):
         self.assertIn("no settings schema", planner.warnings(self.context(), backend)[0])
 
 
+RANGED = FakeSchema(
+    "org.example.range", {"limited": FakeKey("i", "1", minimum="0", maximum="10")}, path="/org/example/range/"
+)
+
+
+class BundleTests(SettingsPlannerCase):
+    def test_a_bundle_may_mix_sections_from_any_schema_and_its_header_never_reaches_the_plan(self) -> None:
+        write(
+            self.profile_root / "settings/dev/mixed.ini",
+            "[ubuntu-tweak]\ndescription = \"dev\"\n\n[org/gnome/desktop/interface]\ngtk-theme='X'\n"
+            "[org/gnome/shell]\ndisabled-extensions=@as []\n",
+        )
+        backend = FakeBackend(SCHEMAS)
+        actions = planner.build(self.context(), backend)
+
+        self.assertEqual([a.target.full for a in actions], ["/org/gnome/desktop/interface/gtk-theme"])  # type: ignore[attr-defined]
+        self.assertEqual([a.scope for a in actions], ["dev/mixed"])
+        warnings = planner.warnings(self.context(), backend)
+        self.assertFalse(any("ubuntu-tweak" in line and "no installed schema" in line for line in warnings))
+
+    def test_the_reason_is_shown_next_to_the_key_in_the_preview_and_truncated(self) -> None:
+        write(
+            self.profile_root / "settings/a.ini",
+            "[org/gnome/desktop/interface]\n# dark for the night shift\ngtk-theme='X'\n"
+            f"# {'very long ' * 20}\nclock-show-seconds=true\n",
+        )
+        plan, _backend = self.plan()
+        lines = {a.target.key: a.describe() for a in plan.actions}  # type: ignore[attr-defined]
+
+        self.assertIn("<- settings/a.ini  # dark for the night shift", lines["gtk-theme"])
+        long_line = lines["clock-show-seconds"]
+        self.assertIn("  # very long", long_line)
+        self.assertTrue(long_line.endswith("…"))
+        self.assertNotIn("\n", long_line)
+
+    def test_status_shows_the_reason_of_a_modified_key(self) -> None:
+        from ubuntu_tweaks.commands import status
+
+        write(
+            self.profile_root / "settings/a.ini",
+            "[org/gnome/desktop/interface]\n# the OLED panel hates white\ngtk-theme='X'\n",
+        )
+        plan, _backend = self.plan()
+        _missing, modified = status.classify(plan)
+        self.assertEqual(len(modified), 1)
+        self.assertIn("# the OLED panel hates white", f"[{modified[0].kind}] {modified[0].describe()}")
+
+    def test_two_shared_bundles_with_different_values_for_a_key_fail_planning_naming_both(self) -> None:
+        write(self.profile_root / "settings/a.ini", "[org/gnome/desktop/interface]\ngtk-theme='A'\n")
+        write(self.profile_root / "settings/b.ini", "[org/gnome/desktop/interface]\ngtk-theme='B'\n")
+        with self.assertRaises(ConfigError) as caught:
+            planner.build(self.context(), FakeBackend(SCHEMAS))
+        self.assertIn("settings/a.ini:2", str(caught.exception))
+        self.assertIn("settings/b.ini:2", str(caught.exception))
+
+    def test_identical_duplicates_plan_once_and_warn(self) -> None:
+        for name in ("a", "b"):
+            write(self.profile_root / f"settings/{name}.ini", "[org/gnome/desktop/interface]\ngtk-theme='A'\n")
+        backend = FakeBackend(SCHEMAS)
+
+        self.assertEqual(len(planner.build(self.context(), backend)), 1)
+        self.assertTrue(
+            any(
+                line.startswith("duplicate key /org/gnome/desktop/interface/gtk-theme")
+                for line in planner.warnings(self.context(), backend)
+            )
+        )
+
+    def test_an_overlay_bundle_beats_a_shared_bundle_of_another_name(self) -> None:
+        write(self.profile_root / "settings/a.ini", "[org/gnome/desktop/interface]\ngtk-theme='A'\n")
+        write(self.profile_root / "machines/home/settings/other.ini", "[org/gnome/desktop/interface]\ngtk-theme='B'\n")
+        actions = planner.build(self.context(), FakeBackend(SCHEMAS))
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual((actions[0].phase, actions[0].scope), (Phase.SETTINGS_MACHINE, "other"))
+        self.assertIn("'B'", actions[0].describe())
+
+    def test_machines_filter_and_requires_module_decide_whether_a_bundle_applies(self) -> None:
+        self.builtin_module("m", "[/]\nclock-show-seconds=true\n")
+        write(
+            self.profile_root / "settings/laptop.ini",
+            "[ubuntu-tweak]\nmachines = [\"laptop\"]\n[org/gnome/desktop/interface]\ngtk-theme='L'\n",
+        )
+        write(
+            self.profile_root / "settings/needs-m.ini",
+            '[ubuntu-tweak]\nrequires-module = "m"\n[org/gnome/desktop/interface]\ntext-scaling-factor=1.5\n',
+        )
+        backend = FakeBackend(SCHEMAS)
+        self.assertEqual(
+            sorted(a.target.key for a in planner.build(self.context(), backend)),  # type: ignore[attr-defined]
+            ["clock-show-seconds", "text-scaling-factor"],
+        )
+        write(self.profile_root / "profile.toml", "[modules.m]\nenabled = false\n")
+        self.assertEqual(planner.build(self.context(), backend), [])
+
+    def test_a_value_outside_the_schema_range_is_invalid_config_at_plan_time(self) -> None:
+        write(self.profile_root / "settings/r.ini", "[org/example/range]\nlimited=11\n")
+        backend = FakeBackend([*SCHEMAS, RANGED])
+        with self.assertRaisesRegex(
+            ConfigError, r"settings/r\.ini \[org/example/range\] limited: 11 is outside the allowed range"
+        ):
+            planner.build(self.context(), backend)
+        self.assertEqual(backend.writes, [])
+
+    def test_a_module_preset_outside_the_range_is_invalid_config_too(self) -> None:
+        self.builtin_module("r", "[/]\nlimited=-3\n", schema="org.example.range")
+        with self.assertRaisesRegex(ConfigError, "outside the allowed range"):
+            planner.build(self.context(), FakeBackend([*SCHEMAS, RANGED]))
+
+    def test_a_value_inside_the_range_is_planned(self) -> None:
+        write(self.profile_root / "settings/r.ini", "[org/example/range]\nlimited=10\n")
+        self.assertEqual(len(planner.build(self.context(), FakeBackend([*SCHEMAS, RANGED]))), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
