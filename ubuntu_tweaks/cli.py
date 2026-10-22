@@ -133,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         result = args.handler(context, args)
     except UbuntuTweakError as error:
-        print(ui.format_error(str(error), int(error.exit_code), stream=sys.stderr), file=sys.stderr)
+        print(ui.format_error(str(error), int(error.exit_code), fix=error.fix, stream=sys.stderr), file=sys.stderr)
         return int(error.exit_code)
     except ModuleNotFoundError as error:
         if error.name != "gi":

@@ -15,8 +15,10 @@ Public API:
 - ``Process``: ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
   missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
   ``elevate(argv) -> list[str]`` (prefix with ``sudo --`` or ``pkexec``; unchanged when already
-  root; ``CommandError`` when neither exists).
-- Module-level ``elevate(argv)`` (the same logic, for callers without a ``Process``) and
+  root; ``CommandError`` when neither exists; while an ``elevation.RootSession`` is open it uses the prefix
+  that session found working, e.g. ``sudo -A --``).
+- Module-level ``elevate(argv)`` (the same logic, for callers without a ``Process``),
+  ``use_root_prefix(prefix)`` / ``root_prefix()`` (the session's prefix; ``None`` outside a session) and
   ``run(argv, *, cwd=None, capture=False, timeout=None) -> str`` (raises ``CommandError``; the
   helper behind ``git``/``apt``/``glib-compile-schemas`` calls in the commands and submodule planners).
 - ``FakeProcess(responses, effects)``: records ``queries`` and ``executed``; ``responses`` maps an
@@ -56,10 +58,26 @@ class CommandError(UbuntuTweakError):
         self.returncode = returncode
 
 
+_root_prefix: tuple[str, ...] | None = None
+
+
+def use_root_prefix(prefix: Sequence[str] | None) -> None:
+    """Make ``elevate`` use ``prefix`` (``None``: the default lookup again); ``elevation.RootSession`` sets it."""
+    global _root_prefix
+    _root_prefix = tuple(prefix) if prefix is not None else None
+
+
+def root_prefix() -> tuple[str, ...] | None:
+    return _root_prefix
+
+
 def elevate(argv: Sequence[str]) -> list[str]:
-    """Prefix ``argv`` so it runs as root: unchanged when already root, else ``sudo --`` or ``pkexec``."""
+    """Prefix ``argv`` so it runs as root: unchanged when already root, else the open session's prefix, else
+    ``sudo --`` or ``pkexec``."""
     if os.geteuid() == 0:
         return list(argv)
+    if _root_prefix is not None:
+        return [*_root_prefix, *argv]
     if shutil.which("sudo"):
         return ["sudo", "--", *argv]
     if shutil.which("pkexec"):
