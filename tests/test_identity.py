@@ -17,13 +17,13 @@ def ok(stdout: str = "") -> CommandResult:
     return CommandResult(0, stdout, "")
 
 
-def listing(*names: str, private: bool = True) -> CommandResult:
+def listing(*names: str, private: bool = True, login: str = "alice") -> CommandResult:
     return ok(
         json.dumps(
             [
                 {
                     "name": name,
-                    "nameWithOwner": f"alice/{name}",
+                    "nameWithOwner": f"{login}/{name}",
                     "isPrivate": private,
                     "isArchived": False,
                     "defaultBranchRef": {"name": "main"},
@@ -34,8 +34,13 @@ def listing(*names: str, private: bool = True) -> CommandResult:
     )
 
 
+def gh_account(login: str, *names: str) -> FakeProcess:
+    listed = ("gh", "repo", "list", login, "--json", identity.REPO_FIELDS, "--limit", "300")
+    return FakeProcess({USER: ok(f"{login}\n"), listed: listing(*names, login=login)})
+
+
 def gh(*names: str) -> FakeProcess:
-    return FakeProcess({USER: ok("alice\n"), LIST: listing(*names)})
+    return gh_account("alice", *names)
 
 
 class DiscoveryTests(TempDirCase):
@@ -69,6 +74,11 @@ class DiscoveryTests(TempDirCase):
     def test_an_archived_repository_does_not_count(self) -> None:
         archived = json.dumps([{"name": ".files", "isArchived": True}, {"name": "dotfiles", "isArchived": False}])
         found = identity.discover_via_gh(FakeProcess({USER: ok("alice"), LIST: ok(archived)}))
+        self.assertEqual(found.repo.slug, "alice/dotfiles")
+
+    def test_a_fork_is_not_taken_for_the_users_own_dotfiles(self) -> None:
+        listed = json.dumps([{"name": ".files", "isFork": True}, {"name": "dotfiles", "isFork": False}])
+        found = identity.discover_via_gh(FakeProcess({USER: ok("alice"), LIST: ok(listed)}))
         self.assertEqual(found.repo.slug, "alice/dotfiles")
 
     def test_no_matching_repository_is_a_plain_none_not_a_manual_step(self) -> None:
@@ -153,6 +163,16 @@ class NamesTests(TempDirCase):
                 RepoRef(bad)
         for good in ("git@example.org:alice/x.git", "ssh://git@example.org/alice/x", "/srv/x.git"):
             self.assertEqual(RepoRef(good).spec, good)
+
+    def test_a_url_or_slug_naming_the_current_or_parent_directory_is_refused(self) -> None:
+        for bad in ("https://example.org/alice/..", "ssh://example.org/alice/.", "git@example.org:alice/.."):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                RepoRef(bad)
+
+    def test_two_local_paths_with_the_same_last_names_are_different_repositories(self) -> None:
+        self.assertFalse(identity.same_repo("/srv/a/dotfiles.git", "/srv/b/dotfiles.git"))
+        self.assertTrue(identity.same_repo("/srv/a/dotfiles.git", "/srv/a/dotfiles"))
+        self.assertFalse(identity.same_repo("/srv/a/dotfiles.git", "a/dotfiles"))
 
     def test_two_named_hosts_must_agree_but_a_slug_fits_any_host(self) -> None:
         self.assertFalse(identity.same_repo("https://github.com/a/b", "https://git.example.org/a/b"))
@@ -255,6 +275,15 @@ class LocateTests(TempDirCase):
         self.assertTrue(process.queries)
         forced = self.locate(gh("dotfiles"), refresh=True)
         self.assertEqual((forced.repo.spec, forced.source), ("alice/dotfiles", Source.GH))
+
+    def test_the_cache_is_not_reused_after_gh_switched_to_another_account(self) -> None:
+        gh_config = self.tmp / "gh-config"
+        self.env["GH_CONFIG_DIR"] = str(gh_config)
+        write(gh_config / "hosts.yml", "github.com:\n  user: alice\n")
+        self.assertEqual(self.locate(gh(".files")).repo.spec, "alice/.files")
+        self.assertEqual(self.locate(FakeProcess()).source, Source.CACHE)  # nothing changed: no gh call
+        write(gh_config / "hosts.yml", "github.com:\n  user: alice\n  other: carol\n")  # `gh auth switch`
+        self.assertEqual(self.locate(gh_account("carol", "dotfiles")).repo.spec, "carol/dotfiles")
 
     def test_an_unreadable_cache_is_ignored(self) -> None:
         write(self.cache, "{not json")
@@ -375,8 +404,8 @@ class ModuleHelperTests(TempDirCase):
     def test_resolve_reports_the_clone_target_of_a_discovered_repository(self) -> None:
         answer = identity.resolve_for_module(self.home, self.env, gh(".files"))
         self.assertEqual(
-            (answer["repo"], answer["is_slug"], answer["dir"], answer["profile_dir"], answer["explicit"]),
-            ("alice/.files", True, str(self.home / ".files"), None, False),
+            (answer["repo"], answer["is_slug"], answer["dir"], answer["profile_dir"]),
+            ("alice/.files", True, str(self.home / ".files"), None),
         )
 
     def test_the_modules_options_override_discovery_and_place_the_checkout(self) -> None:
@@ -384,9 +413,21 @@ class ModuleHelperTests(TempDirCase):
         write(self.home / "src/setup/linux/profile.toml")
         answer = identity.resolve_for_module(self.home, self.env, FakeProcess())
         self.assertEqual(
-            (answer["repo"], answer["dir"], answer["profile_dir"], answer["explicit"]),
-            ("bob/setup", str(self.home / "src/setup"), str(self.home / "src/setup/linux"), True),
+            (answer["repo"], answer["dir"], answer["profile_dir"]),
+            ("bob/setup", str(self.home / "src/setup"), str(self.home / "src/setup/linux")),
         )
+
+    def test_a_configured_dir_is_judged_by_its_own_origin_not_the_occupied_default(self) -> None:
+        write(self.home / ".files/.git/HEAD")  # alice's checkout sits on the default path of bob/.files
+        self.env[identity.REPO_ENV] = "bob/.files"
+        self.env[identity.MODULE_CONFIG_ENV] = json.dumps({"dir": "~/bob-files"})
+        answer = identity.resolve_for_module(self.home, self.env, FakeProcess())
+        self.assertEqual((answer["dir"], answer["manual"]), (str(self.home / "bob-files"), None))
+        origin = ("git", "-C", str(self.home / "bob-files"), "config", "--get", "remote.origin.url")
+        write(self.home / "bob-files/.git/HEAD")
+        process = FakeProcess({origin: ok("https://github.com/alice/.files.git\n")})
+        location = identity.locate(home=self.home, env=self.env, process=process, checkout_dir="~/bob-files")
+        self.assertIn("is a checkout of https://github.com/alice/.files.git, not of bob/.files", location.manual)
 
     def test_the_flag_variable_beats_the_modules_repo_option(self) -> None:
         self.env[identity.MODULE_CONFIG_ENV] = json.dumps({"repo": "bob/setup"})

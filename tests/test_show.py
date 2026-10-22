@@ -436,12 +436,12 @@ class SshRunnerTests(unittest.TestCase):
     def test_the_probe_is_one_quoted_ssh_command_in_batch_mode(self) -> None:
         done = mock.Mock(returncode=0, stdout="out")
         with mock.patch.object(ssh_module.subprocess, "run", return_value=done) as patched:
-            result = ssh_module.ssh_runner("ultra@host", ["StrictHostKeyChecking=accept-new"])(["cat", "/a b"])
+            result = ssh_module.ssh_runner("alice@host", ["StrictHostKeyChecking=accept-new"])(["cat", "/a b"])
         self.assertEqual(result, "out")
         argv = patched.call_args.args[0]
         self.assertEqual(argv[:5], ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         self.assertEqual(argv[5:7], ["-o", "StrictHostKeyChecking=accept-new"])
-        self.assertEqual(argv[7:], ["ultra@host", "cat '/a b'"])
+        self.assertEqual(argv[7:], ["alice@host", "cat '/a b'"])
 
     def test_failures_are_no_data(self) -> None:
         with mock.patch.object(ssh_module.subprocess, "run", return_value=mock.Mock(returncode=255, stdout="")):
@@ -455,7 +455,7 @@ class SshRunnerTests(unittest.TestCase):
                 ssh_module.ssh_runner(target)
         with self.assertRaises(ConfigError):
             ssh_module.ssh_runner("host", ["ProxyCommand"])
-        self.assertEqual(ssh_module.target_host("ultra@100.1.2.3"), "100.1.2.3")
+        self.assertEqual(ssh_module.target_host("alice@100.1.2.3"), "100.1.2.3")
 
 
 class CommandTests(unittest.TestCase):

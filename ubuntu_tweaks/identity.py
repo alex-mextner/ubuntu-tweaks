@@ -70,7 +70,7 @@ CACHE_FILE = "dotfiles.json"
 LIST_LIMIT = 300
 GH_TIMEOUT_SECONDS = 15
 GH_LIST_TIMEOUT_SECONDS = 120
-REPO_FIELDS = "name,nameWithOwner,isPrivate,isArchived,defaultBranchRef"
+REPO_FIELDS = "name,nameWithOwner,isPrivate,isArchived,isFork,defaultBranchRef"
 _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 _URL_TAIL = re.compile(r"(?:^|[/:])([^/:]+/[^/:]+?)(?:\.git)?/*$")
@@ -95,9 +95,10 @@ class RepoRef:
 
     def __post_init__(self) -> None:
         spec = self.spec
-        slug = _SLUG.fullmatch(spec) is not None and spec.rsplit("/", 1)[-1] not in {".", ".."}
+        slug = _SLUG.fullmatch(spec) is not None
         url = "://" in spec or _SCP_URL.fullmatch(spec) is not None
-        if spec.startswith("-") or any(c.isspace() for c in spec) or not (slug or url or spec.startswith("/")):
+        usable = slug or url or spec.startswith("/")
+        if spec.startswith("-") or any(c.isspace() for c in spec) or not usable or self.name in {"", ".", ".."}:
             raise ConfigError(f"invalid dotfiles repository {spec!r}: use OWNER/NAME, a git URL or an absolute path")
 
     @property
@@ -111,7 +112,10 @@ class RepoRef:
 
 
 def _host_and_tail(spec: str) -> tuple[str | None, str]:
-    """``(host, owner/name)``: the host only when the spelling carries one (a URL), lower case."""
+    """``(host, owner/name)``: the host only when the spelling carries one (a URL), lower case. A local path
+    is compared as a whole, so it never equals a slug or another directory with the same last two names."""
+    if spec.startswith("/"):
+        return None, "path:" + os.path.normpath(spec).removesuffix(".git")
     match = _URL_TAIL.search(spec)
     tail = (match.group(1) if match else spec).lower()
     host = _URL_HOST.match(spec) if "://" in spec or _SCP_URL.fullmatch(spec) else None
@@ -125,12 +129,16 @@ def same_repo(first: str, second: str) -> bool:
     return first_tail == second_tail and (first_host is None or second_host is None or first_host == second_host)
 
 
+def expand_dir(home: Path, configured: str) -> Path:
+    expanded = home / configured[2:] if configured.startswith("~/") else Path(configured)
+    if not expanded.is_absolute():
+        raise ConfigError(f"[modules.dotfiles] dir must be absolute or start with ~/: {configured}")
+    return expanded
+
+
 def default_checkout(repo: RepoRef, home: Path, configured: str | None = None) -> Path:
     if configured:
-        expanded = home / configured[2:] if configured.startswith("~/") else Path(configured)
-        if not expanded.is_absolute():
-            raise ConfigError(f"[modules.dotfiles] dir must be absolute or start with ~/: {configured}")
-        return expanded
+        return expand_dir(home, configured)
     return home / (".files" if repo.name == ".files" else repo.name)
 
 
@@ -200,7 +208,7 @@ def _gh_login(process: Process) -> tuple[str | None, str | None, bool]:
 
 
 def _candidate(entry: object, login: str) -> Candidate | None:
-    if not isinstance(entry, dict) or entry.get("isArchived") is True:
+    if not isinstance(entry, dict) or entry.get("isArchived") is True or entry.get("isFork") is True:
         return None
     name = entry.get("name")
     if not isinstance(name, str):
@@ -301,9 +309,22 @@ def _write_state(path: Path, data: Mapping[str, object]) -> None:
         pass  # a read-only state directory only costs the cache
 
 
-def _cached(state: Mapping[str, object], now: float) -> Discovery | None:
+def _gh_account(home: Path, env: Mapping[str, str]) -> str:
+    """A cheap fingerprint of which gh account is active: ``gh auth login`` and ``gh auth switch`` rewrite
+    gh's ``hosts.yml``, so the cached answer of the previous account is not reused after either."""
+    config = env.get("GH_CONFIG_DIR") or (
+        f"{env['XDG_CONFIG_HOME']}/gh" if env.get("XDG_CONFIG_HOME") else f"{home}/.config/gh"
+    )
+    try:
+        info = (Path(config) / "hosts.yml").stat()
+    except OSError:
+        return "no-hosts-file"
+    return f"{info.st_mtime_ns}:{info.st_size}"
+
+
+def _cached(state: Mapping[str, object], now: float, account: str) -> Discovery | None:
     stored = state.get("discovery")
-    if not isinstance(stored, dict):
+    if not isinstance(stored, dict) or stored.get("account") != account:
         return None
     checked = stored.get("checked_at")
     login = stored.get("login")
@@ -328,15 +349,16 @@ def _cached(state: Mapping[str, object], now: float) -> Discovery | None:
     )
 
 
-def _store(state: dict[str, object], discovery: Discovery, now: float) -> bool:
+def _store(state: dict[str, object], discovery: Discovery, now: float, account: str) -> bool:
     """Put a discovery into ``state``; False when it is not worth remembering (a login or install is missing)."""
     if discovery.manual is not None:
         if not discovery.transient:
             return False
-        state["discovery"] = {"checked_at": now, "failure": discovery.manual}
+        state["discovery"] = {"checked_at": now, "failure": discovery.manual, "account": account}
         return True
     state["discovery"] = {
         "checked_at": now,
+        "account": account,
         "login": discovery.login,
         "candidates": [{"slug": c.slug, "private": c.private} for c in discovery.candidates],
         "notes": list(discovery.notes),
@@ -369,13 +391,19 @@ def _remembered(state: Mapping[str, object]) -> tuple[Path, Path | None, str | N
     )
 
 
-def _local_profile(home: Path, state: Mapping[str, object]) -> tuple[Path, Path] | None:
+def _local_profile(
+    home: Path, state: Mapping[str, object], checkout_dir: str | None, profile_path: str | None
+) -> tuple[Path, Path] | None:
     """``(checkout, profile_dir)`` of the first checkout on disk that holds a profile."""
+    if checkout_dir:
+        checkout = expand_dir(home, checkout_dir)
+        profile = find_profile_dir(checkout, profile_path)
+        return (checkout, profile) if profile is not None else None
     remembered = _remembered(state)
     if remembered is not None and remembered[1] is not None:
         return remembered[0], remembered[1]
     for name in DOTFILES_NAMES:
-        profile = find_profile_dir(home / name)
+        profile = find_profile_dir(home / name, profile_path)
         if profile is not None:
             return home / name, profile
     return None
@@ -397,27 +425,35 @@ def _planned(
     process: Process,
     state: Mapping[str, object],
     *,
+    checkout_dir: str | None = None,
+    profile_path: str | None = None,
+    verify_origin: bool = True,
     login: str | None = None,
     notes: tuple[str, ...] = (),
     private: bool | None = None,
 ) -> Location:
-    """The profile of ``repo`` in the checkout the module recorded for it, else at the default clone target.
-    A checkout whose origin is another repository is never read: its profile belongs to someone else."""
+    """The profile of ``repo`` in the configured checkout, else the one the module recorded for it, else at the
+    default clone target. A checkout whose origin is another repository is never read: its profile belongs to
+    someone else."""
     remembered = _remembered(state)
-    if remembered is not None and remembered[2] is not None and same_repo(remembered[2], repo.spec):
+    if checkout_dir:
+        checkout = expand_dir(home, checkout_dir)
+        profile = find_profile_dir(checkout, profile_path)
+    elif remembered is not None and remembered[2] is not None and same_repo(remembered[2], repo.spec):
         checkout = remembered[0]
-        profile = remembered[1] or find_profile_dir(checkout)
+        profile = remembered[1] or find_profile_dir(checkout, profile_path)
     else:
         checkout = default_checkout(repo, home)
-        profile = find_profile_dir(checkout)
-    origin = _origin_url(process, checkout)
+        profile = find_profile_dir(checkout, profile_path)
+    origin = _origin_url(process, checkout) if verify_origin else None
     if origin is not None and not same_repo(origin, repo.spec):
         manual = (
             f"{checkout} is a checkout of {origin}, not of {repo.spec}: move it away, or set "
             "[modules.dotfiles] dir to another place"
         )
         return Location(checkout / "<origin mismatch>", checkout, repo, source, login, notes, manual, private)
-    return Location(profile or checkout / PROFILE_SUBDIRS[0], checkout, repo, source, login, notes, None, private)
+    root = profile or checkout / (profile_path or PROFILE_SUBDIRS[0])
+    return Location(root, checkout, repo, source, login, notes, None, private)
 
 
 def locate(
@@ -428,29 +464,36 @@ def locate(
     repo_override: str | None = None,
     refresh: bool = False,
     now: float | None = None,
+    checkout_dir: str | None = None,
+    profile_path: str | None = None,
+    verify_origin: bool = True,
 ) -> Location:
+    """``checkout_dir`` / ``profile_path`` are the dotfiles module's ``dir`` / ``path`` options; the module
+    checks origins itself (it knows how to fix them), so it passes ``verify_origin=False``."""
     clock = time.time() if now is None else now
     runner = process or Process()
     state_path = _state_file(home, env)
     state = _read_state(state_path)
+    where = {"checkout_dir": checkout_dir, "profile_path": profile_path, "verify_origin": verify_origin}
     override, source = (repo_override, Source.FLAG) if repo_override else (env.get(REPO_ENV) or None, Source.ENV)
     if override:
-        return _planned(RepoRef(override), home, source, runner, state)
-    local = _local_profile(home, state)
+        return _planned(RepoRef(override), home, source, runner, state, **where)
+    local = _local_profile(home, state, checkout_dir, profile_path)
     if local is not None:
         return Location(local[1], local[0], None, Source.LOCAL)
-    discovery = None if refresh else _cached(state, clock)
+    account = _gh_account(home, env)
+    discovery = None if refresh else _cached(state, clock, account)
     from_cache = discovery is not None
     if discovery is None:
         discovery = discover_via_gh(runner)
-        if _store(state, discovery, clock):
+        if _store(state, discovery, clock, account):
             _write_state(state_path, state)
-    where = Source.CACHE if from_cache else Source.GH
+    found = Source.CACHE if from_cache else Source.GH
     chosen = discovery.repo
     if chosen is None:
         return Location(
             home / ".files" / PROFILE_SUBDIRS[0],
-            source=where,
+            source=found,
             login=discovery.login,
             notes=discovery.notes,
             manual=discovery.manual,
@@ -458,12 +501,13 @@ def locate(
     return _planned(
         RepoRef(chosen.slug),
         home,
-        where,
+        found,
         runner,
         state,
         login=discovery.login,
         notes=discovery.notes,
         private=chosen.private,
+        **where,
     )
 
 
@@ -512,26 +556,25 @@ def _module_options(env: Mapping[str, str]) -> dict[str, str]:
 def resolve_for_module(home: Path, env: Mapping[str, str], process: Process | None = None) -> dict[str, object]:
     """The dotfiles module's answer: what to clone where, or why there is nothing to do or a manual step."""
     options = _module_options(env)
-    override = env.get(REPO_ENV) or options.get("repo")
-    location = locate(home=home, env=env, process=process, repo_override=override)
-    repo, checkout = location.repo, location.checkout
-    profile_dir = location.root if location.root.is_dir() else None
-    if repo is not None and options.get("dir"):
-        checkout = default_checkout(repo, home, options["dir"])
-        profile_dir = find_profile_dir(checkout)
-    if checkout is not None and options.get("path"):
-        profile_dir = find_profile_dir(checkout, options["path"])
+    location = locate(
+        home=home,
+        env=env,
+        process=process,
+        repo_override=env.get(REPO_ENV) or options.get("repo"),
+        checkout_dir=options.get("dir"),
+        profile_path=options.get("path"),
+        verify_origin=False,
+    )
+    repo = location.repo
     return {
         "repo": repo.spec if repo else None,
         "is_slug": repo.is_slug if repo else False,
-        "private": location.private,
-        "dir": str(checkout) if checkout else None,
-        "profile_dir": str(profile_dir) if profile_dir else None,
+        "dir": str(location.checkout) if location.checkout else None,
+        "profile_dir": str(location.root) if location.root.is_dir() else None,
         "source": location.source.value if location.source else None,
         "login": location.login,
         "notes": list(location.notes),
         "manual": location.manual,
-        "explicit": override is not None,
     }
 
 
@@ -560,10 +603,18 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             return 0 if same_repo(args[1], args[2]) else 1
         if args[:1] == ["remember"] and len(args) >= 2 and _remember_command(home, environment, args[1:]) == 0:
             return 0
+        if args[:1] == ["profile"] and len(args) in (2, 3):
+            found = find_profile_dir(Path(args[1]), args[2] if len(args) == 3 else None)
+            if found is not None:
+                print(found)
+            return 0 if found is not None else 1
     except ConfigError as error:
         print(f"ubuntu-tweaks identity: {error}", file=sys.stderr)
         return 2
-    print("usage: identity resolve | same-repo A B | remember DIR [--path P] [--repo R]", file=sys.stderr)
+    print(
+        "usage: identity resolve | same-repo A B | profile DIR [PATH] | remember DIR [--path P] [--repo R]",
+        file=sys.stderr,
+    )
     return 2
 
 

@@ -69,15 +69,35 @@ class RootAction(Action):
         raise AssertionError("must not run without sudo")
 
 
+class CloneProfile(Action):
+    """What the dotfiles module does: a system module whose install makes the profile appear."""
+
+    kind = "system-module"
+    phase = Phase.SYSTEM
+    scope = "dotfiles"
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+
+    def describe(self) -> str:
+        return "run dotfiles"
+
+    def check(self) -> bool:
+        return self._root.is_dir()
+
+    def run(self) -> None:
+        write(self._root / "profile.toml", "")
+
+
 class CommandScenario(Scenario):
     def setUp(self) -> None:
         super().setUp()
         patcher = mock.patch.object(planners, "discover_planners", return_value=MY_PLANNERS)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.source = self.add_extension("gnome-extensions/eng@ultra", "eng@ultra")
-        self.add_module("eng", path="gnome-extensions/eng@ultra", extension=EXTENSION_MODULE)
-        self.link = self.extensions_dir / "eng@ultra"
+        self.source = self.add_extension("gnome-extensions/eng@example", "eng@example")
+        self.add_module("eng", path="gnome-extensions/eng@example", extension=EXTENSION_MODULE)
+        self.link = self.extensions_dir / "eng@example"
         self.fake: FakeBackend = self.backend()
         self.factory_calls = 0
 
@@ -104,12 +124,42 @@ class CommandScenario(Scenario):
 
 
 class ApplyTests(CommandScenario):
+    def test_a_profile_cloned_by_this_run_is_applied_by_this_run(self) -> None:
+        root = self.tmp / "later-profile"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = reconcile.apply(
+                Context(self.repo, Profile(root, "home")),
+                backend_factory=self.factory,
+                commit=True,
+                no_sudo=False,
+                extra_actions=(CloneProfile(root),),
+                relocate=lambda: Location(root),
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("no dotfiles repository", out.getvalue())  # the preview said what was missing
+        self.assertIn(f"profile: {root} (cloned by this run)", out.getvalue())
+        self.assertEqual(self.factory_calls, 2)  # the plan was built again with the profile in place
+
+    def test_no_profile_pass_when_the_installer_did_not_produce_one(self) -> None:
+        root = self.tmp / "never"
+        with contextlib.redirect_stdout(io.StringIO()):
+            reconcile.apply(
+                Context(self.repo, Profile(root, "home")),
+                backend_factory=self.factory,
+                commit=True,
+                no_sudo=False,
+                extra_actions=(CloneProfile(self.tmp / "elsewhere"),),
+                relocate=lambda: Location(root),
+            )
+        self.assertFalse(root.exists())
+
     def test_preview_prints_the_plan_and_changes_nothing(self) -> None:
         code, out = self.run_apply(commit=False)
         self.assertEqual(code, 0)
         self.assertIn("Plan: 3 action(s) to run", out)
         self.assertIn("[link]", out)
-        self.assertIn("[enable] enable eng@ultra", out)
+        self.assertIn("[enable] enable eng@example", out)
         self.assertIn("Preview only, nothing was changed", out)
         self.assertFalse(self.link.exists())
         self.assertEqual(self.fake.writes, [])
@@ -175,7 +225,7 @@ class ApplyTests(CommandScenario):
                 self.context(frozenset({"other"})), commit=False, no_sudo=False, backend_factory=self.factory
             )
         self.assertIn("other@x", out.getvalue())
-        self.assertNotIn("eng@ultra", out.getvalue())
+        self.assertNotIn("eng@example", out.getvalue())
 
     def test_a_plan_that_does_not_converge_fails(self) -> None:
         class Stubborn(RecordingAction):
@@ -203,7 +253,7 @@ class StatusTests(CommandScenario):
 
     def test_clean_system_exits_0_and_extras_alone_do_not_fail(self) -> None:
         self.run_apply(commit=True)
-        self.fake.set_user("org.gnome.shell", None, "enabled-extensions", "['eng@ultra', 'gsconnect@x']")
+        self.fake.set_user("org.gnome.shell", None, "enabled-extensions", "['eng@example', 'gsconnect@x']")
         code, out = self.run_status()
         self.assertEqual(code, 0)
         self.assertIn("Missing (0):", out)
@@ -227,7 +277,7 @@ class StatusTests(CommandScenario):
 
     def test_only_hides_extras(self) -> None:
         self.run_apply(commit=True)
-        self.fake.set_user("org.gnome.shell", None, "enabled-extensions", "['eng@ultra', 'gsconnect@x']")
+        self.fake.set_user("org.gnome.shell", None, "enabled-extensions", "['eng@example', 'gsconnect@x']")
         _, out = self.run_status(self.context(frozenset({"eng"})))
         self.assertIn("Extra (0):", out)
 
@@ -412,7 +462,7 @@ class DoctorTests(CommandScenario):
     def module_with_deps(*, enabled: bool, apt: str = "tmux") -> str:
         return (
             f"enabled = {str(enabled).lower()}\n"
-            '[source]\nkind = "local"\npath = "gnome-extensions/eng@ultra"\n'
+            '[source]\nkind = "local"\npath = "gnome-extensions/eng@example"\n'
             f'[deps]\napt = ["{apt}"]\n'
         )
 

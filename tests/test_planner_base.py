@@ -56,7 +56,7 @@ class BaseCase(TempDirCase):
             env,
             root=self.root,
             home=self.home,
-            user="ultra",
+            user="alice",
             group="staff",
             uid=self.uid,
             fetch=fetch,
@@ -182,23 +182,23 @@ class LoginShellTests(BaseCase):
 
     def test_a_bash_login_shell_is_changed_through_sudo_once_zsh_is_installed(self) -> None:
         self.module("zsh", self.MODULE)
-        runner = FakeProcess({("getent", "passwd", "ultra"): ok("ultra:x:1000:1000:U:/home/ultra:/bin/bash\n")})
+        runner = FakeProcess({("getent", "passwd", "alice"): ok("alice:x:1000:1000:U:/home/alice:/bin/bash\n")})
         runs: list[tuple[str, ...]] = []
         runner._effects = lambda argv, _input: runs.append(argv)  # noqa: SLF001
         (action,) = self.plan(runner).actions
 
         self.assertEqual((action.kind, action.needs_root), ("login-shell", True))
-        self.assertEqual(action.describe(), "chsh: set the login shell of ultra to /usr/bin/zsh (now /bin/bash)")
+        self.assertEqual(action.describe(), "chsh: set the login shell of alice to /usr/bin/zsh (now /bin/bash)")
         with self.assertRaisesRegex(ManualStepRequired, "/usr/bin/zsh is not installed yet"):
             action.run()
         write(self.root / "usr/bin/zsh", "")
         action.run()
-        self.assertEqual(runs, [("sudo", "--", "chsh", "-s", "/usr/bin/zsh", "ultra")])
+        self.assertEqual(runs, [("sudo", "--", "chsh", "-s", "/usr/bin/zsh", "alice")])
 
     def test_any_zsh_login_shell_satisfies_it_including_brews(self) -> None:
         self.module("zsh", self.MODULE)
-        entry = "ultra:x:1000:1000:U:/home/ultra:/home/linuxbrew/.linuxbrew/bin/zsh\n"
-        self.assertEqual(self.plan(FakeProcess({("getent", "passwd", "ultra"): ok(entry)})).actions, ())
+        entry = "alice:x:1000:1000:U:/home/alice:/home/linuxbrew/.linuxbrew/bin/zsh\n"
+        self.assertEqual(self.plan(FakeProcess({("getent", "passwd", "alice"): ok(entry)})).actions, ())
 
     def test_an_unreadable_passwd_database_is_not_satisfied(self) -> None:
         self.module("zsh", self.MODULE)
@@ -431,7 +431,7 @@ class BrewTests(BaseCase):
         self.assertEqual((by_kind["brew-prefix"].needs_root, by_kind["brew-install"].needs_root), (True, False))
         self.assertEqual(
             by_kind["brew-prefix"].describe(),
-            "create /home/linuxbrew/.linuxbrew owned by ultra:staff (the one step of the Homebrew install that needs root)",
+            "create /home/linuxbrew/.linuxbrew owned by alice:staff (the one step of the Homebrew install that needs root)",
         )
         self.assertIn("refused unless sha256 is " + INSTALLER_SHA[:12], by_kind["brew-install"].describe())
 
@@ -441,7 +441,7 @@ class BrewTests(BaseCase):
         runner._effects = lambda argv, _input: executed.append(argv)  # noqa: SLF001
         self.actions(runner)["brew-prefix"].run()
         self.assertEqual(
-            executed, [("sudo", "--", "install", "-d", "-o", "ultra", "-g", "staff", "/home/linuxbrew/.linuxbrew")]
+            executed, [("sudo", "--", "install", "-d", "-o", "alice", "-g", "staff", "/home/linuxbrew/.linuxbrew")]
         )
 
     def test_an_installed_brew_satisfies_both_steps(self) -> None:
@@ -458,7 +458,7 @@ class BrewTests(BaseCase):
         runner = FakeProcess()
         prefix = self.actions(runner)["brew-prefix"]
         with self.assertRaisesRegex(
-            ManualStepRequired, r"run `sudo chown -R ultra:staff /home/linuxbrew/.linuxbrew` yourself"
+            ManualStepRequired, r"run `sudo chown -R alice:staff /home/linuxbrew/.linuxbrew` yourself"
         ):
             prefix.run()
         self.assertEqual(runner.executed, [])

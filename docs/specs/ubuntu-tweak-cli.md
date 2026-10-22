@@ -285,14 +285,12 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 3 | `git` + `gh` installed and configured | `git-gh` (30) |
 | 4 | Homebrew for Linux and its follow-up actions | `brew` (40) |
 | 5 | ssh server | `ssh-server` (50) |
-| 6 | passwords-app: install, enable unit, native host, polkit action | `passwords-app` (60), `passwords-app-polkit` (61) |
-| 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
-| 10 | optional, off unless a machine enables them: rig (+ tmux, omp, `ctmux`), the `.files` checkout | `rig` (100), `dotfiles` (110) |
+| 10 | your dotfiles repository (found through gh) cloned, with the profile in it; on by default, a no-op when there is none | `dotfiles` (110) |
 
-`ctmux` is not a module: it is a first-class rig tool (`tools.items.ctmux`), installed by `rig activate`
-inside step 10.
+A person's own tools (a password manager, a terminal wrapper, a browser tweak) are modules of their profile
+(*Profile modules*) and take any `order` they like.
 
 <a id="init-order-table"></a>
 **Order of every module** (the golden `init` preview of an empty machine, `tests/golden/init_empty_machine.txt`,
@@ -306,15 +304,8 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `git-gh` | 30 | `base` | on |
 | `brew` | 40 | `base` | on |
 | `ssh-server` | 50 | `system` | on |
-| `passwords-app` | 60 | `system` | on |
-| `passwords-app-polkit` | 61 | `system` | on |
-| `firefox` | 70 | `system` | on |
-| `firefox-policy` | 71 | `system` | on |
-| `firefox-autologin` | 72 | `system` | on |
-| `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
-| `rig` | 100 | `system` | off |
-| `dotfiles` | 110 | `system` | off |
+| `dotfiles` | 110 | `system` | on |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
 
@@ -430,7 +421,7 @@ Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
 | `clipboard` | apt: `wl-clipboard xclip xsel`: what `gh` looks for when it copies a one-time code (`! Failed to copy one-time code to clipboard: No clipboard utilities available`). |
 | `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`); step `shell-rc`: `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone) **and not linked by the profile** (see *rc files* below); the mac-era dotfiles at the root of `.files` are not touched. |
 | `git-gh` | apt `git gh` (`gh` 2.46.0 is in the 26.04 `universe` archive, decided with `apt-cache policy gh`); steps `git-identity`, `gh-login`, `git-credential-helper`. |
-| `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it, or the profile links one of them), `tools` (`brew install uv oven-sh/bun/bun` unless `uv` and `bun` are already on `PATH`: what the passwords-app and Firefox modules run on) and `formulae` (`brew install` of `packages.toml` `brew`). A post waits for the module's install (`after` defaults to `install`) and does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
+| `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it, or the profile links one of them) and `formulae` (`brew install` of `packages.toml` `brew`). A post waits for the module's install (`after` defaults to `install`) and does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
 
 **git and gh.** Identity comes only from the profile, never invented:
 
@@ -513,14 +504,8 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
 | `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` (or `pkexec`); `--yes` only skips the apt confirmation, never the password |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
-| iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
-| polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
-| AMO signing key | `firefox` | the key belongs to the owner's AMO account | `secret-tool store` the items `purpose=amo-jwt-issuer` and `purpose=amo-jwt-secret` (the install output prints the commands) |
-| signed extension missing | `firefox-policy` | nothing to force-install yet | do the AMO step above first |
-| extension not active | `firefox-autologin` | Firefox must show the WebExtension-backend prompt | apply `firefox-policy`, restart Firefox, answer the prompt, check `about:policies` |
-| Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (see *Firefox*): without it the bridge step is skipped. Until firefox-passkey-qr PR 2 is merged the installer cannot run unattended: the module reports a manual step, run `passkey-qr install` in `~/dev/firefox-passkey-qr` |
-| rig / `.files` clone | `rig`, `dotfiles` (opt-in) | forge credentials, or a directory in the way | `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote`; resolve a diverged `~/.files` |
-| missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
+| gh login or clone | `dotfiles` | the repository is found through your gh login | `gh auth login`; set `[modules.dotfiles] repo` or pass `--dotfiles-repo OWNER/NAME`; move a directory that is in the way; resolve a diverged checkout |
+| missing `python3` | `dotfiles` | its installer needs it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
 
 ### One command on a fresh machine
 
@@ -547,12 +532,6 @@ first `init` prints the exact clone command and the *Manual steps* block lists t
 | `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it) |
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
-| `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
-| `passwords-app-polkit` | `system` (root) | the one root step `install.sh` only prints: the polkit action for unlocking with the login password |
-| `firefox` | `system`, user | build the passwords-app extension and have it signed on AMO (key from the Secret Service) (*Firefox*) |
-| `firefox-policy` | `system` (root) | `/etc/firefox/policies/policies.json` force-installs the signed extension |
-| `firefox-autologin` | `system`, user | start Firefox, wait for the extension, open the sign-in page once so passwords-app fills it |
-| `firefox-passkey-qr` | `system`, user | the `firefox-passkey-qr` installer run with `--yes`; `enabled = false`, a machine enables it |
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
@@ -894,51 +873,50 @@ submodule of the engine checkout). Rules:
 
 Tests: `tests/test_profile_modules.py`.
 
-### Optional modules: rig, dotfiles
+### The `dotfiles` module
 
-Init step 10 (request 9): both are `kind = "system"` with `root = false` (the installer runs as the user, no
-sudo, see *system modules, additions*), `enabled = false` by default, and switched on per machine in the
-profile: `machines/<host>/machine.toml`
+Init step 10 (request 9, generalized by request 14). `kind = "system"` with `root = false` (the installer runs as
+the user, no sudo, see *Service modules*), **enabled by default** and a machine opts out with `[modules.dotfiles]
+enabled = false` in its `machine.toml`. It is a no-op with a clear message when there is nothing to find. Options
+(`[modules.dotfiles]` in `profile.toml` / `machine.toml`, JSON in `UBUNTU_TWEAK_MODULE_CONFIG`, never secrets):
 
 ```toml
-[modules.rig]
-enabled = true
-profile_url = "https://git.hyperide.ai/<login>/.rig-profile"   # optional; omit when the profile is already set up
 [modules.dotfiles]
-enabled = true
+repo = "alice/dotfiles"     # optional: OWNER/NAME, a git URL or an absolute path; default: found through gh
+dir  = "~/src/dotfiles"     # optional: the checkout; default ~/.files for a repository named .files, else ~/<name>
+path = "ubuntu"             # optional: the profile inside the repository; default: ubuntu/, ubuntu-tweaks/, the root
 ```
 
-Both installers take `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3; exit 10 when python3 is missing) and exit 10 for a
-needed manual step; options arrive as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` and are never secrets.
+`--dotfiles-repo OWNER/NAME` reaches it as `$UBUNTU_TWEAK_DOTFILES_REPO` and wins over `repo`. `modules/dotfiles/
+install.sh` takes `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3; exit 10 when python3 is
+missing) and exit 10 for a needed manual step. It asks `ubuntu_tweaks/identity.py` (`python3 -m
+ubuntu_tweaks.identity resolve`, *Profile discovery*) which repository to use and where, so the engine and the
+module always agree.
 
-| Module (order) | `install.sh` does | `--check` is satisfied when |
+| Situation | `install.sh` | `--check` |
 |---|---|---|
-| `rig` (100) | clones `git.hyperide.ai/ultrabricks/rig-cli` (option `repo`) to `~/dev/rig-cli` (`dir`), fast-forwards a tree without local changes, symlinks `~/.local/bin/rig`, runs `rig profile sync` (or `rig profile init <profile_url>` when none is set up; `profile_sync = false` skips), then `rig activate commit` (`activate = false` skips) | checkout and link are right, the rig profile is in sync (when one exists), `rig activate --json` has no config switch left to write and `rig status` reports no drift |
-| `dotfiles` (110) | `gh repo clone alex-mextner/.files ~/.files` when `gh` is logged in, else `git clone https://github.com/alex-mextner/.files`; an existing checkout is fetched and fast-forwarded only when it has no local changes | `~/.files` is a git checkout rooted there, its `origin` is the configured `repo` (when one is set), and it is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
+| a repository is known and its checkout is absent | `gh repo clone <owner/name> <dir>` when `gh` is logged in, else `git clone https://github.com/<owner/name>` (a public repository); a URL or a path is `git clone`d as given; the checkout is recorded for the next command | drift: the checkout is missing |
+| a checkout exists | fetches and fast-forwards it only when it has no local changes | exit 0 when it is a git checkout rooted there, its `origin` is the repository asked for (`same_repo`: URL spellings and case are ignored, two named hosts must agree; skipped when none is known), and it is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
+| gh finds no repository of that name | prints `no dotfiles repository found for <login> (looked for .files, dotfiles, .dotfiles, dot-files): nothing to install; ...`, exit 0 | exit 0 |
+| gh is missing, logged out or unreachable and no checkout is on disk | exit 10: `needs manual: not logged in to GitHub: run `gh auth login``; never a prompt | drift (exit 3) with the same text |
+| the checkout is another repository (`origin`), a regular file, a directory that is not a checkout, behind with local changes, diverged | exit 10, nothing is changed | drift |
 
-- **rig does the activating.** `rig activate commit` (rig-cli ticket 745, "rig profile carries tmux and omp
-  config; rig activate bootstraps a machine") syncs the profile (config, `~/.tmux.conf` user region, omp
-  `config.yml`, masked `mcp.json`, `sysmon.json`; secrets never travel), probes the machine, writes the missing
-  `enabled` switches (harness, tmux, harness wrappers, the first-class `ctmux` tool) and applies the
-  machine-level plan, listing what the machine cannot support. `ctmux` (github.com/alex-mextner/ctmux-cli) is
-  cloned and installed by rig on macOS and Ubuntu (ctmux's own `install.sh` owns the OS gate and `--check`).
-  `[deps] apt = ["python3-yaml"]` is what rig reads its config with.
-- **Manual steps (exit 10):** a clone that fails (forge credentials: `fj auth login` / `gh auth login`), a
-  directory or file where the checkout or the symlink should go (never replaced), a profile conflict (`rig
-  profile sync --take local|remote`), a `.files` checkout that is behind and has local changes or has diverged.
-  Anything else non-zero is a failure.
-- **`dotfiles` never touches the mac-era files** (zsh, zplug, brew): it writes nothing in `$HOME` but the
-  checkout, links nothing, and fast-forwards only a tree without local changes; tests assert a `.zshrc` in the
-  repository stays byte-identical and `$HOME` holds only `.files`.
-- Needs the Base slice's manifest (`[source] root = false`, `preview`, exit 10, `UBUNTU_TWEAK_MODULE_CONFIG`).
-  Tests: `modules/rig/tests/test_install.py`, `modules/dotfiles/tests/test_install.py` (a local git repo and a
-  stub `rig`; throwaway `HOME`).
-- **Manual real-run checklist** (root and the forge are not available to tests): `ubuntu-tweak apply` shows
-  `run rig: modules/rig/install.sh` with the plan under it; with `[modules.rig] enabled = true`, `apply --commit`
-  clones, links, syncs, activates; `rig activate` afterwards lists no config change; `apply` again reports
-  `0 changed`; `ubuntu-tweak status` shows rig neither Missing nor Modified; `rig profile status` is in sync;
-  with `[modules.dotfiles] enabled = true` on a machine without `~/.files`, `apply --commit` leaves `~/.files`
-  with the `ubuntu/` profile directory and nothing else changed in `$HOME`.
+- **It never touches non-profile files.** It writes nothing in `$HOME` but the checkout and the one state file
+  `~/.local/state/ubuntu-tweaks/dotfiles.json` (*Profile discovery*), links nothing, and fast-forwards only a
+  tree without local changes; tests assert a `.zshrc` in the repository stays byte-identical and `$HOME` holds
+  only the checkout.
+- **The profile arrives in the same run.** The plan of `init`/`apply` is built before the clone, so it holds
+  the modules only and its header says the repository is not cloned yet. When the profile was missing and a
+  system module ran, `apply --commit` looks for the profile again (`identity.locate`), prints `profile: <dir>
+  (cloned by this run)` and rebuilds the plan with it: one `init --commit` on a fresh machine applies the
+  settings too. If the clone failed, the run ends as before, with the manual step.
+- Tests: `modules/dotfiles/tests/test_install.py` (a local git repository, a stub `gh` executable, throwaway
+  `HOME` and state directory), `tests/test_apply_commands.py` (the same-run profile).
+- **Manual real-run checklist** (the network is not available to tests): with `gh auth login` done and a
+  repository `<login>/.files` holding `ubuntu/profile.toml`, on a machine without `~/.files`: `ubuntu-tweak
+  apply` names the repository and says it is not cloned; `apply --commit` leaves `~/.files` with the profile
+  and applies it in the same run; `apply` again reports `0 changed`; with `gh` logged out the header and the
+  closing manual block say `gh auth login`.
 
 ### Panel coverage
 
@@ -1318,7 +1296,7 @@ check = "ssh-server check"
 |---|---|
 | `check` | Read-only, needs no root. Exit 0 = every fact holds, 3 = drift (the unmet facts are printed, one line each), anything else = the checker broke (the checker protocol in *Source kinds*). |
 | `status` | The same facts, all of them, one line each: `ok`, `missing` or `manual` (unmet and not fixable by `install`, e.g. a signing key that does not exist). Exit codes as `check`. Used by hand and by tests; the engine does not call it. |
-| `plan` | Optional, read-only: what `install` is going to do, one line each (`firefox-passkey-qr` prints its installer's `--dry-run` listing). Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
+| `plan` | Optional, read-only: what `install` is going to do, one line each. Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
 | `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
 
 Options come from `[modules.<name>]` in `profile.toml` / `machine.toml` (merged as everywhere):
@@ -1328,8 +1306,8 @@ A root script finds the desktop user through `SUDO_USER` / `PKEXEC_UID`, never `
 
 A module that must act as the desktop user (it writes `$HOME`, talks to the user's systemd or
 Secret Service) sets `root = false` in `[source]`: its action is not `[sudo]` and `install` runs
-unprivileged. What such a module needs from root is a **separate root module** (`passwords-app-polkit`,
-`firefox-policy`), so the preview marks exactly which steps ask for a password.
+unprivileged. What such a module needs from root is a **separate root module**, so the preview marks
+exactly which steps ask for a password.
 
 **What the scripts expect from the engine** (all four are manifest/planner features of `kind = "system"`,
 implemented with the system-module planner, not by the scripts): `[source] root = false`; the
@@ -1461,156 +1439,6 @@ marked):
 - As the desktop user, `systemctl start --no-ask-password ssh.service` is still refused
   (memguard's rule is intact).
 
-#### Passwords (`passwords-app`, `passwords-app-polkit`)
-
-Request 9: *passwords-app is installed and configured first; every automatic login takes its passwords from
-it.* The app is `alex-mextner/passwords-app` (iCloud Keychain sync into the GNOME Keyring, session-bus API
-`io.github.alex_mextner.Passwords`, native-messaging host for browsers).
-
-`passwords-app` (user level) facts: `git` and `uv` on `PATH` (its installer needs both); the checkout
-(`checkout` option, default `~/dev/passwords-app`, cloned from `repo`, default
-`https://github.com/alex-mextner/passwords-app.git` when missing; an existing checkout is **never pulled or
-reset**, it is the owner's working copy); installed from the checkout's current commit (the installed commit
-is recorded in `~/.local/state/ubuntu-tweaks/passwords-app.rev`, so a moved `HEAD` re-runs the installer);
-the user unit file; the Firefox native-messaging manifest names an executable host and
-`passwords-app@alex-mextner.github.io`; `passwords-appd.service` enabled and active; the bus name is owned
-and `busctl --user introspect` answers (the owner check, `busctl list --acquired`, comes first because
-`introspect` on an absent name would start the daemon: `check` never does); and iCloud **signed in**
-(the `state` field of `GetStatus`, nothing else of the reply is read, the Apple ID is never shown).
-Install: clone when missing, run the repository's own `scripts/install.sh` (which also enables and
-restarts the unit; the module enables and starts it again when that did not happen), record the commit,
-verify the bus. Signing in needs the owner's Apple ID, password and 2FA code, so it is the one `manual`
-fact: the install ends with `needs manual: ... run passwords-app signin`.
-
-`passwords-app-polkit` (root) copies the checkout's `data/polkit/*.policy` to
-`/usr/share/polkit-1/actions/` when it differs (mode 644); this is the `pkexec install ...` line the app's
-installer prints, run through the module's `sudo` so the preview shows it. No checkout is a `needs manual`
-(`enable the passwords-app module first`). Orders: `passwords-app` (manifest `order = 60`) → `passwords-app-polkit` (61) → `firefox` (70).
-
-Recorded on this machine (2026-10-22): the unit is enabled and active and the bus name is owned, so the
-module reports the checkout-commit stamp missing and the polkit action not installed.
-
-Real-root verification: `sudo ubuntu-tweak apply --only passwords-app-polkit --commit`, then
-`pkcheck --action-id io.github.alex_mextner.Passwords.unlock --process $$ -u` asks for the login password;
-as the user, `ubuntu-tweak apply --only passwords-app --commit` converges and `status --only passwords-app`
-is 0 after `passwords-app signin`.
-
-#### Firefox (`firefox`, `firefox-policy`, `firefox-autologin`, `firefox-passkey-qr`)
-
-Request 9: *passwords are filled in Firefox, and Firefox signs in by itself at init.*
-
-**Facts about this machine** (verified 2026-10-22): Firefox is the **snap** (158.0, `mozilla` publisher). The
-snap declares the plug `etc-firefox` (`system-files`, `read: /etc/firefox`) and it is connected, so Firefox
-reads `/etc/firefox/policies/policies.json` (Mozilla's documented Linux location; the Mozilla deb reads it
-without a plug). The extension id is `passwords-app@alex-mextner.github.io`. Release Firefox **refuses
-unsigned add-ons**, `passwords-app` ships no signed build and its snap-era native host reaches the daemon
-through the xdg-desktop-portal (the first start shows *Allow Firefox to start WebExtension backend?*, which
-only the owner can answer).
-
-*Signing* (`firefox`, user level). Facts: the extension sources (`extension/package.json` version) and a
-**Mozilla-signed** `passwords-app.xpi` of the checkout's version (a `META-INF/*.rsa|*.sig` entry) staged in
-`~/.local/state/ubuntu-tweaks/firefox/` as one canonical file plus `passwords-app.version` (the extension
-version it was built from, so a checkout that moves back is rebuilt, never mixed up). Install: take the AMO API credentials from the Secret Service
-(`purpose amo-jwt-issuer` and `amo-jwt-secret`; created once by the owner with `secret-tool store`, the
-message names the exact commands); `bun install --frozen-lockfile`; `bun run build`;
-`web-ext sign --channel=unlisted --source-dir extension/dist/firefox`, with the credentials only in
-`WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET` for that one process; stage the signed file. Without the key it
-stops with **`needs manual: AMO signing key ...`**, builds nothing and the fact stays Missing: the module
-degrades to a clearly reported gap, never a fake success. AMO needs a new `version` per upload, so a
-changed extension without a version bump fails with AMO's own message (exit 1).
-
-*Force-install* (`firefox-policy`, root). `/etc/firefox/extensions/<id>.xpi` (a copy of the staged file,
-mode 644: a sandboxed Firefox cannot read the user's `~/.local`; copied **before** the policy names it) and in
-`/etc/firefox/policies/policies.json`:
-
-```json
-{
-  "policies": {
-    "ExtensionSettings": {
-      "passwords-app@alex-mextner.github.io": {
-        "installation_mode": "force_installed",
-        "install_url": "file:///etc/firefox/extensions/passwords-app@alex-mextner.github.io.xpi"
-      }
-    }
-  }
-}
-```
-
-A root script must not trust the desktop user's tree: the staged file is read only as a regular file owned by
-that user (no final symlink, at most 32 MiB) and only when it is a zip with a Mozilla signature entry; the
-polkit module likewise accepts only `*.policy` files that declare actions in
-`io.github.alex_mextner.Passwords.*`, named `io.github.alex_mextner.Passwords*.policy` and without any `org.freedesktop.policykit.exec` rule (a policy can grant `pkexec` rights), see `read_owned_file`.
-
-The file is **merged**: other policies and other `ExtensionSettings` entries stay; a file that is not a JSON
-object is refused, never overwritten. `ExtensionSettings` is used instead of the older
-`Extensions.Install` because it also keeps the add-on installed and updates it when the file changes. With
-the snap the module also connects `firefox:etc-firefox` when it is not connected. The option
-`[modules.firefox-policy] credentialsd_helper = true` adds the Mozilla-signed `credentialsd-helper` add-on of
-`firefox-passkey-qr` (pinned release URL) so that installer's approval prompt does not appear.
-
-*What "Firefox authorizes automatically" means.* Two readings, both named:
-
-1. **Autofill on any login page**: the extension asks passwords-app for the credentials of the page's site
-   and fills them. This is what the modules deliver once the extension is active.
-2. **A Firefox Account / Sync login with no human**: not possible. It needs the account password and a 2FA
-   code, and storing them anywhere (a file, the profile, this repository) is exactly what this project
-   never does; the only copy is in passwords-app/the keyring, filled by the extension on a page the user
-   (or the module) opened.
-
-`firefox-autologin` (user) implements (1) for init: facts `firefox` on `PATH`; the extension **active** in a
-profile (`extensions.json` of the snap profile `~/snap/firefox/common/.mozilla/firefox/*/` or of the deb
-`~/.mozilla/firefox/*/`); and the marker `~/.local/state/ubuntu-tweaks/firefox-signin-opened` (written once).
-Install: needs a graphical session (`WAYLAND_DISPLAY` / `DISPLAY`), starts Firefox when the extension is not
-active yet, waits up to `wait_seconds` (default 90) for the policy to activate it, then opens
-`https://accounts.firefox.com/signin` (option `url`, https only) and writes the marker. If the extension does
-not become active in time it ends with `needs manual: ...` (apply `firefox-policy`, restart Firefox, answer the
-WebExtension-backend prompt, look at `about:policies`) and writes **no** marker. `status` always prints the
-line that says autofill, not stored credentials. Whether a credential for that site exists in passwords-app is
-not checked: the module never reads one.
-
-Orders (the init pipeline's `order` key, steps 5-7): `ssh-server` 50, `passwords-app` 60, `passwords-app-polkit` 61, `firefox` 70, `firefox-policy` 71, `firefox-autologin` 72, `firefox-passkey-qr` 73. An install only re-runs a third-party installer when something is missing (`passwords-app` skips `install.sh` while its commit stamp matches, so a pending iCloud sign-in does not restart the daemon on every apply). State of all service modules lives under `~/.local/state/ubuntu-tweaks/` whatever `XDG_STATE_HOME` says: a root script never sees the user's variables. The passkey installer's `check` is trusted only for exit 0 or 3 (anything else is a broken checker, exit 1), and the `status` fallback must recognise every required row.
-
-*Phone-QR passkeys* (`firefox-passkey-qr`, user level, **off by default**: it replaces the Firefox snap by
-Mozilla's deb, so a machine opts in with `[modules.firefox-passkey-qr] enabled = true` in its
-`machine.toml`). It runs the installer of <https://github.com/alex-mextner/firefox-passkey-qr> (checkout
-`~/dev/firefox-passkey-qr`, cloned when missing; options `checkout`, `repo`, `ha_url`, `remove_snap`). Read
-from its source: five steps, each asking first: (1) apt build/runtime packages, (2) Mozilla's Firefox deb
-with the apt pin and a copy of the snap profile, optionally removing the snap, (3) the Bluetooth step,
-(4) `credentialsd` and a patched `xdg-desktop-portal` built from source into `/usr/local`, (5) the
-native-messaging link and the Mozilla-signed `credentialsd-helper` add-on. **Step 3 is the installer's own
-logic**: a local adapter (`/sys/class/bluetooth/hci*`) or an existing virtual one → nothing to do; none but a
-reachable Home Assistant (`$HA_URL`, `homeassistant.local`, tailscale peers on :8123) → it installs
-`ha-ble-vhci` as a user service with `/dev/vhci` access; neither → it asks for a USB dongle. The module
-never decides this. Verified by running the real installer's `--dry-run --yes install` here: with the
-machine's `hci0` the step prints `local adapter(s) found: hci0 - nothing to do`; with an empty
-`PASSKEY_QR_BLUETOOTH_DIR` and `HA_URL` set it lists the bridge commands.
-
-- *Preview*: the module's `plan` is the installer's `--dry-run` output (every command, `sudo` marked, the
-  token never printed), indented under the action.
-- *Run*: only through the installer's own bypass: `passkey-qr --yes [--remove-snap] install`. The installer
-  had neither `--yes` nor a check, so they are added upstream
-  (<https://github.com/alex-mextner/firefox-passkey-qr/pull/2>, branch `feat/yes-check-plan`, not merged):
-  `--yes` never prompts, a missing token skips the bridge step, a running Firefox stops the Firefox step,
-  and **the snap is kept unless `--remove-snap`** (profile option `remove_snap`, default false). Until that
-  PR is merged and the checkout updated, the module reports `needs manual: run <installer> install
-  interactively` and the fact stays Missing; it never runs the installer without `--yes` and never fakes
-  success. The feature is detected from the installer's `--help`, not from a version number.
-- *Check*: the installer's `check` (exit 0/3: Firefox deb, a Bluetooth adapter, `credentialsd`, the
-  native-messaging manifest, apt packages); an installer without it is judged from its `status` rows.
-- *Secrets*: Home Assistant's long-lived token comes from the Secret Service (`purpose ha-token`) into the
-  installer's `HA_TOKEN` for that run only; the installer itself stores it in
-  `~/.config/ha-ble-vhci/token` (mode 600), which is outside every repository and profile, and its URL is the
-  non-secret option `ha_url`. The installer asks for `sudo` itself: run `apply --commit` in a terminal.
-- *Order*: after `firefox-autologin`; the snap profile (with the extension and the marker) is copied by the
-  installer, so nothing is opened twice.
-
-Real-root and real-session verification (not possible in tests): after `apply --commit` of the Firefox modules,
-`about:policies` lists the `ExtensionSettings` entry, `about:addons` shows *Passwords* as installed by the
-organization, a login page is filled, `ubuntu-tweak status --only firefox,firefox-policy,firefox-autologin`
-exits 0; the first start shows the WebExtension-backend prompt (answer *Allow*). For the passkey module: on a
-machine without Bluetooth and with Home Assistant, `bluetoothctl list` shows a virtual `hciN` and
-`webauthn.io` offers the phone/QR option.
-
 ### Install
 
 ```sh
@@ -1674,19 +1502,29 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   empty machine as a golden file (`tests/golden/init_empty_machine.txt`; regenerate with
   `UPDATE_GOLDEN=1` and review the diff); `doctor` reporting `planned`. Everything goes through
   `FakeProcess` and a fake root directory (`StepEnv.root`); nothing touches the real system.
+- Profile discovery and profile modules (`tests/test_identity.py`, `tests/test_profile_modules.py`,
+  `modules/dotfiles/tests/test_install.py`; no PyGObject needed): a fake `gh` (found, none, several, forks and
+  archived skipped, logged out, missing, offline, a listing as long as the limit), the cache (one hour, one
+  minute for an unreachable GitHub, a new gh account), checkouts of another repository refused, the clone
+  target and the profile directory rules, `--dotfiles-repo` / `--refresh`; a profile module discovered,
+  overriding an engine module of the same name, planned like any other and run only at `--commit`; the
+  `dotfiles` installer against a throwaway `HOME`, a local git repository and a stub `gh` executable.
+  `tests/test_no_identity.py` greps the engine tree for the author's identifiers and fails on any new hit
+  that `tests/identity_allowlist.txt` does not allow with a reason.
 
 ## Decisions
 
 - **Python, stdlib plus `python3-gi`**, not bash: the plan/preview and the typed dconf
-  diff are the core of the tool, and bash cannot compare GVariants. Not a `rig` plugin:
-  this repo is public, and its users have no reason to install a dev tool.
-- **The engine is `ubuntu-tweaks`, the profile is `.files/ubuntu`**: the CLI, the plan model
-  and the modules already live here; a second tool would duplicate them. Personal data goes
-  to the private repo only, so the public engine stays shareable.
+  diff are the core of the tool, and bash cannot compare GVariants. Not a plugin of a personal dev
+  tool: this repo is public, and its users have no reason to install one.
+- **The engine is `ubuntu-tweaks`, the profile is the `ubuntu/` directory of the user's dotfiles
+  repository**: the CLI, the plan model and the modules already live here; a second tool would duplicate
+  them. Personal data goes to the user's own repository only, so the public engine stays shareable and
+  names nobody (request 14).
 - **TOML manifests per module**, not one central file: a module is added or removed as
   one directory, and `tomllib` is in the stdlib.
 - **No lockfile**: drift is recomputed from the modules against the machine each time, as
-  in rig. The submodule commit recorded in git is the version lock.
+  other reconcilers do. The submodule commit recorded in git is the version lock.
 - **The repo's preset wins on `apply`** (enforce), the user's taste lives in the profile:
   otherwise every run would have to guess which side changed.
 - **Only the keys a bundle lists are enforced**: absent keys are never reset, so a

@@ -182,7 +182,7 @@ class SystemModulePlannerTests(TempDirCase):
 
     def test_root_false_runs_the_installer_directly_without_sudo_marker(self) -> None:
         write(
-            self.repo / "modules/passwords-app/module.toml",
+            self.repo / "modules/user-tool/module.toml",
             MANIFEST.format(enabled="true").replace('kind = "system"', 'kind = "system"\nroot = false'),
         )
 
@@ -196,11 +196,11 @@ class SystemModulePlannerTests(TempDirCase):
 
         (action,) = plan.actions
         self.assertFalse(action.needs_root)
-        self.assertEqual(action.describe(), "run passwords-app: modules/passwords-app/install.sh --now")
+        self.assertEqual(action.describe(), "run user-tool: modules/user-tool/install.sh --now")
         self.assertNotIn("[sudo]", plan.render())
         result = plan.execute(no_sudo=True)
         self.assertEqual(len(result.skipped), 0)
-        directory = self.repo / "modules/passwords-app"
+        directory = self.repo / "modules/user-tool"
         self.assertIn(([str(directory / "install.sh"), "--now"], directory, None, False), runner.calls)
 
     def test_module_options_reach_the_checker_and_the_installer_through_env_even_under_sudo(self) -> None:
@@ -226,7 +226,7 @@ class SystemModulePlannerTests(TempDirCase):
         self.assertEqual(runner.calls[0][0][0], str(self.repo / "modules/memguard/install.sh"))
 
     def test_installer_exit_10_is_a_manual_step_not_a_failure(self) -> None:
-        self.module("firefox")
+        self.module("browser-tool")
         runner = Recorder(check_exit=3, install_exit=10)
         plan = Plan.build(self.candidates(runner))
 
@@ -234,8 +234,8 @@ class SystemModulePlannerTests(TempDirCase):
 
         self.assertEqual(result.changed, 0)
         ((action, message),) = result.manual
-        self.assertEqual(action.scope, "firefox")
-        self.assertIn("firefox: the installer needs a manual step (exit 10", message)
+        self.assertEqual(action.scope, "browser-tool")
+        self.assertIn("browser-tool: the installer needs a manual step (exit 10", message)
         self.assertFalse(action.check())
 
     def test_preview_command_output_is_shown_under_the_action_and_never_fails_the_plan(self) -> None:

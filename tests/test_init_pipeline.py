@@ -37,17 +37,10 @@ PIPELINE_MODULES = (
     "git-gh",
     "brew",
     "ssh-server",
-    "passwords-app",
-    "passwords-app-polkit",
-    "firefox",
-    "firefox-policy",
-    "firefox-autologin",
-    "firefox-passkey-qr",
     "hyperdock",
-    "rig",
     "dotfiles",
 )
-OPTIONAL_MODULES = ("firefox-passkey-qr", "rig", "dotfiles")  # off by default, a machine opts in
+OPTIONAL_MODULES = ()  # nothing in the engine is off by default among the pipeline modules
 
 
 class ScriptedProcess(FakeProcess):
@@ -82,7 +75,7 @@ class EmptyMachine(TempDirCase):
 
         def overrides(env: StepEnv) -> StepEnv:
             return dataclasses.replace(
-                env, root=self.root, home=self.home, user="ultra", group="ultra", uid=os.getuid(), which=lambda _: None
+                env, root=self.root, home=self.home, user="alice", group="alice", uid=os.getuid(), which=lambda _: None
             )
 
         def build(ctx: Context, backend: FakeBackend) -> list[Action]:

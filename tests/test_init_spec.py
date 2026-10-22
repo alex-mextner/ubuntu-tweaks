@@ -26,9 +26,7 @@ class InitOrderTableTests(unittest.TestCase):
             {name: manifests[name].order for name in listed},
             "docs/specs/ubuntu-tweak-cli.md, Init pipeline order table, disagrees with modules/*/module.toml",
         )
-        pipeline = {
-            name for name, manifest in manifests.items() if manifest.order != 100 or name in {"rig", "dotfiles"}
-        }
+        pipeline = {name for name, manifest in manifests.items() if manifest.order != 100 or name == "dotfiles"}
         self.assertEqual(
             set(listed), pipeline, "a module has an init order but is not in the spec table (or vice versa)"
         )

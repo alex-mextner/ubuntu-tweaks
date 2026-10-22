@@ -28,6 +28,8 @@ Public API:
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -35,7 +37,8 @@ from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, 
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
 from ubuntu_tweaks.planners import build_actions, collect_warnings
-from ubuntu_tweaks.identity import Location, missing_lines
+from ubuntu_tweaks.identity import Location, locate, missing_lines
+from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import (
     GioBackend,
     SettingsBackend,
@@ -99,6 +102,16 @@ def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sud
         )
 
 
+def _arrived_profile(ctx: Context, installers_ran: bool, relocate: Callable[[], Location] | None) -> Profile | None:
+    """The profile this run created: when it was missing at the start and a system module ran (``dotfiles`` may
+    have just cloned the repository that holds it), look for it again; the plan built before the install knew
+    only the modules. ``None`` when nothing could have created it or it is still not there."""
+    if not installers_ran:
+        return None
+    where = relocate() if relocate is not None else locate(home=Path.home(), env=os.environ)
+    return dataclasses.replace(ctx.profile, root=where.root, location=where) if where.root.is_dir() else None
+
+
 def _manual_key(action: Action) -> tuple[str, str | None, str]:
     """Identity of an action across plan rebuilds: its ``key``, else its text (which may embed live state)."""
     return (action.kind, action.scope, action.key or action.describe())
@@ -112,6 +125,7 @@ def apply(
     extra_actions: Iterable[Action] = (),
     backend_factory: BackendFactory = open_backend,
     relogin_hint: bool = False,
+    relocate: Callable[[], Location] | None = None,
 ) -> int:
     extras = tuple(extra_actions)
     backend = backend_factory(ctx)
@@ -131,6 +145,7 @@ def apply(
     changed = 0
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
+    profile_missing = not ctx.profile.exists
     while True:
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:
@@ -139,8 +154,12 @@ def apply(
         result = stage.execute(no_sudo=no_sudo, on_start=announce)
         changed += result.changed
         manual.update({_manual_key(action): (action, message) for action, message in result.manual})
-        if not staged:
+        arrived = _arrived_profile(ctx, profile_missing and "system-module" in executed, relocate)
+        if not staged and arrived is None:
             break
+        if arrived is not None:  # the dotfiles module cloned the profile: the rest of the run applies it
+            ctx, profile_missing = dataclasses.replace(ctx, profile=arrived), False
+            print(f"profile: {tilde(arrived.root)} (cloned by this run)", flush=True)
         number += 1
         rebuilt = build_plan(ctx, backend_factory(ctx), extras)
         # a manual step reported in an earlier pass is not run again (its installer may have done work)

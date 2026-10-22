@@ -3,41 +3,30 @@ doctor:
   MISSING dconf [apt: dconf-cli] (settings)
   planned git [apt: git] (submodules, update) -> `init`/`apply` installs it (module base-tools)
   MISSING glib-compile-schemas [apt: libglib2.0-bin] (extension schemas)
-  MISSING python3-yaml [apt: python3-yaml] (module rig)
-init --commit would install: sudo apt-get install -y dconf-cli libglib2.0-bin python3-yaml
+init --commit would install: sudo apt-get install -y dconf-cli libglib2.0-bin
 apply:
 machine: home (overlay <tmp>/profile/machines/home)
 profile: <tmp>/profile
-Plan: 26 action(s) to run, 1 already satisfied, 6 need root
+Plan: 18 action(s) to run, 1 already satisfied, 4 need root
   1. [sudo] [package] apt: install curl, wget, ca-certificates, git, gnupg, openssh-client, zsh, build-essential, procps, file, zip, unzip, 7zip, xz-utils, bzip2, jq, libsecret-tools, wl-clipboard, xclip, xsel, gh (after apt-get update) [base-tools, clipboard, git-gh, zsh]
-  2. [sudo] [login-shell] chsh: set the login shell of ultra to /usr/bin/zsh (now unknown)
+  2. [sudo] [login-shell] chsh: set the login shell of alice to /usr/bin/zsh (now unknown)
   3. [shell-rc] create ~/.zprofile (brew shellenv, ~/.local/bin on PATH); only because it is absent
   4. [shell-rc] create ~/.zshrc (brew shellenv, ~/.local/bin on PATH); only because it is absent
   5. [gh-login] needs manual: gh auth login (the keychain CLI is not installed; store a token with `keychain set ubuntu-tweaks/gh-token`)
   6. [git-credential] gh auth setup-git --hostname github.com: git asks gh for github.com credentials
-  7. [sudo] [brew-prefix] create /home/linuxbrew/.linuxbrew owned by ultra:ultra (the one step of the Homebrew install that needs root)
+  7. [sudo] [brew-prefix] create /home/linuxbrew/.linuxbrew owned by alice:alice (the one step of the Homebrew install that needs root)
   8. [brew-install] brew: run the Homebrew installer non-interactively into /home/linuxbrew/.linuxbrew (downloaded from https://raw.githubusercontent.com/Homebrew/install/a2fe82ef3a9ec7a5c72a559c09676256d6f354f6/install.sh, refused unless sha256 is 5f333bbe53bc...)
   9. [post] brew: wire `brew shellenv` into ~/.bashrc (zsh gets it from ~/.zprofile, module zsh)
- 10. [post] brew: brew install uv and bun (what the passwords-app and Firefox modules run on) unless already on PATH
- 11. [submodule] init submodule gnome-extensions/hyperdock (git submodule update --init --recursive)
- 12. [compile-schemas] compile schemas in <tmp>/repo/gnome-extensions/hyperdock/schemas
- 13. [sudo] [system-module] run ssh-server: sudo -- modules/ssh-server/ssh-server install
- 14. [system-module] run passwords-app: modules/passwords-app/passwords-app install
- 15. [sudo] [system-module] run passwords-app-polkit: sudo -- modules/passwords-app-polkit/passwords-app-polkit install
- 16. [system-module] run firefox: modules/firefox/firefox install
- 17. [sudo] [system-module] run firefox-policy: sudo -- modules/firefox-policy/firefox-policy install
- 18. [system-module] run firefox-autologin: modules/firefox-autologin/firefox-autologin install
- 19. [system-module] run firefox-passkey-qr: modules/firefox-passkey-qr/firefox-passkey-qr install
-        would install firefox-passkey-qr
- 20. [system-module] run rig: modules/rig/install.sh
-        would install rig
- 21. [system-module] run dotfiles: modules/dotfiles/install.sh
+ 10. [submodule] init submodule gnome-extensions/hyperdock (git submodule update --init --recursive)
+ 11. [compile-schemas] compile schemas in <tmp>/repo/gnome-extensions/hyperdock/schemas
+ 12. [sudo] [system-module] run ssh-server: sudo -- modules/ssh-server/ssh-server install
+ 13. [system-module] run dotfiles: modules/dotfiles/install.sh
         would install dotfiles
- 22. [link] link hyperdock into ~/.local/share/gnome-shell/extensions/<uuid from metadata.json, known once the submodule is initialized> -> <tmp>/repo/gnome-extensions/hyperdock
- 23. [cli-link] link ~/.local/bin/ubuntu-tweak -> <tmp>/repo/bin/ubuntu-tweak
- 24. [link] link ~/.config/ubuntu-tweaks-demo/config.toml -> files/.config/ubuntu-tweaks-demo/config.toml
- 25. [enable] enable hyperdock (uuid known once the submodule is initialized)
- 26. [disable] disable ubuntu-dock@ubuntu.com (conflicts with module hyperdock)
+ 14. [link] link hyperdock into ~/.local/share/gnome-shell/extensions/<uuid from metadata.json, known once the submodule is initialized> -> <tmp>/repo/gnome-extensions/hyperdock
+ 15. [cli-link] link ~/.local/bin/ubuntu-tweak -> <tmp>/repo/bin/ubuntu-tweak
+ 16. [link] link ~/.config/ubuntu-tweaks-demo/config.toml -> files/.config/ubuntu-tweaks-demo/config.toml
+ 17. [enable] enable hyperdock (uuid known once the submodule is initialized)
+ 18. [disable] disable ubuntu-dock@ubuntu.com (conflicts with module hyperdock)
 Warnings:
   git: [git] name and email not set in profile.toml / machine.toml: git config user.name and user.email stays as it is
 Note: this plan installs extension code or schemas. Settings that depend on them are planned after those actions ran; `apply --commit` does that in the same invocation.

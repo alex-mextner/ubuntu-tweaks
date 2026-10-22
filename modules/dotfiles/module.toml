@@ -1,11 +1,11 @@
-description = "Optional (init step 10): a checkout of alex-mextner/.files at ~/.files when absent; the profile directory ~/.files/ubuntu lives inside it"
-enabled = false          # a machine opts in: [modules.dotfiles] enabled = true in machines/<host>/machine.toml
+description = "Init step 10: your dotfiles repository (found through gh: .files, dotfiles, .dotfiles, dot-files) cloned, with the ubuntu profile inside it; nothing to do when there is none"
+enabled = true           # a machine can opt out: [modules.dotfiles] enabled = false in machines/<host>/machine.toml
 order = 110
-manual = "a checkout that is behind with local changes, or diverged, is yours to resolve in ~/.files; a failed clone needs `gh auth login`"
+manual = "run `gh auth login`, or set [modules.dotfiles] repo / pass --dotfiles-repo OWNER/NAME; a checkout that is behind with local changes, or diverged, is yours to resolve in it"
 
 # User level: it only clones into $HOME and fast-forwards that checkout; it never writes a file of the
-# repository, links nothing and never touches the mac-era dotfiles (zsh, zplug, brew) in it.
-# Options: `[modules.dotfiles]` keys repo, dir (see install.sh).
+# repository, links nothing and never touches the rest of the repository (zsh, brew, ...).
+# Options: `[modules.dotfiles]` keys repo, dir, path (see install.sh and the spec, *Profile discovery*).
 [source]
 kind = "system"
 root = false
