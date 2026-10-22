@@ -37,16 +37,25 @@ PIPELINE_MODULES = (
     "git-gh",
     "brew",
     "ssh-server",
+    "passwords-app",
+    "passwords-app-polkit",
+    "firefox",
+    "firefox-policy",
+    "firefox-autologin",
+    "firefox-passkey-qr",
     "hyperdock",
+    "rig",
     "dotfiles",
 )
-OPTIONAL_MODULES = ()  # nothing in the engine is off by default among the pipeline modules
+OPTIONAL_MODULES = ("firefox-passkey-qr", "rig")  # off by default, a machine opts in (dotfiles is on)
 
 
 class ScriptedProcess(FakeProcess):
     """Module installers on an empty machine: every ``check`` reports drift (3), every ``preview`` one line."""
 
     def query(self, argv: Sequence[str], *, timeout: float = 60.0, cwd: Path | None = None) -> CommandResult:
+        if argv[0] == "env":  # the planner hands module options through `env UBUNTU_TWEAK_MODULE_CONFIG=... <script>`
+            argv = [part for part in argv[1:] if not part.startswith("UBUNTU_TWEAK_MODULE_CONFIG=")]
         if "/repo/modules/" not in argv[0]:
             return super().query(argv, timeout=timeout, cwd=cwd)
         if argv[-1] in ("check", "--check"):

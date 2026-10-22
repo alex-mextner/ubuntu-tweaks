@@ -44,9 +44,11 @@ Public API:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -69,7 +71,7 @@ FAILURE_TTL_SECONDS = 60
 CACHE_FILE = "dotfiles.json"
 LIST_LIMIT = 300
 GH_TIMEOUT_SECONDS = 15
-GH_LIST_TIMEOUT_SECONDS = 120
+GH_LIST_TIMEOUT_SECONDS = GH_TIMEOUT_SECONDS  # a module check is killed at 60 s: discovery must fit inside it
 REPO_FIELDS = "name,nameWithOwner,isPrivate,isArchived,isFork,defaultBranchRef"
 _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
@@ -315,11 +317,13 @@ def _gh_account(home: Path, env: Mapping[str, str]) -> str:
     config = env.get("GH_CONFIG_DIR") or (
         f"{env['XDG_CONFIG_HOME']}/gh" if env.get("XDG_CONFIG_HOME") else f"{home}/.config/gh"
     )
+    token = env.get("GH_TOKEN") or env.get("GITHUB_TOKEN") or env.get("GH_ENTERPRISE_TOKEN") or ""
+    token_part = f":{hashlib.sha256(token.encode()).hexdigest()[:16]}" if token else ""
     try:
         info = (Path(config) / "hosts.yml").stat()
     except OSError:
-        return "no-hosts-file"
-    return f"{info.st_mtime_ns}:{info.st_size}"
+        return f"no-hosts-file{token_part}"
+    return f"{info.st_mtime_ns}:{info.st_size}{token_part}"
 
 
 def _cached(state: Mapping[str, object], now: float, account: str) -> Discovery | None:
@@ -565,17 +569,35 @@ def resolve_for_module(home: Path, env: Mapping[str, str], process: Process | No
         profile_path=options.get("path"),
         verify_origin=False,
     )
-    repo = location.repo
+    repo, checkout = location.repo, location.checkout
+    if checkout is None and options.get("dir") and expand_dir(home, options["dir"]).is_dir():
+        checkout = expand_dir(home, options["dir"])  # a configured checkout without a profile (yet) is still its dir
     return {
         "repo": repo.spec if repo else None,
         "is_slug": repo.is_slug if repo else False,
-        "dir": str(location.checkout) if location.checkout else None,
+        "dir": str(checkout) if checkout else None,
         "profile_dir": str(location.root) if location.root.is_dir() else None,
         "source": location.source.value if location.source else None,
         "login": location.login,
         "notes": list(location.notes),
         "manual": location.manual,
     }
+
+
+def shell_assignments(answer: Mapping[str, object], env: Mapping[str, str]) -> str:
+    """``resolve`` as shell assignments (every value quoted) for ``modules/dotfiles/install.sh``."""
+    notes = "\n".join(f"note: {note}" for note in answer["notes"])  # type: ignore[attr-defined]
+    values = {
+        "repo": answer["repo"] or "",
+        "is_slug": "True" if answer["is_slug"] else "False",
+        "dir": answer["dir"] or "",
+        "source": answer["source"] or "",
+        "login": answer["login"] or "",
+        "blocked": answer["manual"] or "",
+        "profile_path": _module_options(env).get("path", ""),
+        "notes": notes,
+    }
+    return "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in values.items())
 
 
 def _remember_command(home: Path, env: Mapping[str, str], args: list[str]) -> int:
@@ -598,6 +620,9 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     try:
         if args[:1] == ["resolve"] and len(args) == 1:
             print(json.dumps(resolve_for_module(home, environment)))
+            return 0
+        if args == ["resolve", "--shell"]:
+            print(shell_assignments(resolve_for_module(home, environment), environment))
             return 0
         if args[:1] == ["same-repo"] and len(args) == 3:
             return 0 if same_repo(args[1], args[2]) else 1

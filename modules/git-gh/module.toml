@@ -19,8 +19,8 @@ gh = "gh"
 [[step]]
 name = "git-identity"
 
-# The token comes only from the keychain item `[git] token_ref` (default ubuntu-tweaks/gh-token), at run time.
-# Without one the plan says `needs manual: gh auth login` and `status` lists it as Missing.
+# The token comes only from the keychain item named by `[git] token_ref`, at run time; there is no default item.
+# Without `token_ref` the plan says `needs manual: gh auth login` and `status` lists it as Missing.
 [[step]]
 name = "gh-login"
 

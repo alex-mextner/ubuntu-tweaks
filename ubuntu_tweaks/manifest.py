@@ -13,11 +13,13 @@ Public API:
   ``"submodule"``, ``"local"``, ``"builtin"``, ``"system"``). ``ego`` is reserved and rejected
   with ``not supported yet (#20)``.
 - ``SettingsMode``: ``ENFORCE`` (default) or ``SEED``.
-- ``Source(kind, path, install, check, root, preview)``: ``path`` is set for submodule/local (relative to
+- ``Source(kind, path, install, check, root, preview, repo)``: ``path`` is set for submodule/local (relative to
   the repo root); ``install``, ``check`` and ``preview`` (optional read-only plan command) are argv
   tuples, set for ``system`` only, whose ``argv[0]`` is a path inside the module directory: a runner
   must execute ``manifest.directory / argv[0]`` with the rest as arguments, never a ``$PATH`` lookup;
-  ``root`` (default True) says whether the installer needs sudo.
+  ``root`` (default True) says whether the installer needs sudo; ``repo`` (optional, system only) is the
+  default git URL of the tool the module fetches: the planner hands it to the installer as the option
+  ``repo`` unless ``[modules.<name>] repo`` in the profile sets one.
 - ``ExtensionSpec(conflicts, retire)``, ``SettingsFile(file, schema, mode)``,
   ``Seed(key, provider)``, ``Migration(from_uuid, from_path)``, ``Deps(apt)``.
 - ``Install(apt, provides)``, ``Step(name, args)`` and ``Post(name, run, check, needs_root, after,
@@ -86,6 +88,7 @@ class Source:
     check: tuple[str, ...] = ()
     root: bool = True
     preview: tuple[str, ...] = ()
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -279,13 +282,14 @@ def _parse_source(reader: _Reader) -> Source:
         _relative_path(reader, path, "path")
         return Source(kind, path=path)
     if kind is SourceKind.SYSTEM:
-        reader.only("kind", "install", "check", "root", "preview")
+        reader.only("kind", "install", "check", "root", "preview", "repo")
         return Source(
             kind,
             install=_command(reader, "install"),
             check=_command(reader, "check"),
             root=reader.boolean("root", True),
             preview=_command(reader, "preview") if "preview" in reader.table else (),
+            repo=reader.string("repo"),
         )
     reader.only("kind")
     return Source(kind)

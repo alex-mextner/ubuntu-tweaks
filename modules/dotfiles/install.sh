@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154  # eval of the resolver's answer defines repo, is_slug, dir, source, login, blocked, ...
 # dotfiles module installer (user level, never root): puts a checkout of the user's dotfiles repository on
 # disk so the ubuntu profile inside it exists. Which repository is not written down anywhere: it is found
 # through gh (ubuntu_tweaks/identity.py: the user's own `.files`, `dotfiles`, `.dotfiles` or `dot-files`).
@@ -40,24 +41,11 @@ engine=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ident() { PYTHONPATH="$engine" python3 -B -m ubuntu_tweaks.identity "$@"; }
 manual() { echo "needs manual: $1" >&2; exit 10; }
 
-resolved=$(ident resolve) || exit $?
-field() { # field KEY: one value of the resolver's JSON answer ("" for null)
-  python3 -B -c 'import json, sys
-value = json.loads(sys.argv[1]).get(sys.argv[2])
-print("" if value is None else value)' "$resolved" "$1"
-}
-repo=$(field repo)
-is_slug=$(field is_slug)
-dir=$(field dir)
-source=$(field source)
-login=$(field login)
-blocked=$(field manual)
-profile_path=$(python3 -B -c 'import json, os
-print(json.loads(os.environ.get("UBUNTU_TWEAK_MODULE_CONFIG") or "{}").get("path", ""))')
-
-python3 -B -c 'import json, sys
-for note in json.loads(sys.argv[1]).get("notes", []):
-    print("note: " + note)' "$resolved"
+# one interpreter start for every fact: shell assignments repo, is_slug, dir, source, login, blocked, profile_path, notes
+resolved=$(ident resolve --shell) || exit $?
+# shellcheck disable=SC2154  # eval defines repo, is_slug, dir, source, login, blocked, profile_path and notes
+eval "$resolved"
+[ -z "$notes" ] || printf '%s\n' "$notes"
 
 if [ -n "$blocked" ] && [ -z "$dir" ]; then # gh is missing or not logged in, and no checkout is on disk
   case "$mode" in
@@ -108,7 +96,7 @@ report_profile() {
 
 if [ "$mode" = check ]; then
   [ -z "$blocked" ] || { echo "drift: $blocked"; exit 3; }
-  [ -e "$dir" ] || { echo "drift: $dir is missing ($(clone_command))"; exit 3; }
+  [ -e "$dir" ] || { echo "drift: $dir is missing (the checkout of $repo)"; exit 3; }
   is_repo || { echo "drift: $dir is not a git checkout"; exit 3; }
   if ! origin_ok; then
     echo "drift: $dir has origin $(origin_url), not $repo (git -C $dir remote set-url origin $repo, or fix the repo option)"

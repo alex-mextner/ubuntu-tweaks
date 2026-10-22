@@ -267,13 +267,16 @@ class GitTests(BaseCase):
         '[[step]]\nname = "gh-login"\n[[step]]\nname = "git-credential-helper"\n'
     )
     STATUS = ("gh", "auth", "status", "--hostname", "github.com")
-    EXISTS = ("keychain", "exists", "--no-prompt", "--caller", "ubuntu-tweaks", "ubuntu-tweaks/gh-token")
+    EXISTS = ("keychain", "exists", "--no-prompt", "--caller", "ubuntu-tweaks", "example/gh-token")
 
     def setUp(self) -> None:
         super().setUp()
         self.module("git-gh", self.MODULE)
         self.present_commands = {"gh", "git"}
-        write(self.profile.profile_toml, '[git]\nname = "Ada"\nemail = "ada@example.org"\n')
+        write(
+            self.profile.profile_toml,
+            '[git]\nname = "Ada"\nemail = "ada@example.org"\ntoken_ref = "example/gh-token"\n',
+        )
 
     def test_without_gh_the_follow_up_steps_are_manual_not_a_crash(self) -> None:
         self.present_commands = set()
@@ -340,7 +343,7 @@ class GitTests(BaseCase):
         (action,) = [a for a in self.plan(runner).actions if a.kind == "gh-login"]
         self.assertEqual(
             action.describe(),
-            "gh: log in to github.com with the token of keychain item ubuntu-tweaks/gh-token (read at run time, never stored)",
+            "gh: log in to github.com with the token of keychain item example/gh-token (read at run time, never stored)",
         )
         executed: list[tuple[str, ...]] = []
         runner._effects = lambda argv, _input: executed.append(argv)  # noqa: SLF001
@@ -355,7 +358,7 @@ class GitTests(BaseCase):
                     "--caller",
                     "ubuntu-tweaks",
                     "--stdin",
-                    "ubuntu-tweaks/gh-token",
+                    "example/gh-token",
                     "--",
                     "gh",
                     "auth",
@@ -370,7 +373,7 @@ class GitTests(BaseCase):
     def test_no_token_is_a_manual_step_that_never_prompts_and_stays_missing(self) -> None:
         for code, reason in (
             (127, "the keychain CLI is not installed"),
-            (4, "keychain item ubuntu-tweaks/gh-token does not exist"),
+            (4, "keychain item example/gh-token does not exist"),
             (9, "the keyring is locked"),
         ):
             with self.subTest(code=code):
@@ -382,6 +385,21 @@ class GitTests(BaseCase):
                     action.run()
                 self.assertEqual(runner.executed, [])
                 self.assertFalse(action.check())
+
+    def test_without_a_token_ref_the_login_is_manual_and_no_keychain_item_is_guessed(self) -> None:
+        write(self.profile.profile_toml, '[git]\nname = "Ada"\nemail = "ada@example.org"\n')
+        runner = FakeProcess()
+        (action,) = [a for a in self.plan(runner).actions if a.kind == "gh-login"]
+        self.assertEqual(
+            action.describe(),
+            "needs manual: gh auth login (no [git] token_ref set in profile.toml; run `gh auth login`, "
+            "or set `[git] token_ref` to a keychain item holding a token)",
+        )
+        with self.assertRaisesRegex(ManualStepRequired, r"no \[git\] token_ref set"):
+            action.run()
+        self.assertEqual(runner.executed, [])
+        self.assertFalse(action.check())
+        self.assertFalse([q for q in runner.queries if q[0] == "keychain"])
 
     def test_a_logged_in_gh_and_a_configured_helper_are_satisfied(self) -> None:
         runner = FakeProcess(

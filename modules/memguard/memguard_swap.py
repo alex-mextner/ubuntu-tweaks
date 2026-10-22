@@ -2,8 +2,8 @@
 
 One definition shared by `swap-drain` (the root oneshot that drains, started by
 swap-drain.timer or the `memguard` CLI) and the `memguard` CLI, so thresholds and the
-state-file contract cannot drift apart. Readers of the state file (the heavy-op gate,
-rig-cli#693; the memguard daemon later) use `active_drain` and `effective_swap_kb`. Stdlib only.
+state-file contract cannot drift apart. Readers of the state file (a heavy-operation gate;
+the memguard daemon later) use `active_drain` and `effective_swap_kb`. Stdlib only.
 
 State file contract (`/run/memguard/swap-drain.json`, written atomically by the lock holder):
   state                "draining" while a swapoff runs, otherwise "idle"
@@ -18,6 +18,7 @@ State file contract (`/run/memguard/swap-drain.json`, written atomically by the 
   last_drain_finished  epoch s of the latest drain that ran (done or aborted): the cooldown
 A reader trusts "draining" only when `active_drain()` agrees (pid alive, updated recently).
 """
+
 import errno
 import fcntl
 import json
@@ -27,8 +28,8 @@ import time
 import tomllib
 from dataclasses import dataclass, field
 
-MB_KB = 1024              # kB per MiB
-GB_KB = 1024 * 1024       # kB per GiB
+MB_KB = 1024  # kB per MiB
+GB_KB = 1024 * 1024  # kB per GiB
 
 CONFIG_PATH = "/etc/memguard/memguard.toml"
 STATE_DIR = "/run/memguard"
@@ -37,31 +38,31 @@ STATE_DIR = "/run/memguard"
 # every drain.
 LOCK_NAME = "swap-drain.lock"
 STATE_NAME = "swap-drain.json"
-STALE_S = 30              # a "draining" state not refreshed for this long is a dead drain
+STALE_S = 30  # a "draining" state not refreshed for this long is a dead drain
 
 # Every [swap] key with its default; memguard.toml documents the same values (a test keeps
 # the two equal).
 DEFAULTS = {
     # drain conditions (all must hold)
-    "drain_min_used_gb": 4.0,        # drain when SwapUsed >= this ...
-    "drain_below_free_pct": 50.0,    # ... or SwapFree below this % of SwapTotal
-    "drain_headroom_gb": 8.0,        # MemAvailable - SwapUsed(device) must stay >= the larger of
-    "drain_headroom_pct": 20.0,      # these two (GB, % of MemTotal)
-    "psi_some_avg60_max": 5.0,       # /proc/pressure/memory some avg60 must be below
-    "psi_full_avg10_max": 1.0,       # ... and full avg10 below
-    "fall_gb_per_min_max": 1.0,      # MemAvailable must not be falling faster than this
-    "fall_window_s": 15,             # swap-drain samples MemAvailable this long before deciding
-    "drain_cooldown_min": 20,        # since the last drain finished (done or aborted)
-    "heavy_locks": ["/tmp/3d-cli-heavy.lock"],   # shared non-blocking flock, held for the drain
-    "heavy_gate": "auto",            # heavy_op_memory_gate.py for the live-runner scan; "auto" =
-    "heavy_hook": "~/.omp/agent/hooks/heavy-op-memory-gate.pre-bash.json",  # its "cmd"; "" = off
-    "heavy_max_live": 0,             # skip at this many live heavy runners; 0 = the gate's limit
-    "user": "ultra",                 # desktop user: runs the heavy scan, owns the polkit rule
+    "drain_min_used_gb": 4.0,  # drain when SwapUsed >= this ...
+    "drain_below_free_pct": 50.0,  # ... or SwapFree below this % of SwapTotal
+    "drain_headroom_gb": 8.0,  # MemAvailable - SwapUsed(device) must stay >= the larger of
+    "drain_headroom_pct": 20.0,  # these two (GB, % of MemTotal)
+    "psi_some_avg60_max": 5.0,  # /proc/pressure/memory some avg60 must be below
+    "psi_full_avg10_max": 1.0,  # ... and full avg10 below
+    "fall_gb_per_min_max": 1.0,  # MemAvailable must not be falling faster than this
+    "fall_window_s": 15,  # swap-drain samples MemAvailable this long before deciding
+    "drain_cooldown_min": 20,  # since the last drain finished (done or aborted)
+    "heavy_locks": [],  # shared non-blocking flock, held for the drain
+    "heavy_gate": "",  # heavy-op gate script for the live-runner scan; "auto" = the "cmd" of
+    "heavy_hook": "",  # this JSON file; "" = scan off
+    "heavy_max_live": 0,  # skip at this many live heavy runners; 0 = the gate's limit
+    "user": "",  # desktop user: runs the heavy scan, owns the polkit rule; install.sh fills it in
     # watchdog: SIGTERM to swapoff when any of these trips
-    "abort_avail_gb": 6.0,           # MemAvailable below the larger of these two
+    "abort_avail_gb": 6.0,  # MemAvailable below the larger of these two
     "abort_avail_pct": 12.0,
     "abort_psi_full_avg10": 5.0,
-    "abort_after_min": 15,           # a drain running longer than this is aborted
+    "abort_after_min": 15,  # a drain running longer than this is aborted
 }
 
 
@@ -111,7 +112,7 @@ class Snapshot:
     avail_kb: int
     swap_total_kb: int
     swap_free_kb: int
-    psi: dict = field(default_factory=dict)     # {"some": {"avg10":..}, "full": {...}}
+    psi: dict = field(default_factory=dict)  # {"some": {"avg10":..}, "full": {...}}
     devices: list = field(default_factory=list)
 
     @property
@@ -169,8 +170,14 @@ class Sources:
             psi = parse_psi(read_text(self.psi))
         except OSError:
             psi = {}
-        return Snapshot(mi.get("MemTotal", 0), mi.get("MemAvailable", 0), mi.get("SwapTotal", 0),
-                        mi.get("SwapFree", 0), psi, parse_swaps(read_text(self.swaps)))
+        return Snapshot(
+            mi.get("MemTotal", 0),
+            mi.get("MemAvailable", 0),
+            mi.get("SwapTotal", 0),
+            mi.get("SwapFree", 0),
+            psi,
+            parse_swaps(read_text(self.swaps)),
+        )
 
 
 # ----------------------------------------------------------------------------- decision
@@ -188,8 +195,10 @@ def mb(kb):
 
 def describe(snap):
     free_pct = snap.swap_free_kb * 100 / snap.swap_total_kb if snap.swap_total_kb else 100.0
-    return (f"swap used {mb(snap.swap_used_kb)} free {free_pct:.0f}%, avail {mb(snap.avail_kb)}, "
-            f"psi some60 {snap.psi_val('some', 'avg60'):.1f} full10 {snap.psi_val('full', 'avg10'):.1f}")
+    return (
+        f"swap used {mb(snap.swap_used_kb)} free {free_pct:.0f}%, avail {mb(snap.avail_kb)}, "
+        f"psi some60 {snap.psi_val('some', 'avg60'):.1f} full10 {snap.psi_val('full', 'avg10'):.1f}"
+    )
 
 
 def drainable(snap, cfg):
@@ -197,23 +206,31 @@ def drainable(snap, cfg):
     used = snap.swap_used_kb
     free_pct = snap.swap_free_kb * 100 / snap.swap_total_kb if snap.swap_total_kb else 100.0
     if used < cfg["drain_min_used_gb"] * GB_KB and free_pct >= cfg["drain_below_free_pct"]:
-        return None, ("min_used", f"SwapUsed {mb(used)} < {cfg['drain_min_used_gb']:g}G and SwapFree "
-                                  f"{free_pct:.0f}% >= {cfg['drain_below_free_pct']:g}%")
+        return None, (
+            "min_used",
+            f"SwapUsed {mb(used)} < {cfg['drain_min_used_gb']:g}G and SwapFree "
+            f"{free_pct:.0f}% >= {cfg['drain_below_free_pct']:g}%",
+        )
     need = headroom_kb(cfg, snap.mem_total_kb)
     devices = sorted((d for d in snap.devices if d.used_kb > 0), key=lambda d: d.used_kb, reverse=True)
     fits = [d for d in devices if snap.avail_kb - d.used_kb >= need]
     if not fits:
         biggest = devices[0].used_kb if devices else used
-        return None, ("headroom", f"avail {mb(snap.avail_kb)} - swap {mb(biggest)} = "
-                                  f"{mb(snap.avail_kb - biggest)} < headroom {mb(need)}")
+        return None, (
+            "headroom",
+            f"avail {mb(snap.avail_kb)} - swap {mb(biggest)} = {mb(snap.avail_kb - biggest)} < headroom {mb(need)}",
+        )
     return fits, None
 
 
 def check_pressure(snap, cfg, fall_gb_per_min):
     some60, full10 = snap.psi_val("some", "avg60"), snap.psi_val("full", "avg10")
     if some60 >= cfg["psi_some_avg60_max"] or full10 >= cfg["psi_full_avg10_max"]:
-        return ("psi", f"PSI some avg60 {some60:.1f} (max {cfg['psi_some_avg60_max']:g}), "
-                       f"full avg10 {full10:.1f} (max {cfg['psi_full_avg10_max']:g})")
+        return (
+            "psi",
+            f"PSI some avg60 {some60:.1f} (max {cfg['psi_some_avg60_max']:g}), "
+            f"full avg10 {full10:.1f} (max {cfg['psi_full_avg10_max']:g})",
+        )
     if fall_gb_per_min > cfg["fall_gb_per_min_max"]:
         return ("fall", f"MemAvailable falling {fall_gb_per_min:.1f} G/min > {cfg['fall_gb_per_min_max']:g}")
     return None
@@ -222,8 +239,7 @@ def check_pressure(snap, cfg, fall_gb_per_min):
 def check_cooldown(state, cfg, now):
     last = (state or {}).get("last_drain_finished")
     if last is not None and now - last < cfg["drain_cooldown_min"] * 60:
-        return ("cooldown", f"last drain finished {(now - last) / 60:.0f} min ago "
-                            f"< {cfg['drain_cooldown_min']:g} min")
+        return ("cooldown", f"last drain finished {(now - last) / 60:.0f} min ago < {cfg['drain_cooldown_min']:g} min")
     return None
 
 

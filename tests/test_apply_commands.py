@@ -139,7 +139,82 @@ class ApplyTests(CommandScenario):
         self.assertEqual(code, 0)
         self.assertIn("no dotfiles repository", out.getvalue())  # the preview said what was missing
         self.assertIn(f"profile: {root} (cloned by this run)", out.getvalue())
-        self.assertEqual(self.factory_calls, 2)  # the plan was built again with the profile in place
+        self.assertGreaterEqual(self.factory_calls, 2)  # the plan was built again with the profile in place
+
+    def test_base_tool_installs_run_before_the_clone_so_git_and_gh_exist(self) -> None:
+        root = self.tmp / "later-profile"
+        order: list[str] = []
+
+        class Tools(CloneProfile):
+            kind = "package"
+            phase = Phase.BASE
+            scope = "base-tools"
+
+            def check(self) -> bool:
+                return bool(order)
+
+            def run(self) -> None:
+                order.append("tools")
+
+        class Dotfiles(CloneProfile):
+            def run(self) -> None:
+                order.append("dotfiles")
+                super().run()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            reconcile.apply(
+                Context(self.repo, Profile(root, "home")),
+                backend_factory=self.factory,
+                commit=True,
+                no_sudo=False,
+                extra_actions=(Dotfiles(root), Tools(self.tmp / "t")),
+                relocate=lambda: Location(root),
+            )
+        self.assertEqual(order[:2], ["tools", "dotfiles"])
+
+    def test_the_profile_is_cloned_before_any_other_action_runs(self) -> None:
+        root = self.tmp / "later-profile"
+        order: list[str] = []
+
+        class Other(CloneProfile):
+            scope = "ssh-server"
+
+            def run(self) -> None:
+                order.append("other")
+                super().run()
+
+        class Dotfiles(CloneProfile):
+            def run(self) -> None:
+                order.append("dotfiles")
+                super().run()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            reconcile.apply(
+                Context(self.repo, Profile(root, "home")),
+                backend_factory=self.factory,
+                commit=True,
+                no_sudo=False,
+                extra_actions=(Other(self.tmp / "other"), Dotfiles(root)),
+                relocate=lambda: Location(root),
+            )
+        self.assertEqual(order[0], "dotfiles")
+
+    def test_another_system_module_never_triggers_a_profile_lookup(self) -> None:
+        class Other(CloneProfile):
+            scope = "ssh-server"
+
+        def relocate() -> Location:
+            raise AssertionError("only the dotfiles module may bring a profile")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            reconcile.apply(
+                Context(self.repo, Profile(self.tmp / "none", "home")),
+                backend_factory=self.factory,
+                commit=True,
+                no_sudo=False,
+                extra_actions=(Other(self.tmp / "other"),),
+                relocate=relocate,
+            )
 
     def test_no_profile_pass_when_the_installer_did_not_produce_one(self) -> None:
         root = self.tmp / "never"

@@ -63,9 +63,13 @@ def heavy_gate_path(cfg):
     gate = cfg["heavy_gate"]
     if not gate:
         return None
+    if not cfg["user"]:
+        raise ValueError("memguard.toml: user is not set (re-run install.sh under sudo)")
     home = user_home(cfg["user"])
     if gate != "auto":
         return expand_home(gate, home)
+    if not cfg["heavy_hook"]:
+        raise ValueError('heavy_gate = "auto" needs heavy_hook')
     with open(expand_home(cfg["heavy_hook"], home)) as f:
         return json.load(f)["cmd"]
 

@@ -102,12 +102,20 @@ def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sud
         )
 
 
-def _arrived_profile(ctx: Context, installers_ran: bool, relocate: Callable[[], Location] | None) -> Profile | None:
-    """The profile this run created: when it was missing at the start and a system module ran (``dotfiles`` may
-    have just cloned the repository that holds it), look for it again; the plan built before the install knew
-    only the modules. ``None`` when nothing could have created it or it is still not there."""
-    if not installers_ran:
-        return None
+DOTFILES_MODULE = "dotfiles"
+
+
+def _profile_acquisition(ctx: Context, plan: Plan) -> tuple[Action, ...]:
+    """What to run first when the profile is missing and this plan would clone it: the BASE-phase tool installs
+    (``git`` and ``gh`` come from there), then the dotfiles module's action, and nothing else."""
+    if ctx.profile.exists:
+        return ()
+    clone = tuple(a for a in plan.actions if a.kind == "system-module" and a.scope == DOTFILES_MODULE)
+    return (*(a for a in plan.actions if a.phase == Phase.BASE), *clone) if clone else ()
+
+
+def _arrived_profile(ctx: Context, relocate: Callable[[], Location] | None) -> Profile | None:
+    """The profile once the dotfiles module ran: ``None`` while it is still not there."""
     where = relocate() if relocate is not None else locate(home=Path.home(), env=os.environ)
     return dataclasses.replace(ctx.profile, root=where.root, location=where) if where.root.is_dir() else None
 
@@ -145,7 +153,19 @@ def apply(
     changed = 0
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
-    profile_missing = not ctx.profile.exists
+    acquire = _profile_acquisition(ctx, plan)
+    if acquire:
+        # the profile decides which modules are on (a profile may switch ssh-server off): clone it first, alone
+        first = Plan(acquire, 0).execute(no_sudo=no_sudo, on_start=announce)
+        changed += first.changed
+        manual.update({_manual_key(action): (action, message) for action, message in first.manual})
+        arrived = _arrived_profile(ctx, relocate)
+        if arrived is not None:
+            ctx = dataclasses.replace(ctx, profile=arrived)
+            print(f"profile: {tilde(arrived.root)} (cloned by this run)", flush=True)
+        rebuilt = build_plan(ctx, backend_factory(ctx), extras)
+        plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
+    result = ExecutionResult(0, (), ())
     while True:
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:
@@ -154,12 +174,8 @@ def apply(
         result = stage.execute(no_sudo=no_sudo, on_start=announce)
         changed += result.changed
         manual.update({_manual_key(action): (action, message) for action, message in result.manual})
-        arrived = _arrived_profile(ctx, profile_missing and "system-module" in executed, relocate)
-        if not staged and arrived is None:
+        if not staged:
             break
-        if arrived is not None:  # the dotfiles module cloned the profile: the rest of the run applies it
-            ctx, profile_missing = dataclasses.replace(ctx, profile=arrived), False
-            print(f"profile: {tilde(arrived.root)} (cloned by this run)", flush=True)
         number += 1
         rebuilt = build_plan(ctx, backend_factory(ctx), extras)
         # a manual step reported in an earlier pass is not run again (its installer may have done work)

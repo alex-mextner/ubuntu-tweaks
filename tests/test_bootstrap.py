@@ -18,7 +18,7 @@ class BootstrapTests(TempDirCase):
         super().setUp()
         self.bin = self.tmp / "bin"
         self.log = self.tmp / "calls.log"
-        self.checkout = self.tmp / "home/xp/ubuntu-tweaks"
+        self.checkout = self.tmp / "home/alice/ubuntu-tweaks"
         self.tool("id", "echo 1000")
         self.tool("sudo", 'echo "sudo $*" >> "$LOG"')
         # `git clone` creates the checkout with a launcher that logs its argv, like bin/ubuntu-tweak would
@@ -40,7 +40,7 @@ class BootstrapTests(TempDirCase):
     def run_script(self, *args: str) -> list[str]:
         env = {
             "PATH": str(self.bin),
-            "HOME": str(self.tmp / "home"),
+            "HOME": str(self.tmp / "home/alice"),
             "UBUNTU_TWEAKS_DIR": str(self.checkout),
             "UBUNTU_TWEAKS_REPO": REPO,
             "LOG": str(self.log),

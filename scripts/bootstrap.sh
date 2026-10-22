@@ -8,7 +8,7 @@
 set -eu
 
 REPO=${UBUNTU_TWEAKS_REPO:-https://github.com/alex-mextner/ubuntu-tweaks}
-DIR=${UBUNTU_TWEAKS_DIR:-$HOME/xp/ubuntu-tweaks}
+DIR=${UBUNTU_TWEAKS_DIR:-$HOME/ubuntu-tweaks}
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=; else SUDO=sudo; fi
 

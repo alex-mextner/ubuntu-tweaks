@@ -286,7 +286,7 @@ def build(
                         manifest,
                         ctx.repo_root,
                         process=runner,
-                        module_config=module_config_json(config, manifest.name),
+                        module_config=module_config_json(config, manifest.name, manifest.source.repo),
                     )
                 )
             )

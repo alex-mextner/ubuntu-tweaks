@@ -1,0 +1,31 @@
+# One line per file that may keep a hit of the author's identifiers: `path | reason`.
+# tests/test_no_identity.py fails on any other hit and on an entry that no longer has one.
+#
+# Kinds of reason: "project reference" = the project's own repository or an upstream it bundles;
+# "tool reference" = the repository or identifier of a tool the project author publishes and a module integrates
+# (the URL is a default in that module's module.toml, overridable with [modules.<name>] repo, and a user can
+# switch the module off); "verbatim request" = the user's own words recorded in a spec.
+
+.gitmodules | project reference: URL of the bundled hyperdock extension (a submodule)
+README.md | project reference: the project's own repository URL and the bundled hyperdock extension
+docs/specs/mac-dock.md | project reference: issue links, the hyperdock repository, verbatim requests
+docs/specs/ubuntu-tweak-cli.md | project reference: the project's issue links; tool reference: author-published tools; verbatim requests
+gnome-extensions/english-in-overview@ultra/metadata.json | live extension uuid, kept on purpose: renaming it needs a migration (ticket for a neutral uuid)
+modules/english-in-overview/module.toml | path of the extension directory named by its live uuid (see metadata.json)
+modules/firefox-autologin/firefox-autologin | tool reference: the passwords-app extension id
+modules/firefox-passkey-qr/firefox-passkey-qr | tool reference: the firefox-passkey-qr upstream pull request cited in a message
+modules/firefox-passkey-qr/module.toml | tool reference: default [source] repo of firefox-passkey-qr
+modules/firefox-passkey-qr/tests/test_firefox_passkey_qr.py | tool reference: names the upstream branch the stub installer imitates
+modules/firefox-policy/firefox-policy | tool reference: the passwords-app extension id it force-installs
+modules/firefox-policy/tests/test_firefox_policy.py | tool reference: the same extension id in expected policy files
+modules/firefox/firefox | tool reference: the passwords-app extension id it builds and signs
+modules/passwords-app-polkit/passwords-app-polkit | tool reference: the passwords-app polkit action namespace
+modules/passwords-app-polkit/tests/test_passwords_app_polkit.py | tool reference: the same namespace in fixtures
+modules/passwords-app/module.toml | tool reference: default [source] repo of passwords-app
+modules/passwords-app/passwords-app | tool reference: passwords-app's bus name, object path, native host and extension id
+modules/passwords-app/tests/test_passwords_app.py | tool reference: the same identifiers in expectations
+scripts/bootstrap.sh | project reference: default URL of the project's own repository
+scripts/integration.sh | live extension uuid of english-in-overview (see its metadata.json)
+ubuntu_tweaks/panels.toml | tool reference: dconf path of passwords-app's settings, a panel rule
+ubuntu_tweaks/show/descriptions_ru.toml | tool reference: explanations of passwords-app's settings keys
+tests/golden/init_empty_machine.txt | tool reference: the default [source] repo URLs of passwords-app and firefox-passkey-qr shown in the init preview

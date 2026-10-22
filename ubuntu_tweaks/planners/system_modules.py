@@ -157,9 +157,12 @@ class SystemModuleAction(Action):
             raise ActionFailed(f"{self._manifest.name}: {error}") from error
 
 
-def module_config_json(config: Config, name: str) -> str | None:
-    """The merged ``[modules.<name>]`` table without ``enabled`` as compact JSON; ``None`` when empty."""
+def module_config_json(config: Config, name: str, default_repo: str | None = None) -> str | None:
+    """The merged ``[modules.<name>]`` table without ``enabled`` as compact JSON; ``None`` when empty.
+    ``default_repo`` (the manifest's ``[source] repo``) is the option ``repo`` unless the profile sets one."""
     options = {key: value for key, value in config.table("modules", name).items() if key != "enabled"}
+    if default_repo is not None:
+        options.setdefault("repo", default_repo)
     return json.dumps(options, sort_keys=True, separators=(",", ":"), default=str) if options else None
 
 
@@ -168,7 +171,10 @@ def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = N
     config = ctx.profile.load_config(module_defaults(manifests))
     return [
         SystemModuleAction(
-            manifest, ctx.repo_root, process=process, module_config=module_config_json(config, manifest.name)
+            manifest,
+            ctx.repo_root,
+            process=process,
+            module_config=module_config_json(config, manifest.name, manifest.source.repo),
         )
         for manifest in manifests
         if manifest.source.kind is SourceKind.SYSTEM and config.module_enabled(manifest.name)

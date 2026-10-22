@@ -28,8 +28,15 @@ run = ["/bin/sh", "-c", "printf '\\n# Homebrew (added by ubuntu-tweak)\\n[ -x /h
 check = ["/bin/sh", "-c", "grep -qs 'brew shellenv' \"$HOME/.bashrc\" \"$HOME/.profile\" \"$HOME/.bash_profile\""]
 
 [[post]]
+name = "tools"
+description = "brew install uv and bun (what the passwords-app and Firefox modules run on) unless already on PATH"
+after = "shellenv"
+run = ["/home/linuxbrew/.linuxbrew/bin/brew", "install", "uv", "oven-sh/bun/bun"]
+check = ["/bin/sh", "-c", "PATH=\"/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH\"; command -v uv >/dev/null && command -v bun >/dev/null"]
+
+[[post]]
 name = "formulae"
 description = "brew install the formulae of packages.toml (`brew = [...]`)"
-after = "shellenv"
+after = "tools"
 run = ["/home/linuxbrew/.linuxbrew/bin/brew", "install", "{packages.brew}"]
 check = ["/home/linuxbrew/.linuxbrew/bin/brew", "list", "--formula", "{packages.brew}"]

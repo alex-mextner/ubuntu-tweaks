@@ -444,6 +444,20 @@ class ModuleHelperTests(TempDirCase):
         self.assertIn("gh auth login", answer["manual"])
         self.assertIsNone(answer["repo"])
 
+    def test_a_configured_checkout_without_a_profile_is_still_the_modules_dir(self) -> None:
+        (self.home / "custom-files/.git").mkdir(parents=True)
+        self.env[identity.MODULE_CONFIG_ENV] = json.dumps({"dir": "~/custom-files"})
+        answer = identity.resolve_for_module(self.home, self.env, gh("notes"))  # gh finds nothing
+        self.assertEqual((answer["dir"], answer["profile_dir"]), (str(self.home / "custom-files"), None))
+
+    def test_the_cache_key_changes_with_the_token_of_the_environment(self) -> None:
+        plain = identity._gh_account(self.home, self.env)
+        self.env["GH_TOKEN"] = "token-a"
+        first = identity._gh_account(self.home, self.env)
+        self.env["GH_TOKEN"] = "token-b"
+        self.assertEqual(len({plain, first, identity._gh_account(self.home, self.env)}), 3)
+        self.assertNotIn("token-a", first)  # the token itself is never stored
+
     def test_the_cli_remembers_a_checkout_and_compares_repositories(self) -> None:
         write(self.tmp / "co/ubuntu/profile.toml")
         self.assertEqual(identity.main(["remember", str(self.tmp / "co")], env=self.env), 0)

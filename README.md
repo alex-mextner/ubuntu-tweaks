@@ -5,7 +5,16 @@ My personal Ubuntu (GNOME, Wayland) tweaks.
 ## Install
 
 One command on a stock Ubuntu: the script installs `git curl ca-certificates python3-gi` with `sudo`, clones this
-repo with its submodules to `~/xp/ubuntu-tweaks` and runs `ubuntu-tweak init`:
+repo with its submodules to `~/ubuntu-tweaks` (override with `UBUNTU_TWEAKS_DIR`) and runs `ubuntu-tweak init`.
+
+First, your settings profile lives in a repo of your own GitHub account:
+
+```sh
+gh auth login                          # once; the dotfiles repo is found through gh
+gh repo create dotfiles --private --clone   # or name it .files; put your profile in ubuntu/profile.toml
+```
+
+Then run the bootstrap:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scripts/bootstrap.sh | sh -s -- --yes
@@ -17,11 +26,16 @@ first. `init` ends with a **Manual steps** block (gh token, AMO key, iCloud sign
 finish, each with how, all in the spec's *Manual steps* table. The same by hand:
 
 ```sh
-gh repo clone alex-mextner/.files ~/.files        # your private profile (optional)
-git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init           # preview: doctor, submodules, CLI link, plan
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init --commit  # do it
+git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/ubuntu-tweaks
+~/ubuntu-tweaks/bin/ubuntu-tweak init           # preview: doctor, submodules, CLI link, plan
+~/ubuntu-tweaks/bin/ubuntu-tweak init --commit  # do it
 ```
+
+The dotfiles repo is found through `gh` in your account under the names `.files`, `dotfiles`, `.dotfiles`,
+`dot-files`. Pick another with `--dotfiles-repo OWNER/NAME` or `UBUNTU_TWEAK_DOTFILES_REPO`, re-resolve with
+`--refresh`, or pin it in the profile with `[modules.dotfiles] repo`, `dir`, `path`. The profile is
+`<your dotfiles repo>/ubuntu`; it may carry its own modules in `<profile>/modules/<name>/module.toml`.
+
 
 Then log out and back in (the Shell on Wayland loads extension code only at login). Repo
 extensions, including the dock submodule, are symlinked into
@@ -41,7 +55,7 @@ moved its settings.
 
 `bin/ubuntu-tweak` is the umbrella CLI described in
 [`docs/specs/ubuntu-tweak-cli.md`](docs/specs/ubuntu-tweak-cli.md): the modules of this repo plus a
-private settings profile (default `~/.files/ubuntu`, override with `--profile DIR` or
+private settings profile (default `<your dotfiles repo>/ubuntu`, found through `gh`; override with `--profile DIR` or
 `$UBUNTU_TWEAK_PROFILE`; per-machine overlay named by `/etc/hostname` or `--machine`). Every
 mutating command previews first and changes nothing without `--commit`.
 
@@ -66,6 +80,13 @@ module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `gi
 `firefox-passkey-qr` 73 (off by default), `hyperdock` 80, then your settings and `files/`, then the opt-in `rig`
 100 (+ tmux, omp, ctmux) and `dotfiles` 110 (spec: *Init pipeline*; switch one off with
 `[modules.<name>] enabled = false` in `machine.toml`).
+
+`passwords-app`, `passwords-app-polkit`, `firefox`, `firefox-policy`, `firefox-autologin`, `firefox-passkey-qr`
+and `rig` integrate tools published by the project author (passwords-app, firefox-passkey-qr, rig, ctmux). Each
+fetches its tool from one `[source] repo` URL in its `module.toml`, which a profile can override with
+`[modules.<name>] repo = "..."`; anyone who does not want one of them can switch it off with
+`[modules.<name>] enabled = false`.
+
 Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf and HOME is `scripts/integration.sh`
 (module preset, two settings bundles with reasons, machine overlay, linked files, `capture` preview; it never
 touches your dconf).
@@ -73,14 +94,14 @@ touches your dconf).
 ### Settings workflow: preview → commit → review → PR
 
 What you configure in GNOME Settings (and the config files you keep under `~/.config`) lives in the
-private profile, `~/.files/ubuntu` (`settings/**/*.ini` bundles, `files/`, `packages.toml`,
+private profile, `<your dotfiles repo>/ubuntu` (`settings/**/*.ini` bundles, `files/`, `packages.toml`,
 `system.toml`, and `machines/<hostname>/` for what differs per machine). The engine here holds no
 personal data.
 
 ```sh
 ubuntu-tweak capture                  # 1. preview: exactly what the profile would receive (+ new, ~ differs, = same)
-ubuntu-tweak capture --commit         # 2. write it into ~/.files/ubuntu (no git commit, secrets refuse the write)
-git -C ~/.files diff                  # 3. second look, then commit and open a PR in .files
+ubuntu-tweak capture --commit         # 2. write it into <your dotfiles repo>/ubuntu (no git commit, secrets refuse the write)
+git -C ~/dotfiles diff                 # 3. second look, then commit and open a PR in your dotfiles repo
 ubuntu-tweak apply                    # 4. on any machine: preview what would change
 ubuntu-tweak apply --commit           # 5. do it; `status` reports drift, a second run says `0 changed`
 ```
@@ -101,7 +122,7 @@ too and win key by key. The same key with different values in two bundles of one
 ```ini
 [ubuntu-tweak]                         # optional header, not a dconf section
 description = "Keys for the dev keyboard"
-machines = ["home"]                    # apply only on these hostnames (also: requires-module = "hyperdock")
+machines = ["laptop"]                  # apply only on these hostnames (also: requires-module = "hyperdock")
 
 [org/gnome/desktop/wm/keybindings]
 # Super+arrows belong to the tiler, so workspaces move on Alt   <- the reason: comments above a key
