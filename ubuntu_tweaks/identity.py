@@ -471,9 +471,11 @@ def locate(
     checkout_dir: str | None = None,
     profile_path: str | None = None,
     verify_origin: bool = True,
+    persist: bool = True,
 ) -> Location:
     """``checkout_dir`` / ``profile_path`` are the dotfiles module's ``dir`` / ``path`` options; the module
-    checks origins itself (it knows how to fix them), so it passes ``verify_origin=False``."""
+    checks origins itself (it knows how to fix them), so it passes ``verify_origin=False``. ``persist=False``
+    (a ``--dry-run``) does not write the discovery cache: nothing is written outside the session log."""
     clock = time.time() if now is None else now
     runner = process or Process()
     state_path = _state_file(home, env)
@@ -490,7 +492,7 @@ def locate(
     from_cache = discovery is not None
     if discovery is None:
         discovery = discover_via_gh(runner)
-        if _store(state, discovery, clock, account):
+        if _store(state, discovery, clock, account) and persist:
             _write_state(state_path, state)
     found = Source.CACHE if from_cache else Source.GH
     chosen = discovery.repo
