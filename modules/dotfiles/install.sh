@@ -24,7 +24,7 @@
 # Spec: docs/specs/ubuntu-tweak-cli.md, "Profile discovery" and "The dotfiles module".
 set -euo pipefail
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 mode=install
 case "${1:-}" in
