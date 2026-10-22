@@ -22,7 +22,7 @@ sys.path.insert(0, str(MODULE.parents[1]))
 sys.dont_write_bytecode = True
 
 from ubuntu_tweaks.module_script import ModuleError, NeedsManual  # noqa: E402
-from ubuntu_tweaks.process import CommandResult, Process  # noqa: E402
+from ubuntu_tweaks.process import CommandError, CommandResult, Process  # noqa: E402
 
 REPO = "https://git.example.org/tools/firefox-passkey-qr.git"
 
@@ -68,6 +68,10 @@ STUB = textwrap.dedent(
         if "--dry-run" in argv:
             print("== 1. Build and runtime packages ==\\n  $ sudo apt-get install -y meson")
             sys.exit(0)
+        waiting = os.path.join(here, "waiting")
+        if os.path.exists(waiting):  # the file holds the exit code (default 3 = something waits for a person)
+            print("Not finished:\\n  waiting for you: 3. Bluetooth: needs a long-lived admin token")
+            sys.exit(int(open(waiting).read() or 3))
         open(os.path.join(here, "installed"), "w").close()
         sys.exit(0)
     sys.exit(2)
@@ -250,6 +254,21 @@ class Install(Base):
             os.environ.pop("HA_TOKEN", None)
             self.module().apply()
         self.assertFalse(self.log()[-1]["has_token"])
+
+    def test_an_installer_that_waits_for_a_person_is_needs_manual_not_a_failure(self):
+        self.stub()
+        (self.checkout / "waiting").touch()  # the stub exits 3 like `passkey-qr install` does
+        with self.assertRaisesRegex(NeedsManual, "lines above say what waits for you"):
+            self.module().apply()
+        self.assertFalse(self.installed())
+
+    def test_any_other_installer_failure_stays_an_error(self):
+        self.stub()
+        (self.checkout / "waiting").write_text("1")  # the installer fails for real (exit 1), not "waits"
+        with self.assertRaises(CommandError) as raised:
+            self.module().apply()
+        self.assertEqual(raised.exception.returncode, 1)
+        self.assertEqual(self.log()[-1]["argv"], ["--yes", "install"])  # it was the install that failed
 
     def test_an_installer_without_yes_is_reported_as_needs_manual_never_run(self):
         self.stub(has_yes=False)
