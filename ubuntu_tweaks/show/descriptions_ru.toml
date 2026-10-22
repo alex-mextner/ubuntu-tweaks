@@ -1,0 +1,663 @@
+# Russian explanations for `ubuntu-tweak show` (loaded by show/descriptions.py).
+#
+# [panels.<id>]                       title and what the panel holds (ids from ../panels.toml, plus "other")
+# [keys."<schema id>"]                "<key>" = { ru = "...", unit = "seconds", zero = "...", accel = true }
+# [enums."<schema id>"."<key>"]       enum nick = its meaning
+# [[rule]]                            paths = [dconf key globs], then the same fields as a key entry; for keys
+#                                     without a schema here and for families of keys (window sizes, ...)
+#
+# unit: seconds | minutes | ms | percent | pixels | size | unix | bytes. A key without a text here falls back to the
+# schema's own English summary, marked "(описание из схемы, без перевода)" in the report.
+
+[panels.network]
+title = "Сеть"
+about = "Wi-Fi, Ethernet, VPN и прокси. Сами подключения хранят пароли, поэтому здесь они не показываются."
+
+[panels.bluetooth]
+title = "Bluetooth"
+about = "Сопряжённые устройства и адаптеры: данные оборудования, не показываются."
+
+[panels.background]
+title = "Фон"
+about = "Обои рабочего стола и картинка экрана блокировки."
+
+[panels.appearance]
+title = "Оформление"
+about = "Тема, светлый/тёмный режим, акцентный цвет, шрифты, курсор и значки."
+
+[panels.notifications]
+title = "Уведомления"
+about = "Показ уведомлений и настройки для каждого приложения."
+
+[panels.search]
+title = "Поиск"
+about = "Какие источники участвуют в поиске по системе."
+
+[panels.multitasking]
+title = "Многозадачность"
+about = "Окна, рабочие столы, плитка по краям экрана, горячий угол."
+
+[panels.apps]
+title = "Приложения"
+about = "Настройки встроенных программ (Файлы, Терминал, Календарь, Papers и др.) и пароли-приложение."
+
+[panels.privacy]
+title = "Конфиденциальность"
+about = "Блокировка экрана, диагностика, геолокация."
+
+[panels.online-accounts]
+title = "Онлайн-аккаунты"
+about = "Токены и идентификаторы: не показываются."
+
+[panels.sharing]
+title = "Общий доступ"
+about = "Удалённый рабочий стол и общий доступ к файлам. Ключи и сертификаты скрыты."
+
+[panels.sound]
+title = "Звук"
+about = "Звуки событий, звук при запуске, громкость выше 100%."
+
+[panels.power]
+title = "Питание"
+about = "Когда гаснет экран, когда компьютер засыпает, режим питания."
+
+[panels.displays]
+title = "Экраны"
+about = "Ночной режим и цвет; расположение мониторов лежит в файле monitors.xml (см. «Файлы настроек»)."
+
+[panels.mouse-touchpad]
+title = "Мышь и тачпад"
+about = "Скорость, прокрутка, жесты."
+
+[panels.keyboard]
+title = "Клавиатура"
+about = "Раскладки, горячие клавиши, плитка окон."
+
+[panels.printers]
+title = "Принтеры"
+about = "Принтеры и очередь печати."
+
+[panels.removable-media]
+title = "Съёмные носители"
+about = "Что делать при подключении флешки или диска."
+
+[panels.color]
+title = "Цвет"
+about = "Цветовые профили."
+
+[panels.region-language]
+title = "Язык и регион"
+about = "Язык интерфейса, форматы даты и чисел."
+
+[panels.accessibility]
+title = "Универсальный доступ"
+about = "Крупный шрифт, экранная клавиатура, лупа и т. п."
+
+[panels.users]
+title = "Пользователи"
+about = "Учётные записи: не показываются."
+
+[panels.date-time]
+title = "Дата и время"
+about = "Мировые часы и календарь; часовой пояс смотрите в «Время, язык и клавиатура»."
+
+[panels.about]
+title = "О системе"
+about = "Сведения об устройстве."
+
+[panels.ubuntu-desktop]
+title = "Рабочий стол Ubuntu"
+about = "Док, значки, закреплённые приложения, папки в обзоре приложений."
+
+[panels.wellbeing]
+title = "Цифровое благополучие"
+about = "Напоминания об отдыхе и ограничения экранного времени."
+
+[panels.shell-extensions]
+title = "Расширения GNOME Shell"
+about = "Какие расширения включены и их собственные настройки."
+
+[panels.other]
+title = "Прочее (без панели)"
+about = "Ключи, которых нет ни в одной панели настроек: служебные данные программ и состояние окон."
+
+# ---------------------------------------------------------------------------------------------------- appearance
+
+[keys."org.gnome.desktop.interface"]
+"color-scheme" = { ru = "Светлая или тёмная тема всей системы: программы, которые это поддерживают, следуют выбору." }
+"accent-color" = { ru = "Акцентный цвет: подсветка выбранных элементов, кнопок и переключателей." }
+"gtk-theme" = { ru = "Тема оформления окон и кнопок программ GTK." }
+"icon-theme" = { ru = "Набор значков (иконок) для программ и файлов." }
+"show-battery-percentage" = { ru = "Показывать заряд батареи в процентах рядом со значком в верхней панели." }
+"toolkit-accessibility" = { ru = "Включить программный интерфейс универсального доступа (AT-SPI): нужен экранным читалкам и некоторым утилитам автоматизации." }
+
+[enums."org.gnome.desktop.interface"."color-scheme"]
+default = "по умолчанию (светлая)"
+prefer-dark = "тёмная"
+prefer-light = "светлая"
+
+[enums."org.gnome.desktop.interface"."accent-color"]
+blue = "синий"
+teal = "бирюзовый"
+green = "зелёный"
+yellow = "жёлтый"
+orange = "оранжевый"
+red = "красный"
+pink = "розовый"
+purple = "фиолетовый"
+slate = "серо-синий"
+brown = "коричневый"
+
+# ---------------------------------------------------------------------------------------------------- background
+
+[keys."org.gnome.desktop.background"]
+"picture-options" = { ru = "Как картинка обоев подгоняется под экран." }
+"picture-uri" = { ru = "Файл обоев для светлой темы." }
+"picture-uri-dark" = { ru = "Файл обоев для тёмной темы." }
+"primary-color" = { ru = "Основной цвет фона (виден, если картинка не закрывает весь экран)." }
+"secondary-color" = { ru = "Второй цвет фона для градиента." }
+
+[keys."org.gnome.desktop.screensaver"]
+"picture-options" = { ru = "Как картинка экрана блокировки подгоняется под экран." }
+"picture-uri" = { ru = "Файл картинки экрана блокировки." }
+"primary-color" = { ru = "Основной цвет фона экрана блокировки." }
+"secondary-color" = { ru = "Второй цвет фона экрана блокировки." }
+"idle-activation-enabled" = { ru = "Включать заставку/блокировку, когда компьютер простаивает." }
+"lock-enabled" = { ru = "Разрешить блокировку экрана (пароль при пробуждении)." }
+"ubuntu-lock-on-suspend" = { ru = "Блокировать экран при уходе компьютера в сон (Ubuntu)." }
+
+[enums."org.gnome.desktop.background"."picture-options"]
+none = "без картинки, только цвет"
+wallpaper = "плиткой"
+centered = "по центру, без масштабирования"
+scaled = "вписать целиком (с полями)"
+stretched = "растянуть на весь экран"
+zoom = "заполнить экран с обрезкой краёв"
+spanned = "растянуть на все мониторы"
+
+[enums."org.gnome.desktop.screensaver"."picture-options"]
+none = "без картинки, только цвет"
+wallpaper = "плиткой"
+centered = "по центру, без масштабирования"
+scaled = "вписать целиком (с полями)"
+stretched = "растянуть на весь экран"
+zoom = "заполнить экран с обрезкой краёв"
+spanned = "растянуть на все мониторы"
+
+# ---------------------------------------------------------------------------------------------------- power
+
+[keys."org.gnome.desktop.session"]
+"idle-delay" = { ru = "Через сколько бездействия гаснет экран (потом включается блокировка, если она включена).", unit = "seconds", zero = "никогда: экран не гаснет" }
+
+[keys."org.gnome.settings-daemon.plugins.power"]
+"sleep-inactive-ac-timeout" = { ru = "Через сколько бездействия компьютер засыпает, пока подключён к розетке.", unit = "seconds", zero = "никогда" }
+"sleep-inactive-ac-type" = { ru = "Что делать, когда время бездействия от розетки вышло." }
+"sleep-inactive-battery-timeout" = { ru = "Через сколько бездействия компьютер засыпает, пока работает от батареи.", unit = "seconds", zero = "никогда" }
+"sleep-inactive-battery-type" = { ru = "Что делать, когда время бездействия от батареи вышло." }
+"idle-dim" = { ru = "Тускнить экран при бездействии, чтобы экономить заряд." }
+"lid-close-ac-action" = { ru = "Что делать при закрытии крышки ноутбука, пока он подключён к розетке." }
+"lid-close-battery-action" = { ru = "Что делать при закрытии крышки ноутбука на батарее." }
+
+[enums."org.gnome.settings-daemon.plugins.power"."lid-close-ac-action"]
+nothing = "ничего"
+blank = "погасить экран"
+suspend = "заснуть"
+shutdown = "выключить"
+hibernate = "гибернация"
+interactive = "спросить"
+logout = "завершить сеанс"
+
+[enums."org.gnome.settings-daemon.plugins.power"."lid-close-battery-action"]
+nothing = "ничего"
+blank = "погасить экран"
+suspend = "заснуть"
+shutdown = "выключить"
+hibernate = "гибернация"
+interactive = "спросить"
+logout = "завершить сеанс"
+
+[enums."org.gnome.settings-daemon.plugins.power"."sleep-inactive-battery-type"]
+blank = "погасить экран"
+suspend = "заснуть (режим ожидания)"
+shutdown = "выключить"
+hibernate = "гибернация (сохранить на диск и выключить)"
+interactive = "спросить, что делать"
+nothing = "ничего не делать"
+logout = "завершить сеанс"
+
+[enums."org.gnome.settings-daemon.plugins.power"."sleep-inactive-ac-type"]
+blank = "погасить экран"
+suspend = "заснуть (режим ожидания)"
+shutdown = "выключить"
+hibernate = "гибернация (сохранить на диск и выключить)"
+interactive = "спросить, что делать"
+nothing = "ничего не делать"
+logout = "завершить сеанс"
+
+[keys."org.gnome.shell"]
+"last-selected-power-profile" = { ru = "Последний выбранный в меню режим питания (производительность / экономия)." }
+"welcome-dialog-last-shown-version" = { ru = "Для какой версии GNOME уже показывали окно «Добро пожаловать» — чтобы не показывать повторно." }
+"favorite-apps" = { ru = "Закреплённые приложения: значки в доке и в обзоре, в порядке слева направо." }
+"app-picker-layout" = { ru = "Расположение значков в сетке «Приложения» (служебный список, GNOME обновляет его сам)." }
+"enabled-extensions" = { ru = "Расширения GNOME Shell, которые включены." }
+"disabled-extensions" = { ru = "Расширения, которые принудительно выключены (GNOME не включит их, даже если они лежат в папке)." }
+
+# ---------------------------------------------------------------------------------------------------- privacy / sharing / sound
+
+[keys."org.gnome.desktop.privacy"]
+"report-technical-problems" = { ru = "Отправлять разработчикам отчёты о сбоях (без личных данных)." }
+
+[keys."org.gnome.system.location"]
+"enabled" = { ru = "Разрешить программам узнавать местоположение (нужно ночному режиму, погоде, картам)." }
+
+[keys."org.gnome.desktop.remote-desktop.rdp"]
+"enable" = { ru = "Удалённый рабочий стол по протоколу RDP: пускать ли подключения с других компьютеров." }
+"negotiate-port" = { ru = "Если порт RDP занят — подобрать другой, а не выдавать ошибку." }
+"port" = { ru = "Порт, на котором слушает сервер RDP (стандартный — 3389)." }
+"tls-cert" = { ru = "Путь к сертификату RDP (скрыт)." }
+"tls-key" = { ru = "Путь к закрытому ключу RDP (скрыт)." }
+"view-only" = { ru = "Только смотреть экран по RDP, без управления мышью и клавиатурой." }
+"screen-share-mode" = { ru = "Как показывать экран при удалённом подключении: зеркалить основной монитор или расширять рабочий стол." }
+
+[enums."org.gnome.desktop.remote-desktop.rdp"."screen-share-mode"]
+mirror-primary = "зеркалить основной монитор"
+extend = "отдельный виртуальный монитор"
+
+[keys."org.gnome.desktop.sound"]
+"allow-volume-above-100-percent" = { ru = "Разрешить громкость выше 100% (звук может искажаться)." }
+
+[keys."org.gnome.shell.ubuntu"]
+"startup-sound" = { ru = "Мелодия при входе в систему (Ubuntu)." }
+
+# ---------------------------------------------------------------------------------------------------- input
+
+[keys."org.gnome.desktop.peripherals.touchpad"]
+"two-finger-scrolling-enabled" = { ru = "Прокрутка двумя пальцами на тачпаде." }
+
+[keys."org.gnome.desktop.input-sources"]
+"sources" = { ru = "Раскладки клавиатуры в переключателе: тип (xkb) и код раскладки, в порядке переключения." }
+"mru-sources" = { ru = "Какие раскладки использовались последними (GNOME ведёт сам)." }
+"xkb-options" = { ru = "Дополнительные опции клавиатуры (например, как переключать раскладки или клавиша Caps Lock)." }
+
+[keys."org.gnome.desktop.wm.keybindings"]
+"move-to-monitor-left" = { ru = "Переместить окно на монитор слева." }
+"move-to-monitor-right" = { ru = "Переместить окно на монитор справа." }
+"move-to-workspace-down" = { ru = "Переместить окно на рабочий стол ниже." }
+"move-to-workspace-up" = { ru = "Переместить окно на рабочий стол выше." }
+"show-desktop" = { ru = "Свернуть все окна и показать рабочий стол." }
+"switch-to-workspace-down" = { ru = "Перейти на рабочий стол ниже." }
+"switch-to-workspace-left" = { ru = "Перейти на рабочий стол слева." }
+"switch-to-workspace-right" = { ru = "Перейти на рабочий стол справа." }
+"switch-to-workspace-up" = { ru = "Перейти на рабочий стол выше." }
+
+[keys."org.gnome.mutter.keybindings"]
+"toggle-tiled-left" = { ru = "Прижать окно к левой половине экрана." }
+"toggle-tiled-right" = { ru = "Прижать окно к правой половине экрана." }
+
+[keys."org.gnome.shell.keybindings"]
+"toggle-message-tray" = { ru = "Открыть список уведомлений и календарь." }
+"toggle-overview" = { ru = "Открыть обзор окон и приложений." }
+
+[keys."org.gnome.mutter"]
+"edge-tiling" = { ru = "Прижатие окна к краю экрана перетаскиванием: к левому/правому — половина, к верхнему — на весь экран." }
+
+[keys."org.gnome.settings-daemon.global-shortcuts"]
+"applications" = { ru = "Приложения, у которых есть глобальные горячие клавиши, работающие из любого окна." }
+
+[keys."org.gnome.settings-daemon.global-shortcuts.application"]
+"shortcuts" = { ru = "Глобальные горячие клавиши этого приложения." }
+
+[keys."org.gnome.settings-daemon.plugins.media-keys"]
+"custom-keybindings" = { ru = "Ваши собственные горячие клавиши (запуск команд); каждая лежит в отдельной записи custom0, custom1 и т. д." }
+
+[keys."org.gnome.shell.extensions.tiling-assistant"]
+"center-window" = { ru = "Tiling Assistant: поставить окно по центру.", accel = true }
+"restore-window" = { ru = "Tiling Assistant: вернуть окну прежний размер.", accel = true }
+"tile-bottom-half" = { ru = "Tiling Assistant: окно на нижнюю половину экрана.", accel = true }
+"tile-bottomleft-quarter" = { ru = "Tiling Assistant: окно в левую нижнюю четверть.", accel = true }
+"tile-bottomright-quarter" = { ru = "Tiling Assistant: окно в правую нижнюю четверть.", accel = true }
+"tile-left-half" = { ru = "Tiling Assistant: окно на левую половину экрана.", accel = true }
+"tile-maximize" = { ru = "Tiling Assistant: развернуть окно на весь экран.", accel = true }
+"tile-maximize-vertically" = { ru = "Tiling Assistant: растянуть окно на всю высоту.", accel = true }
+"tile-right-half" = { ru = "Tiling Assistant: окно на правую половину экрана.", accel = true }
+"tile-top-half" = { ru = "Tiling Assistant: окно на верхнюю половину экрана.", accel = true }
+"tile-topleft-quarter" = { ru = "Tiling Assistant: окно в левую верхнюю четверть.", accel = true }
+"tile-topright-quarter" = { ru = "Tiling Assistant: окно в правую верхнюю четверть.", accel = true }
+"enable-tiling-popup" = { ru = "Tiling Assistant: после прижатия окна предлагать, чем заполнить оставшееся место." }
+"focus-hint-color" = { ru = "Tiling Assistant: цвет рамки-подсказки у окна в фокусе." }
+"last-version-installed" = { ru = "Tiling Assistant: номер версии, для которой уже показали окно новостей (служебное)." }
+"overridden-settings" = { ru = "Tiling Assistant: какие стандартные настройки GNOME он подменил и запомнил, чтобы вернуть при отключении (служебное)." }
+"tiling-popup-all-workspace" = { ru = "Tiling Assistant: предлагать варианты заполнения на всех рабочих столах, а не только на текущем." }
+
+# ---------------------------------------------------------------------------------------------------- notifications
+
+[keys."org.gnome.desktop.notifications"]
+"application-children" = { ru = "Список приложений, для которых заданы свои настройки уведомлений." }
+
+[keys."org.gnome.desktop.notifications.application"]
+"application-id" = { ru = "Идентификатор приложения (.desktop-файл), чьи уведомления настроены отдельно." }
+
+# ---------------------------------------------------------------------------------------------------- ubuntu desktop / dock
+
+[keys."org.gnome.desktop.app-folders"]
+"folder-children" = { ru = "Папки в сетке «Приложения»." }
+
+[keys."org.gnome.desktop.app-folders.folder"]
+"name" = { ru = "Название папки в сетке «Приложения»." }
+"translate" = { ru = "Переводить название папки на язык системы." }
+"apps" = { ru = "Какие приложения лежат в этой папке." }
+"categories" = { ru = "Категории, приложения которых попадают в эту папку автоматически." }
+
+[keys."org.gnome.shell.extensions.dash-to-dock"]
+"dock-fixed" = { ru = "Ubuntu Dock: всегда на виду (Вкл) или прячется, когда окно его закрывает (Выкл)." }
+"dock-position" = { ru = "Ubuntu Dock: у какого края экрана стоит док." }
+"multi-monitor" = { ru = "Ubuntu Dock: показывать док на каждом мониторе." }
+
+[enums."org.gnome.shell.extensions.dash-to-dock"."dock-position"]
+TOP = "сверху"
+RIGHT = "справа"
+BOTTOM = "снизу"
+LEFT = "слева"
+
+[keys."org.gnome.shell.extensions.ding"]
+"check-x11wayland" = { ru = "Значки на рабочем столе (DING): предупреждать, если сеанс запущен в режиме X11 поверх Wayland." }
+
+# ---------------------------------------------------------------------------------------------------- wellbeing
+
+[keys."org.gnome.desktop.break-reminders"]
+"selected-breaks" = { ru = "Какие напоминания об отдыхе включены." }
+
+[keys."org.gnome.desktop.break-reminders.eyesight"]
+"play-sound" = { ru = "Напоминание «отдохни глазами»: играть звук в конце перерыва." }
+
+[keys."org.gnome.desktop.break-reminders.movement"]
+"play-sound" = { ru = "Напоминание «разомнись»: играть звук в конце перерыва." }
+"duration-seconds" = { ru = "Напоминание «разомнись»: сколько длится перерыв.", unit = "seconds" }
+"interval-seconds" = { ru = "Напоминание «разомнись»: как часто напоминать.", unit = "seconds" }
+
+[keys."org.gnome.desktop.screen-time-limits"]
+"daily-limit-seconds" = { ru = "Ограничение экранного времени в день.", unit = "seconds", zero = "без ограничения" }
+
+# ---------------------------------------------------------------------------------------------------- displays / date-time
+
+[keys."org.gnome.settings-daemon.plugins.color"]
+"night-light-enabled" = { ru = "Ночной режим: к вечеру экран становится теплее и меньше слепит." }
+"night-light-last-coordinates" = { ru = "Последние определённые координаты (широта, долгота), по ним считается закат." }
+
+[keys."org.gnome.shell.world-clocks"]
+"locations" = { ru = "Города в мировых часах календаря." }
+
+[keys."org.gnome.clocks"]
+"world-clocks" = { ru = "Города, добавленные в приложение «Часы»." }
+
+[enums."org.gnome.clocks.state.window"."panel-id"]
+world = "мировые часы"
+alarm = "будильники"
+stopwatch = "секундомер"
+timer = "таймер"
+
+# ---------------------------------------------------------------------------------------------------- apps
+
+[keys."io.github.alex_mextner.Passwords"]
+"generator-digits" = { ru = "Генератор паролей: добавлять цифры." }
+"generator-length" = { ru = "Генератор паролей: длина пароля (знаков)." }
+"generator-mode" = { ru = "Генератор паролей: стиль." }
+"generator-symbols" = { ru = "Генератор паролей: добавлять символы." }
+"generator-uppercase" = { ru = "Генератор паролей: добавлять заглавные буквы." }
+
+[enums."io.github.alex_mextner.Passwords"."generator-mode"]
+apple = "как в Apple: легко запоминаемые слоги через дефис"
+custom = "по своим правилам (длина и набор знаков)"
+
+[keys."net.nokyan.Resources"]
+"apps-sort-by" = { ru = "Ресурсы: по какому столбцу отсортирован список приложений (номер столбца)." }
+"apps-sort-by-ascending" = { ru = "Ресурсы: сортировать приложения по возрастанию." }
+"last-viewed-page" = { ru = "Ресурсы: какая вкладка была открыта в прошлый раз." }
+"show-logical-cpus" = { ru = "Ресурсы: рисовать отдельный график для каждого логического ядра процессора." }
+
+[keys."org.gnome.Loupe"]
+"show-properties" = { ru = "Просмотр изображений: показывать боковую панель со свойствами." }
+
+[keys."org.gnome.Ptyxis"]
+"default-profile-uuid" = { ru = "Терминал Ptyxis: профиль, который открывается по умолчанию (идентификатор)." }
+"profile-uuids" = { ru = "Терминал Ptyxis: идентификаторы всех профилей." }
+
+[keys."org.gnome.Ptyxis.Shortcuts"]
+"move-next-tab" = { ru = "Терминал Ptyxis: переместить вкладку вправо.", accel = true }
+"move-previous-tab" = { ru = "Терминал Ptyxis: переместить вкладку влево.", accel = true }
+
+[keys."org.gnome.Snapshot"]
+"last-camera-id" = { ru = "Камера: какая камера использовалась в прошлый раз." }
+
+[keys."org.gnome.calendar"]
+"active-view" = { ru = "Календарь: какой вид открыт (месяц, неделя, повестка)." }
+
+[enums."org.gnome.calendar"."active-view"]
+month = "месяц"
+week = "неделя"
+agenda = "повестка"
+n-views = "служебное значение"
+
+[keys."org.gnome.clocks.state.window"]
+"panel-id" = { ru = "Часы: какая вкладка была открыта." }
+
+[keys."org.gnome.Settings"]
+"last-panel" = { ru = "Параметры системы: последняя открытая панель." }
+"window-state" = { ru = "Параметры системы: размер и состояние окна (ширина, высота, развёрнуто)." }
+
+[keys."org.gnome.DejaDup"]
+"backend" = { ru = "Резервные копии (Déjà Dup): куда складывать." }
+"delete-after" = { ru = "Резервные копии: сколько дней хранить старые копии." }
+"periodic-period" = { ru = "Резервные копии: как часто делать автоматически (в днях)." }
+"periodic-timestamp" = { ru = "Резервные копии: когда включили автоматическое копирование (служебное)." }
+"prompt-check" = { ru = "Резервные копии: когда в последний раз предлагали включить копирование (служебное)." }
+
+[enums."org.gnome.DejaDup"."backend"]
+auto = "выбирается автоматически"
+remote = "сетевой сервер"
+local = "папка на этом компьютере"
+drive = "внешний диск"
+google = "Google Drive"
+microsoft = "Microsoft OneDrive"
+rclone = "rclone"
+file = "папка"
+gcs = "Google Cloud Storage"
+goa = "аккаунт из «Онлайн-аккаунтов»"
+openstack = "OpenStack"
+rackspace = "Rackspace"
+s3 = "Amazon S3"
+u1 = "Ubuntu One"
+
+[keys."org.gnome.DejaDup.Google"]
+"folder" = { ru = "Резервные копии на Google Drive: папка." }
+
+[keys."org.gnome.DejaDup.Local"]
+"folder" = { ru = "Резервные копии на этом компьютере: папка назначения." }
+
+[keys."org.gnome.evolution-data-server"]
+"migrated" = { ru = "Почта и календарь (Evolution): перенос старых настроек уже выполнен (служебное)." }
+
+[keys."org.gnome.evolution-data-server.calendar"]
+"reminders-past" = { ru = "Календарь: уже показанные напоминания, чтобы не повторять (служебное)." }
+
+[keys."org.gnome.FileRoller.Dialogs.Extract"]
+"recreate-folders" = { ru = "Архиватор: при распаковке воссоздавать папки из архива." }
+"skip-newer" = { ru = "Архиватор: не перезаписывать более новые файлы при распаковке." }
+
+[keys."org.gnome.FileRoller.FileSelector"]
+"show-hidden" = { ru = "Архиватор: показывать скрытые файлы в окне выбора." }
+"sort-method" = { ru = "Архиватор: по какому признаку сортируются файлы в окне выбора." }
+"sort-type" = { ru = "Архиватор: порядок сортировки в окне выбора." }
+
+[keys."org.gnome.FileRoller.Listing"]
+"list-mode" = { ru = "Архиватор: показывать все файлы списком или по папкам." }
+"show-path" = { ru = "Архиватор: показывать путь к файлу." }
+"sort-method" = { ru = "Архиватор: по какому признаку сортируются файлы." }
+"sort-type" = { ru = "Архиватор: порядок сортировки." }
+
+[enums."org.gnome.FileRoller.FileSelector"."sort-method"]
+name = "по имени"
+size = "по размеру"
+type = "по типу"
+time = "по времени"
+path = "по пути"
+
+[enums."org.gnome.FileRoller.Listing"."sort-method"]
+name = "по имени"
+size = "по размеру"
+type = "по типу"
+time = "по времени"
+path = "по пути"
+
+[enums."org.gnome.FileRoller.FileSelector"."sort-type"]
+ascending = "по возрастанию"
+descending = "по убыванию"
+
+[enums."org.gnome.FileRoller.Listing"."sort-type"]
+ascending = "по возрастанию"
+descending = "по убыванию"
+
+[enums."org.gnome.FileRoller.Listing"."list-mode"]
+all-files = "все файлы одним списком"
+as-folder = "как папки"
+
+[keys."org.gnome.nautilus.list-view"]
+"default-column-order" = { ru = "Файлы: порядок столбцов в режиме списка." }
+"default-visible-columns" = { ru = "Файлы: какие столбцы видны в режиме списка." }
+
+[keys."org.gnome.nautilus.preferences"]
+"default-folder-viewer" = { ru = "Файлы: как показывать папки по умолчанию." }
+"migrated-gtk-settings" = { ru = "Файлы: настройки GTK 3 уже перенесены в GTK 4 (служебное)." }
+
+[enums."org.gnome.nautilus.preferences"."default-folder-viewer"]
+list-view = "список"
+icon-view = "значки"
+
+[keys."org.gnome.Papers"]
+"night-mode" = { ru = "Просмотр документов (Papers): ночной режим — инвертировать цвета страниц." }
+
+[keys."org.gnome.Papers.Default"]
+"annot-color" = { ru = "Papers: цвет аннотаций." }
+"continuous" = { ru = "Papers: страницы идут непрерывной лентой." }
+"dual-page" = { ru = "Papers: показывать две страницы рядом." }
+"dual-page-odd-left" = { ru = "Papers: при показе двух страниц первая (нечётная) слева." }
+"enable-spellchecking" = { ru = "Papers: проверять орфографию в заметках и формах." }
+"eraser-mode-objects" = { ru = "Papers: что стирает ластик." }
+"highlight-color" = { ru = "Papers: цвет маркера." }
+"highlight-stroke" = { ru = "Papers: толщина маркера." }
+"pen-color" = { ru = "Papers: цвет пера." }
+"pen-stroke" = { ru = "Papers: толщина пера." }
+"show-sidebar" = { ru = "Papers: показывать боковую панель с оглавлением и миниатюрами." }
+"sizing-mode" = { ru = "Papers: как масштабируется страница при открытии." }
+"text-color" = { ru = "Papers: цвет текстовых аннотаций." }
+
+[enums."org.gnome.Papers.Default"."sizing-mode"]
+fit-page = "вписать страницу целиком"
+fit-width = "по ширине окна"
+free = "свободный масштаб"
+automatic = "автоматически"
+
+[keys."org.gtk.Settings.FileChooser"]
+"date-format" = { ru = "Окно «Открыть файл»: формат даты в списке." }
+"location-mode" = { ru = "Окно «Открыть файл»: адресная строка или поле для имени." }
+"show-hidden" = { ru = "Окно «Открыть файл»: показывать скрытые файлы." }
+"show-size-column" = { ru = "Окно «Открыть файл»: столбец с размером." }
+"show-type-column" = { ru = "Окно «Открыть файл»: столбец с типом файла." }
+"sort-column" = { ru = "Окно «Открыть файл»: по какому столбцу сортировать." }
+"sort-directories-first" = { ru = "Окно «Открыть файл»: папки сверху." }
+"sort-order" = { ru = "Окно «Открыть файл»: порядок сортировки." }
+"type-format" = { ru = "Окно «Открыть файл»: как писать тип файла." }
+"window-position" = { ru = "Окно «Открыть файл»: где на экране открывается (x, y)." }
+
+[keys."org.gtk.gtk4.Settings.FileChooser"]
+"show-hidden" = { ru = "Окно «Открыть файл» (GTK 4): показывать скрытые файлы." }
+"sort-directories-first" = { ru = "Окно «Открыть файл» (GTK 4): папки сверху." }
+
+[enums."org.gtk.Settings.FileChooser"."date-format"]
+regular = "только дата"
+with-time = "дата и время"
+
+[enums."org.gtk.Settings.FileChooser"."location-mode"]
+path-bar = "адресная строка"
+filename-entry = "поле для имени файла"
+
+[enums."org.gtk.Settings.FileChooser"."sort-column"]
+name = "по имени"
+size = "по размеру"
+type = "по типу"
+modified = "по дате изменения"
+
+[enums."org.gtk.Settings.FileChooser"."sort-order"]
+ascending = "по возрастанию"
+descending = "по убыванию"
+
+[enums."org.gtk.Settings.FileChooser"."type-format"]
+mime = "MIME-тип"
+description = "описание"
+category = "категория"
+
+[keys."org.gnome.seahorse.manager"]
+"keyrings-selected" = { ru = "Пароли и ключи (Seahorse): какие связки ключей показаны." }
+
+[keys."com.ubuntu.update-manager"]
+"first-run" = { ru = "Обновление ПО: показывать ли приветственное окно при первом запуске." }
+"launch-count" = { ru = "Обновление ПО: сколько раз запускали (служебное)." }
+"launch-time" = { ru = "Обновление ПО: когда запускали в последний раз.", unit = "unix" }
+"show-details" = { ru = "Обновление ПО: сразу показывать подробности обновления." }
+
+[keys."com.ubuntu.update-notifier"]
+"release-check-time" = { ru = "Когда в последний раз проверяли выход новой версии Ubuntu.", unit = "unix" }
+
+[keys."org.gnome.software"]
+"check-timestamp" = { ru = "Центр приложений: когда в последний раз проверяли обновления.", unit = "unix" }
+"flatpak-purge-timestamp" = { ru = "Центр приложений: когда последний раз чистили ненужные среды Flatpak.", unit = "unix" }
+"update-notification-timestamp" = { ru = "Центр приложений: когда в последний раз напоминали об обновлениях.", unit = "unix" }
+
+[keys."org.gnome.nm-applet.eap"]
+"ignore-ca-cert" = { ru = "Корпоративный Wi-Fi: не проверять сертификат сервера (значение скрыто как данные подключения)." }
+"ignore-phase2-ca-cert" = { ru = "Корпоративный Wi-Fi: не проверять сертификат второго этапа (скрыто)." }
+
+# ---------------------------------------------------------------------------------------------------- families of keys
+
+[[rule]]
+paths = ["/**/window-size", "/**/initial-size", "/**/initial-size-file-chooser", "/**/size"]
+ru = "Размер окна (ширина × высота): программа запоминает его, чтобы открыться таким же."
+unit = "size"
+
+[[rule]]
+paths = ["/**/window-width", "/**/width", "/**/sidebar-width", "/**/sidebar-size", "/**/name-column-width"]
+ru = "Запомненная ширина окна или его панели."
+unit = "pixels"
+
+[[rule]]
+paths = ["/**/window-height", "/**/height"]
+ru = "Запомненная высота окна."
+unit = "pixels"
+
+[[rule]]
+paths = ["/**/is-maximized", "/**/window-maximized", "/**/maximized"]
+ru = "Окно программы запоминает, было ли оно развёрнуто на весь экран."
+
+[[rule]]
+paths = ["/org/gnome/portal/filechooser/**"]
+ru = "Папка, которую это приложение открывало в окне выбора файла в прошлый раз (служебное)."
+
+[[rule]]
+paths = ["/apps/update-manager/**", "/apps/seahorse/**"]
+ru = "Служебные данные программы (размеры окна, счётчики запусков)."
+
+[[rule]]
+paths = ["/org/gnome/control-center/**"]
+ru = "Параметры системы запоминают состояние окна."
+
+[[rule]]
+paths = ["/org/gnome/shell/extensions/dash2dock-lite/**"]
+ru = "Настройка старого дока dash2dock-lite (его заменил hyperdock). Ключ остался в dconf от прежней установки."
+
+[[rule]]
+paths = ["/org/gnome/shell/extensions/gsconnect/**"]
+ru = "GSConnect (связь с телефоном): имя устройства, сопряжение и сертификаты — идентификационные данные, не показываются."
+
+[[rule]]
+paths = ["/org/gnome/desktop/notifications/application/*/application-id"]
+ru = "Приложение, у которого настроены свои уведомления."
