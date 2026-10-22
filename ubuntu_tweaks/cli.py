@@ -8,9 +8,9 @@ excepted) exposes ``register(subparsers)``, which adds its sub-parser and sets
 import heavy dependencies (``gi``) lazily inside their handler so ``--help`` and cheap commands
 stay fast.
 
-Global flags ``--profile DIR``, ``--machine NAME`` and ``--only a,b`` are accepted before or
-after the command; they are added to every discovered sub-parser here, so a command must not
-define options of those names.
+Global flags ``--profile DIR``, ``--machine NAME``, ``--only a,b``, ``--dotfiles-repo OWNER/NAME`` and
+``--refresh`` are accepted before or after the command; they are added to every discovered sub-parser
+here, so a command must not define options of those names.
 
 Public API:
 
@@ -22,15 +22,18 @@ Public API:
 """
 
 import argparse
+import os
 import sys
 import traceback
 from collections.abc import Sequence
+from pathlib import Path
 from types import ModuleType
 
-from ubuntu_tweaks import commands
+from ubuntu_tweaks import commands, identity
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.discovery import discover
 from ubuntu_tweaks.errors import ExitCode, UbuntuTweakError
+from ubuntu_tweaks.identity import REPO_ENV
 from ubuntu_tweaks.profile import PROFILE_ENV, Profile
 
 
@@ -43,7 +46,7 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> No
         "--profile",
         metavar="DIR",
         default=default,
-        help=f"profile directory (default: ${PROFILE_ENV}, else ~/.files/ubuntu)",
+        help=f"profile directory (default: ${PROFILE_ENV}, else the ubuntu profile of your dotfiles repository)",
     )
     parser.add_argument(
         "--machine",
@@ -56,6 +59,18 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> No
         metavar="NAMES",
         default=default,
         help="comma-separated modules (panels for capture) to limit the command to",
+    )
+    parser.add_argument(
+        "--dotfiles-repo",
+        metavar="OWNER/NAME",
+        default=default,
+        help=f"your dotfiles repository (default: ${REPO_ENV}, else found through gh: .files, dotfiles, .dotfiles, dot-files)",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        default=default,
+        help="ask gh for the dotfiles repository again instead of using the cached answer",
     )
 
 
@@ -77,12 +92,24 @@ def _only(value: str | None) -> frozenset[str]:
     return frozenset(name.strip() for name in (value or "").split(",") if name.strip())
 
 
+def _resolve_profile(args: argparse.Namespace) -> Profile:
+    flag = args.dotfiles_repo or None
+    if flag:
+        os.environ[REPO_ENV] = flag  # the dotfiles module (a child process) sees the same repository
+    refresh = bool(args.refresh)
+    return Profile.resolve(
+        args.profile,
+        args.machine,
+        locate=lambda: identity.locate(home=Path.home(), env=os.environ, refresh=refresh, repo_override=flag),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
         context = Context(
             repo_root=REPO_ROOT,
-            profile=Profile.resolve(args.profile, args.machine),
+            profile=_resolve_profile(args),
             only=_only(args.only),
         )
         result = args.handler(context, args)

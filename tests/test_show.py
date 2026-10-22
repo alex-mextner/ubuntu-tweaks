@@ -9,7 +9,7 @@ import re
 import unittest
 from unittest import mock
 
-from tests.util import TempDirCase
+from tests.util import TempDirCase, no_dotfiles_discovery
 from ubuntu_tweaks.capture.rules import load_rules
 from ubuntu_tweaks.cli import main
 from ubuntu_tweaks.errors import ConfigError
@@ -461,7 +461,7 @@ class SshRunnerTests(unittest.TestCase):
 class CommandTests(unittest.TestCase):
     def test_an_unknown_panel_is_invalid_config(self) -> None:
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), no_dotfiles_discovery():
             code = main(["show", "--panel", "nope"])
         self.assertEqual(code, 2)
         self.assertIn("unknown panel 'nope'", err.getvalue())

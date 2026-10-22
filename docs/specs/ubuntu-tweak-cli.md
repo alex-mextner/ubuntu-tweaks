@@ -73,26 +73,32 @@ as any behavior change.
 
 Request 7 is answered by splitting the system in two:
 
-- **Engine = this repo** (`alex-mextner/ubuntu-tweaks`, public): the `ubuntu-tweak` CLI, the
-  modules (hyperdock, english-in-overview, memguard, apple-hid-battery) and the machinery that
-  applies a profile. There is no second tool.
-- **Profile = a directory of personal data**, by default `~/.files/ubuntu` (the `ubuntu/`
-  subdirectory of the private `alex-mextner/.files` repo): Settings-panel values, linked
-  config files, packages, root-level system settings and per-machine overlays.
+- **Engine = this repo** (`alex-mextner/ubuntu-tweaks`, public open source): the `ubuntu-tweak` CLI, the
+  generic modules (base tools, zsh, clipboard, git and gh, Homebrew, ssh server, memguard, apple-hid-battery,
+  and the bundled extensions hyperdock and english-in-overview) and the machinery that applies a profile.
+  There is no second tool.
+- **Profile = a directory of personal data**, the `ubuntu/` subdirectory of the user's own dotfiles repository
+  (`.files`, `dotfiles`, `.dotfiles` or `dot-files` on their GitHub account; *Profile discovery*):
+  Settings-panel values, linked config files, packages, root-level system settings, per-machine overlays and
+  the user's own modules (*Profile modules*).
 
-The public engine never contains personal settings; the private profile never contains engine
-code. The mac-era dotfiles at the root of `.files` (zsh, zplug, brew) are not touched by this
-system; `ubuntu/` is self-contained. Profile location: `--profile DIR` >
-`$UBUNTU_TWEAK_PROFILE` > `~/.files/ubuntu`. An explicit location that does not exist is
-invalid config (exit 2); a missing default location means "no profile" and only module
-defaults apply.
+The public engine never contains personal settings and names no person, host, repository owner or personal
+tool (request 14): the dotfiles repository is found through `gh`, tools that belong to one person are modules
+of that person's profile, and person-specific values (git name and email, the keychain item of a token) come
+from the profile only and have no default. `tests/test_no_identity.py` fails on a new occurrence of the
+author's identifiers; `tests/identity_allowlist.txt` lists each allowed path and why (the project's own
+repository URL, the upstream URL of a bundled extension). The private profile never contains engine code.
+Whatever else a dotfiles repository holds (zsh, zplug, brew) is not touched by this system; `ubuntu/` is
+self-contained. Profile location: `--profile DIR` > `$UBUNTU_TWEAK_PROFILE` > the profile found by
+*Profile discovery*. An explicit location that does not exist is invalid config (exit 2); no discovered
+profile means "no profile" and only module defaults apply, with the header saying what was looked for.
 
 Fresh machine:
 
 ```sh
-gh repo clone alex-mextner/.files ~/.files
-git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init      # doctor -> submodules -> apply preview -> --commit
+gh auth login                                          # once; the dotfiles repository is found through it
+git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/ubuntu-tweaks
+~/ubuntu-tweaks/bin/ubuntu-tweak init      # doctor -> submodules -> apply preview -> --commit
 ```
 
 ### Safety invariants
@@ -553,7 +559,8 @@ default and switchable per machine. No other module is added until it has real c
 
 ### Profile layout
 
-`<profile>` = `~/.files/ubuntu` by default.
+`<profile>` = the `ubuntu/` directory of the user's dotfiles repository, found by *Profile discovery* (`--profile
+DIR` and `$UBUNTU_TWEAK_PROFILE` override).
 
 ```
 <profile>/
@@ -563,6 +570,7 @@ default and switchable per machine. No other module is added until it has real c
   files/                    # mirrors $HOME: files/.config/mimeapps.list -> ~/.config/mimeapps.list
   packages.toml             # apt / snap / flatpak names
   system.toml               # root-level: timezone, locale, console keyboard
+  modules/<name>/           # the profile's own modules (module.toml + their scripts), see *Profile modules*
   machines/<machine>/       # overlay, one dir per machine
     machine.toml            # same schema as profile.toml; wins over it
     settings/**/*.ini       # key-level overlay bundles on top of the shared bundles
@@ -827,6 +835,64 @@ status `ii`, a `snap list` row, a `flatpak list` row. The apt lists are refreshe
 and the plan line says `(after apt-get update)`. A manager that is not on the machine means "not
 installed". A `flatpak_remote` that is empty, starts with `-` or contains whitespace, and a
 non-boolean `apt_update`, are invalid config (exit 2).
+
+### Profile discovery
+
+Request 14: the engine names nobody. `ubuntu_tweaks/identity.py` (pure; every command goes through an injected
+`Process`, tests pass a fake `gh`) finds the dotfiles repository and the profile in it, first hit wins:
+
+1. **An explicit repository**: `--dotfiles-repo OWNER/NAME` (a global flag) or `$UBUNTU_TWEAK_DOTFILES_REPO`;
+   the flag wins and is exported to the `dotfiles` module. The module's own `[modules.dotfiles] repo` (slug, git
+   URL or absolute path) reaches only the module.
+2. **A checkout on disk that holds a profile**: the one the `dotfiles` module recorded, then `~/.files`,
+   `~/dotfiles`, `~/.dotfiles`, `~/dot-files`. No network, no `gh`.
+3. **The cache** of an earlier `gh` answer, `~/.local/state/ubuntu-tweaks/dotfiles.json` (`$XDG_STATE_HOME`),
+   valid for one hour, so `gh` is not asked on every command; `--refresh` (a global flag) ignores it. It is the
+   only file discovery writes; a read-only state directory only costs the cache.
+4. **`gh`**: `gh api user -q .login` is the authenticated user, then `gh repo list <login> --json
+   name,nameWithOwner,isPrivate,isArchived,defaultBranchRef --limit 300` is filtered to the user's own repository
+   named, in this order, `.files`, `dotfiles`, `.dotfiles`, `dot-files` (case-insensitive, archived ones skipped;
+   a full 300-entry listing may hide a match, so each missing name is then asked with `gh repo view`). When
+   several exist, the first by that order is used and the header says so (`note: several dotfiles
+   repositories found (...): using ...`), never silently.
+
+`gh` missing, not logged in, or unreachable is never a prompt and never a crash: the header and the `dotfiles`
+step say `needs manual: not logged in to GitHub: run `gh auth login`` (or that gh is not installed, or that
+GitHub could not be asked), nothing is cached, and the run goes on with the modules only. A found repository
+and "none found" are cached. With no repository the header says `no dotfiles repository for <login> (looked
+for .files, dotfiles, .dotfiles, dot-files); only the modules apply` and how to create one.
+
+**The profile inside the repository** is the first of `ubuntu/`, `ubuntu-tweaks/` (a directory with a
+`profile.toml` or any other profile entry) and the repository root (with a `profile.toml`); `[modules.dotfiles]
+path` names it instead (relative, no `..`; `.` is the root). **The clone target** is `~/.files` for a repository
+named `.files`, else `~/<repository name>`; `[modules.dotfiles] dir` (`~/...` or absolute) overrides it, and the
+module records the checkout it used so the next command finds it (step 2). A repository found but not cloned
+yet makes the profile path `<clone target>/ubuntu`; the header says `found your dotfiles repository
+<owner/name>; it is not cloned yet` and that `init --commit` clones it. `Profile.resolve` takes the discovered
+location as its default, after `--profile` and `$UBUNTU_TWEAK_PROFILE`.
+
+### Profile modules
+
+Request 14: a tool that belongs to one person (a password manager, a terminal wrapper, a browser tweak) is not
+engine code. The profile carries it as a module of its own, `<profile>/modules/<name>/module.toml`, with the
+same manifest and the same kinds as the engine's (*Modules*): `system`, `builtin` and `local` work as there, a
+`local` extension `path` is relative to the module's directory, a `submodule` is refused (it would be a
+submodule of the engine checkout). Rules:
+
+- Discovery reads the engine's `modules/` first, then the profile's `modules/`; a profile module with the name
+  of an engine module **replaces** it. Everything that lists or plans modules (`list`, `machine`, `show`,
+  `doctor`, `apply`, `status`, `init`, `capture`, bundles' `requires-module`) goes through the one
+  `Context.manifests()`; `list` labels the source `profile module <name>/<installer>`. A profile that does not
+  exist supplies none; a broken manifest is invalid config (exit 2) naming its file.
+- Enabled state, options and per-machine switches are the same as for any module: `[modules.<name>]
+  enabled`, extra keys reach the installer as JSON in `UBUNTU_TWEAK_MODULE_CONFIG`.
+- **The engine never runs profile module code outside the normal plan.** `list`, `machine`, `show` and `capture`
+  read manifests only. `apply`/`status` run the module's read-only `check` (and `preview`) exactly like an
+  engine module's, print the install command in the plan, and run the installer only with `--commit`, through
+  `sudo` when the manifest says `root = true`. Profile code comes only from the profile the user pointed at or
+  that discovery found in their own repository.
+
+Tests: `tests/test_profile_modules.py`.
 
 ### Optional modules: rig, dotfiles
 
@@ -1548,15 +1614,17 @@ machine without Bluetooth and with Home Assistant, `bluetoothctl list` shows a v
 ### Install
 
 ```sh
-git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init            # preview: doctor, submodules, CLI link, apply plan
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init --commit   # do it
+gh auth login                                          # once: the dotfiles repository is found through your gh login
+git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/ubuntu-tweaks
+~/ubuntu-tweaks/bin/ubuntu-tweak init            # preview: doctor, submodules, CLI link, apply plan
+~/ubuntu-tweaks/bin/ubuntu-tweak init --commit   # do it
 ```
 
 `install.sh` stays as a two-line wrapper, `exec bin/ubuntu-tweak init --commit "$@"`: the old
 script always installed, so the old instructions keep working and keep meaning "install".
-With a profile, clone `.files` first (see *Engine and profile*); without one, `init` prints
-the exact clone command and applies the modules only.
+`init --commit` clones the user's dotfiles repository itself (module `dotfiles`, *Profile discovery*); when
+gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.sh` clones the engine to
+`$UBUNTU_TWEAKS_DIR` (default `~/ubuntu-tweaks`) from `$UBUNTU_TWEAKS_REPO` (default: this project's repository).
 
 ### Testing
 

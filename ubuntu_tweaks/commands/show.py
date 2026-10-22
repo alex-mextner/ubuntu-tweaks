@@ -60,10 +60,10 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 
 
 def _modules(ctx: Context) -> list[ModuleState]:
-    from ubuntu_tweaks.manifest import discover_modules, module_defaults
+    from ubuntu_tweaks.manifest import module_defaults
     from ubuntu_tweaks.show.system import ModuleState as State
 
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     return [
         State(

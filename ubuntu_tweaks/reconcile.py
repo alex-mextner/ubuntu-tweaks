@@ -23,7 +23,7 @@ Public API:
 - ``profile_lines(ctx) -> list[str]``: the ``machine:`` / ``profile:`` header lines.
 - ``apply(ctx, *, commit, no_sudo, extra_actions=(), backend_factory=open_backend,
   relogin_hint=False) -> int``: prints the preview, or executes and prints ``N changed``.
-- ``RELOGIN_HINT``, ``CLONE_PROFILE_COMMAND``.
+- ``RELOGIN_HINT``.
 """
 
 from __future__ import annotations
@@ -34,9 +34,8 @@ from pathlib import Path
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
-from ubuntu_tweaks.manifest import discover_modules
 from ubuntu_tweaks.planners import build_actions, collect_warnings
-from ubuntu_tweaks.profile import DEFAULT_PROFILE_RELPATH
+from ubuntu_tweaks.identity import Location, missing_lines
 from ubuntu_tweaks.settings import (
     GioBackend,
     SettingsBackend,
@@ -49,7 +48,6 @@ type BackendFactory = Callable[[Context], SettingsBackend]
 MAX_PASSES = 3
 SCHEMA_AFFECTING = frozenset({"submodule", "compile-schemas", "link", "link-replace"})
 CODE_CHANGING = frozenset({"submodule", "link", "link-replace"})
-CLONE_PROFILE_COMMAND = "gh repo clone alex-mextner/.files ~/.files"
 
 
 def open_backend(ctx: Context) -> SettingsBackend:
@@ -61,7 +59,7 @@ def open_backend(ctx: Context) -> SettingsBackend:
 
 
 def build_plan(ctx: Context, backend: SettingsBackend, extra_actions: Iterable[Action] = ()) -> Plan:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     ctx.require_modules({manifest.name for manifest in manifests})
     return Plan.build([*extra_actions, *build_actions(ctx, backend)], only=ctx.only)
 
@@ -74,8 +72,7 @@ def profile_lines(ctx: Context) -> list[str]:
         lines.append(f"profile: {tilde(profile.root)}")
     else:
         lines.append(f"profile: {tilde(profile.root)} (not found: module defaults only)")
-        if profile.root == Path.home() / DEFAULT_PROFILE_RELPATH:
-            lines.append(f"  to use your personal settings: {CLONE_PROFILE_COMMAND}")
+        lines += missing_lines(profile.location or Location(profile.root))
     return lines
 
 

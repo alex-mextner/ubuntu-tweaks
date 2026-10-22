@@ -5,15 +5,18 @@ import io
 import sys
 import tempfile
 import unittest
+import os
 from pathlib import Path
+from unittest import mock
 
-from tests.util import TempDirCase, write
+from tests.util import TempDirCase, no_dotfiles_discovery, write
 from ubuntu_tweaks import commands
 from ubuntu_tweaks.cli import build_parser, discover_commands, main
 from ubuntu_tweaks.commands import list as list_command
 from ubuntu_tweaks.commands import machine as machine_command
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.errors import ConfigError, ExitCode, RefusedError, UnknownModuleError
+from ubuntu_tweaks.identity import REPO_ENV, Location
 from ubuntu_tweaks.profile import Profile
 
 LOCAL_MODULE = '[source]\nkind = "local"\npath = "gnome-extensions/x"\n'
@@ -55,7 +58,7 @@ def crash(ctx, args):
 
 def run_main(*argv: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), no_dotfiles_discovery():
         code = main(list(argv))
     return code, out.getvalue(), err.getvalue()
 
@@ -93,6 +96,25 @@ class DispatchTests(TempDirCase):
         self.assertEqual(before[0], 0)
         self.assertEqual(before, after)
         self.assertIn("machine:  m1 (from --machine)", before[1])
+
+    def test_dotfiles_repo_and_refresh_reach_the_locator_and_the_modules_environment(self) -> None:
+        self.drop_commands(dropped=DROPPED_COMMAND)
+        found = Location(self.tmp / "bob/ubuntu")
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch("ubuntu_tweaks.identity.locate", return_value=found) as locate,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            os.environ.pop(REPO_ENV, None)
+            self.assertEqual(main(["dropped", "--dotfiles-repo", "bob/.files", "--refresh"]), 7)
+            self.assertEqual(os.environ[REPO_ENV], "bob/.files")
+        self.assertTrue(locate.call_args.kwargs["refresh"])
+
+    def test_without_the_flags_the_locator_is_asked_without_a_refresh(self) -> None:
+        self.drop_commands(dropped=DROPPED_COMMAND)
+        with mock.patch("ubuntu_tweaks.identity.locate", return_value=Location(self.tmp / "x")) as locate:
+            self.assertEqual(main(["dropped"]), 7)
+        self.assertFalse(locate.call_args.kwargs["refresh"])
 
     def test_only_is_a_global_flag_of_every_command(self) -> None:
         names = [module.__name__.rsplit(".", 1)[1].replace("_", "-") for module in discover_commands()]

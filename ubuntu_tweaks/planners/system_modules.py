@@ -35,7 +35,7 @@ from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.manifest import Manifest, SourceKind, discover_modules, module_defaults
+from ubuntu_tweaks.manifest import Manifest, SourceKind, module_defaults
 from ubuntu_tweaks.profile import Config
 from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.settings import SettingsBackend
@@ -164,7 +164,7 @@ def module_config_json(config: Config, name: str) -> str | None:
 
 
 def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> list[Action]:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     return [
         SystemModuleAction(

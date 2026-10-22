@@ -22,6 +22,7 @@ try:
     from ubuntu_tweaks.errors import ExitCode, UnknownModuleError
     from ubuntu_tweaks.extension import RELOGIN_HINT
     from ubuntu_tweaks.planners import extension_links, schemas, submodule, toggle
+    from ubuntu_tweaks.identity import Location, RepoRef, Source
     from ubuntu_tweaks.profile import Profile
     from ubuntu_tweaks.settings import FakeBackend
 except ImportError as error:  # pragma: no cover - PyGObject is a distro package
@@ -273,12 +274,29 @@ class InitCommandTests(CommandScenario):
         _, out = self.run_init(commit=True)
         self.assertIn("0 changed", out)
 
-    def test_missing_default_profile_prints_the_exact_clone_command_and_continues(self) -> None:
+    def test_missing_profile_says_what_was_looked_for_and_continues(self) -> None:
         ctx = Context(self.repo, Profile(self.home / ".files/ubuntu", "home"))
         code, out = self.run_init(ctx)
         self.assertEqual(code, 0)
-        self.assertIn("gh repo clone alex-mextner/.files ~/.files", out)
+        self.assertIn("no dotfiles repository", out)
+        self.assertIn("--dotfiles-repo OWNER/NAME", out)
         self.assertIn("Plan: ", out)
+
+    def test_a_discovered_but_not_yet_cloned_repository_is_named_with_the_command_that_clones_it(self) -> None:
+        location = Location(
+            self.home / ".files/ubuntu", self.home / ".files", RepoRef("alice/.files"), Source.GH, login="alice"
+        )
+        ctx = Context(self.repo, Profile(self.home / ".files/ubuntu", "home", location=location))
+        code, out = self.run_init(ctx)
+        self.assertEqual(code, 0)
+        self.assertIn("found your dotfiles repository alice/.files", out)
+        self.assertIn("ubuntu-tweak init --commit", out)
+
+    def test_a_logged_out_gh_is_a_needs_manual_line_in_the_header(self) -> None:
+        location = Location(self.home / ".files/ubuntu", manual="not logged in to GitHub: run `gh auth login`")
+        ctx = Context(self.repo, Profile(self.home / ".files/ubuntu", "home", location=location))
+        _, out = self.run_init(ctx)
+        self.assertIn("needs manual: not logged in to GitHub: run `gh auth login`", out)
 
     def test_commit_with_missing_packages_stops_without_yes(self) -> None:
         absent = doctor.Requirement("tmux", "tmux", "module x", lambda: False)

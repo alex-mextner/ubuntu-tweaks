@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.manifest import Manifest, SourceKind, discover_modules, module_defaults
+from ubuntu_tweaks.manifest import Manifest, SourceKind, module_defaults
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -23,12 +23,14 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 def _source_label(manifest: Manifest) -> str:
     source = manifest.source
     if source.kind is SourceKind.SYSTEM:
-        return f"modules/{manifest.name}/{source.install[0]} ({'root' if source.root else 'user'})"
+        where = f"{manifest.name}/{source.install[0]}"
+        run_as = "root" if source.root else "user"
+        return f"profile module {where} ({run_as})" if manifest.origin == "profile" else f"modules/{where} ({run_as})"
     return source.path or "(settings only)"
 
 
 def render(ctx: Context) -> str:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     ctx.require_modules({manifest.name for manifest in manifests})
     config = ctx.profile.load_config(module_defaults(manifests))
     rows = [

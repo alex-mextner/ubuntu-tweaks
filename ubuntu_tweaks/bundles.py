@@ -290,7 +290,7 @@ def load_bundles(profile: Profile, module_enabled: ModuleGate | None = None) -> 
 
 def module_gate(modules_dir: Path, profile: Profile) -> ModuleGate:
     """``module_enabled`` for ``load_bundles``: the merged module config (defaults < profile < overlay)."""
-    manifests = discover_modules(modules_dir)
+    manifests = discover_modules(modules_dir, profile)
     config = profile.load_config(module_defaults(manifests))
     known = {manifest.name for manifest in manifests}
 

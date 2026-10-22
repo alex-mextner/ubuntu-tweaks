@@ -26,7 +26,7 @@ from ubuntu_tweaks import planners
 from ubuntu_tweaks.actions import DEFAULT_ORDER, Action, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.discovery import discover
-from ubuntu_tweaks.manifest import Manifest, discover_modules
+from ubuntu_tweaks.manifest import Manifest
 from ubuntu_tweaks.settings import SettingsBackend
 
 
@@ -56,7 +56,7 @@ def apply_module_ordering(actions: Sequence[Action], manifests: Sequence[Manifes
 
 def build_actions(ctx: Context, backend: SettingsBackend) -> list[Action]:
     actions = [action for module in discover_planners() for action in module.build(ctx, backend)]
-    apply_module_ordering(actions, discover_modules(ctx.modules_dir))
+    apply_module_ordering(actions, ctx.manifests())
     return actions
 
 

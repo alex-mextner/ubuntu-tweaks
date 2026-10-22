@@ -14,7 +14,7 @@ import argparse
 import json
 
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.manifest import discover_modules, module_defaults
+from ubuntu_tweaks.manifest import module_defaults
 from ubuntu_tweaks.profile import Config, Layer, Profile, TomlValue
 
 _LAYER_LABEL: dict[Layer, str] = {"module": "module default", "shared": "shared", "overlay": "overlay"}
@@ -40,7 +40,7 @@ def _header(profile: Profile) -> list[str]:
 
 
 def _module_lines(ctx: Context, config: Config) -> list[str]:
-    manifests = {manifest.name: manifest for manifest in discover_modules(ctx.modules_dir)}
+    manifests = {manifest.name: manifest for manifest in ctx.manifests()}
     configured = {path[1] for path in config.origins if len(path) > 2 and path[0] == "modules"}
     ctx.require_modules(manifests.keys())
     lines = ["", "modules:"]
@@ -103,7 +103,7 @@ def _root_lines(profile: Profile) -> list[str]:
 
 def render(ctx: Context) -> str:
     profile = ctx.profile
-    config = profile.load_config(module_defaults(discover_modules(ctx.modules_dir)))
+    config = profile.load_config(module_defaults(ctx.manifests()))
     lines = _header(profile)
     lines += _module_lines(ctx, config)
     lines += _panel_lines(profile)
