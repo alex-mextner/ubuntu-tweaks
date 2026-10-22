@@ -177,13 +177,53 @@ class DotfilesInstall(unittest.TestCase):
         self.assertEqual(ok.returncode, 0, ok.stdout)
         self.assertEqual(tree(self.dir), before)
 
-    def test_check_sees_behind_and_diverged_from_the_last_fetched_state(self):
+    def test_check_sees_behind_from_the_last_fetched_state(self):
         self.assertEqual(self.run_install().returncode, 0)
         self.push_upstream()
         git("fetch", "-q", "origin", cwd=self.dir)  # a fetch elsewhere updated the tracking ref
         res = self.run_install("--check")
         self.assertEqual(res.returncode, 3)
         self.assertIn("1 commit(s) behind", res.stdout)
+
+    def test_check_sees_a_diverged_checkout_and_accepts_one_that_is_only_ahead(self):
+        self.assertEqual(self.run_install().returncode, 0)
+        with open(os.path.join(self.dir, "LOCAL"), "w") as f:
+            f.write("l\n")
+        git("add", "-A", cwd=self.dir)
+        git("commit", "-q", "-m", "local", cwd=self.dir)
+        self.assertEqual(self.run_install("--check").returncode, 0)  # ahead only
+        self.push_upstream()
+        git("fetch", "-q", "origin", cwd=self.dir)
+        res = self.run_install("--check")
+        self.assertEqual(res.returncode, 3)
+        self.assertIn("diverged", res.stdout)
+
+    def test_check_sees_a_checkout_cloned_from_somewhere_else(self):
+        self.assertEqual(self.run_install().returncode, 0)
+        res = self.run_install("--check", options={"repo": os.path.join(self.tmp, "other.git")})
+        self.assertEqual(res.returncode, 3)
+        self.assertIn("not " + os.path.join(self.tmp, "other.git"), res.stdout)
+
+    def test_a_plain_directory_inside_another_work_tree_is_not_a_checkout(self):
+        git("init", "-q", "-b", "main", self.home)  # a git-managed $HOME
+        os.makedirs(self.dir)
+        res = self.run_install("--check")
+        self.assertEqual(res.returncode, 3)
+        self.assertIn("not a git checkout", res.stdout)
+        self.assertEqual(self.run_install().returncode, 10)
+
+    def test_an_untracked_file_in_the_way_of_the_fast_forward_is_a_manual_step(self):
+        self.assertEqual(self.run_install().returncode, 0)
+        with open(os.path.join(self.dir, "NEWS"), "w") as f:
+            f.write("mine\n")
+        self.push_upstream()
+        res = self.run_install()
+        self.assertEqual(res.returncode, 10)
+        self.assertIn("could not be fast-forwarded", res.stderr)
+        self.assertEqual(read(os.path.join(self.dir, "NEWS")), "mine\n")
+
+    def test_a_relative_dir_option_is_refused(self):
+        self.assertEqual(self.run_install(options={"dir": ".files"}).returncode, 2)
 
     def test_check_is_drift_for_a_directory_that_is_not_a_checkout(self):
         os.makedirs(self.dir)

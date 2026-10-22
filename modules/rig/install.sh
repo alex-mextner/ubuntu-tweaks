@@ -33,6 +33,8 @@ case "${1:-}" in
   *) echo "usage: $0 [--plan|--check]" >&2; exit 2 ;;
 esac
 
+command -v python3 >/dev/null || { echo "needs manual: python3 is not installed" >&2; exit 10; }
+
 opt() { # opt KEY DEFAULT: one option of UBUNTU_TWEAK_MODULE_CONFIG (booleans as true/false)
   python3 -B -c 'import json, os, sys
 value = json.loads(os.environ.get("UBUNTU_TWEAK_MODULE_CONFIG") or "{}").get(sys.argv[1], sys.argv[2])
@@ -45,6 +47,7 @@ profile_url=$(opt profile_url "")
 profile_sync=$(opt profile_sync true)
 activate=$(opt activate true)
 case "$dir" in \~/*) dir="$HOME/${dir#\~/}" ;; esac
+case "$dir" in /*) ;; *) echo "[modules.rig] dir must be absolute or start with ~/: $dir" >&2; exit 2 ;; esac
 case "$repo_url" in -*) echo "[modules.rig] repo must not start with '-': $repo_url" >&2; exit 2 ;; esac
 case "$profile_url" in -*) echo "[modules.rig] profile_url must not start with '-': $profile_url" >&2; exit 2 ;; esac
 
@@ -71,7 +74,7 @@ if [ "$mode" = check ]; then
       fi
     fi
     if [ "$activate" != false ]; then
-      preview=$("$rig" activate --json 2>/dev/null) || { echo "rig activate --json failed: the check cannot decide" >&2; exit 1; }
+      preview=$("$rig" activate --json) || { echo "rig activate --json failed: the check cannot decide" >&2; exit 1; }
       pending=$(printf '%s' "$preview" | python3 -B -c 'import json, sys; print(len(json.load(sys.stdin).get("config_changes", [])))') || exit 1
       [ "$pending" = 0 ] || problems+=("rig activate would write $pending config switch(es)")
       (cd "$HOME" && "$rig" status >/dev/null 2>&1) || problems+=("rig status reports drift (rig activate commit)")
@@ -87,8 +90,12 @@ fi
 
 # -- --plan: read-only -------------------------------------------------------------------------
 if [ "$mode" = plan ]; then
-  if has_checkout; then echo "rig-cli: $dir present (fast-forward when clean)"; else echo "git clone $repo_url $dir"; fi
-  if link_ok; then echo "link: $link already points at $rig"; else echo "ln -s $rig $link"; fi
+  if has_checkout; then echo "rig-cli: $dir present (fast-forward when clean)"
+  elif [ -e "$dir" ]; then echo "$dir exists and is not a rig-cli checkout: needs manual"
+  else echo "git clone $repo_url $dir"; fi
+  if link_ok; then echo "link: $link already points at $rig"
+  elif [ -e "$link" ] && [ ! -L "$link" ]; then echo "$link exists and is not a symlink: needs manual"
+  else echo "ln -s $rig $link"; fi
   if [ "$profile_sync" = false ]; then
     echo "rig profile: not touched (profile_sync = false)"
   elif profile_configured; then
@@ -111,7 +118,6 @@ fi
 
 # -- install -----------------------------------------------------------------------------------
 command -v git >/dev/null || manual "git is not installed (module base-tools installs it)"
-command -v python3 >/dev/null || manual "python3 is not installed"
 
 if [ ! -e "$dir" ]; then
   mkdir -p "$(dirname "$dir")"
@@ -120,7 +126,7 @@ if [ ! -e "$dir" ]; then
 elif has_checkout; then
   if git -C "$dir" fetch --quiet origin 2>/dev/null; then
     if [ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; then
-      git -C "$dir" merge --ff-only --quiet '@{u}' 2>/dev/null || echo "rig-cli: not fast-forwarded (diverged or no upstream), left as it is"
+      git -C "$dir" merge --ff-only --quiet '@{u}' 2>/dev/null || echo "rig-cli: not fast-forwarded (diverged, no upstream or a local file in the way), left as it is"
     else
       echo "rig-cli: working tree has changes, not updated"
     fi
@@ -134,7 +140,7 @@ has_checkout || manual "$dir does not look like rig-cli (no riglib/cli.py and bi
 
 mkdir -p "$(dirname "$link")"
 if [ -e "$link" ] && [ ! -L "$link" ]; then
-  manual "$link is a regular file; move it away so it can become a symlink to $rig"
+  manual "$link exists and is not a symlink; move it away so it can become a symlink to $rig"
 fi
 link_ok || ln -sfn "$rig" "$link"
 

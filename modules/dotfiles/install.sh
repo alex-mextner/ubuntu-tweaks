@@ -6,8 +6,8 @@
 #
 #   modules/dotfiles/install.sh           clone ~/.files, or fast-forward it when it is clean
 #   modules/dotfiles/install.sh --plan    read-only: what it would do
-#   modules/dotfiles/install.sh --check   read-only: exit 0 = checkout present, origin right, not
-#                                         behind and not diverged (last-fetched state); 3 = drift
+#   modules/dotfiles/install.sh --check   read-only: exit 0 = checkout present, origin is the
+#                                         configured repo (when one is set), not behind, not diverged (last-fetched state); 3 = drift
 #
 # Exit codes (the ubuntu-tweak system-module protocol): 0 ok, 3 drift (--check), 10 needs a manual
 # step (the output says which), anything else is a failure. Options come from `[modules.dotfiles]` of
@@ -33,6 +33,8 @@ case "${1:-}" in
   *) echo "usage: $0 [--plan|--check]" >&2; exit 2 ;;
 esac
 
+command -v python3 >/dev/null || { echo "needs manual: python3 is not installed" >&2; exit 10; }
+
 opt() { # opt KEY DEFAULT: one option of UBUNTU_TWEAK_MODULE_CONFIG
   python3 -B -c 'import json, os, sys
 print(json.loads(os.environ.get("UBUNTU_TWEAK_MODULE_CONFIG") or "{}").get(sys.argv[1], sys.argv[2]))' "$1" "$2"
@@ -41,10 +43,13 @@ print(json.loads(os.environ.get("UBUNTU_TWEAK_MODULE_CONFIG") or "{}").get(sys.a
 repo=$(opt repo "")
 dir=$(opt dir "$HOME/.files")
 case "$dir" in \~/*) dir="$HOME/${dir#\~/}" ;; esac
+case "$dir" in /*) ;; *) echo "[modules.dotfiles] dir must be absolute or start with ~/: $dir" >&2; exit 2 ;; esac
 case "$repo" in -*) echo "[modules.dotfiles] repo must not start with '-': $repo" >&2; exit 2 ;; esac
 manual() { echo "needs manual: $1" >&2; exit 10; }
 
-is_repo() { git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; }
+# the checkout must be rooted AT $dir: a plain directory inside another work tree (a git-managed $HOME)
+# is not one, and fetching or merging there would act on the enclosing repository
+is_repo() { [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$dir" && pwd -P)" ]; }
 clean() { [ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; }
 # "ahead behind" against the last-fetched upstream; empty when there is none
 counts() { git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null || true; }
@@ -52,6 +57,10 @@ counts() { git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null
 if [ "$mode" = check ]; then
   [ -e "$dir" ] || { echo "drift: $dir is missing"; exit 3; }
   is_repo || { echo "drift: $dir is not a git checkout"; exit 3; }
+  if [ -n "$repo" ] && [ "$(git -C "$dir" remote get-url origin 2>/dev/null)" != "$repo" ]; then
+    echo "drift: $dir has origin $(git -C "$dir" remote get-url origin 2>/dev/null || echo none), not $repo"
+    exit 3
+  fi
   read -r ahead behind <<<"$(counts)"
   if [ -n "${behind:-}" ] && [ "$behind" -gt 0 ]; then
     if [ "${ahead:-0}" -gt 0 ]; then echo "drift: $dir has diverged from its upstream"; else echo "drift: $dir is $behind commit(s) behind its upstream"; fi
@@ -97,5 +106,5 @@ if [ -z "${behind:-}" ] || [ "$behind" = 0 ]; then
 fi
 [ "${ahead:-0}" = 0 ] || manual "$dir has diverged from its upstream; rebase or merge it yourself"
 clean || manual "$dir is $behind commit(s) behind but has uncommitted changes; commit or stash them, then re-run"
-git -C "$dir" merge --ff-only --quiet '@{u}'
+git -C "$dir" merge --ff-only --quiet '@{u}' || manual "$dir could not be fast-forwarded (an untracked file is in the way?); fix it, then re-run"
 echo "$dir fast-forwarded by $behind commit(s)"

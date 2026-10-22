@@ -138,6 +138,26 @@ class RigInstall(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(self.calls(), [f"profile init {url}", "activate commit"])
 
+    def test_a_failing_profile_init_is_a_manual_step(self):
+        res = self.run_install(options={"profile_url": "https://forge.example/u/.rig-profile"}, FAKE_PROFILE_RC="1")
+        self.assertEqual(res.returncode, 10)
+        self.assertIn("rig profile did not sync (exit 1)", res.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_a_relative_dir_option_is_refused(self):
+        res = self.run_install(options={"dir": "dev/rig-cli"})
+        self.assertEqual(res.returncode, 2)
+        self.assertFalse(os.path.exists(os.path.join(MODULE, "dev")))
+
+    def test_plan_says_needs_manual_where_install_would(self):
+        os.makedirs(self.dir)
+        os.makedirs(os.path.dirname(self.link))
+        with open(self.link, "w") as f:
+            f.write("mine\n")
+        res = self.run_install("--plan")
+        self.assertIn("is not a rig-cli checkout: needs manual", res.stdout)
+        self.assertIn("is not a symlink: needs manual", res.stdout)
+
     def test_options_can_switch_the_profile_and_activation_off(self):
         os.makedirs(os.path.join(self.home, ".config", "rig", "profile", "repo", ".git"))
         res = self.run_install(options={"profile_sync": False, "activate": False})
@@ -202,7 +222,7 @@ class RigInstall(unittest.TestCase):
             f.write("mine\n")
         res = self.run_install()
         self.assertEqual(res.returncode, 10)
-        self.assertIn("is a regular file", res.stderr)
+        self.assertIn("is not a symlink", res.stderr)
         with open(self.link) as f:
             self.assertEqual(f.read(), "mine\n")
 
@@ -247,7 +267,6 @@ class RigInstall(unittest.TestCase):
         res = self.run_install("--check")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.calls(), ["activate --json", "status"])
-        self.assertTrue(all(call.split()[0] in ("activate", "status", "profile") for call in self.calls()))
         self.assertFalse([c for c in self.calls() if c in ("activate commit", "profile sync")])
 
     def test_check_sees_pending_activation_a_drifting_status_and_an_unsynced_profile(self):
