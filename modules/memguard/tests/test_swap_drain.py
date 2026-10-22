@@ -2,9 +2,11 @@
 
 Run: python3 -B -m unittest discover -s modules/memguard/tests
 """
+
 import fcntl
 import json
 import os
+import pwd
 import signal
 import subprocess
 import sys
@@ -19,8 +21,9 @@ sys.path.insert(0, MODULE)
 import memguard_swap as ms  # noqa: E402
 
 SWAP_DRAIN = os.path.join(MODULE, "swap-drain")
-MEM_TOTAL_KB = 47971212          # home, 2026-10-14
-SWAP_KB = 16777212               # /swap_new.img
+MEM_TOTAL_KB = 47971212  # home, 2026-10-14
+SWAP_KB = 16777212  # /swap_new.img
+ME = pwd.getpwuid(os.getuid()).pw_name  # the scan's "desktop user": it runs as the test user
 
 
 def meminfo(avail_mb, swap_used_mb, swap_total_kb=SWAP_KB, swap_free_kb=None):
@@ -36,14 +39,17 @@ def meminfo(avail_mb, swap_used_mb, swap_total_kb=SWAP_KB, swap_free_kb=None):
 
 
 def psi(some60=0.0, full10=0.0):
-    return (f"some avg10=0.00 avg60={some60:.2f} avg300=0.00 total=131459281\n"
-            f"full avg10={full10:.2f} avg60=0.00 avg300=0.00 total=109314498\n")
+    return (
+        f"some avg10=0.00 avg60={some60:.2f} avg300=0.00 total=131459281\n"
+        f"full avg10={full10:.2f} avg60=0.00 avg300=0.00 total=109314498\n"
+    )
 
 
 def swaps(used_mb, present=True):
     head = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
-    return head + (f"/swap_new.img                           file\t\t{SWAP_KB}\t{used_mb * 1024}\t\t-1\n"
-                   if present else "")
+    return head + (
+        f"/swap_new.img                           file\t\t{SWAP_KB}\t{used_mb * 1024}\t\t-1\n" if present else ""
+    )
 
 
 class Case(unittest.TestCase):
@@ -64,7 +70,7 @@ class Case(unittest.TestCase):
         return self.path(name)
 
     def config(self, **swap):
-        lines = ["[swap]"] + [f"{k} = {json.dumps(v)}" for k, v in swap.items()]
+        lines = ["[swap]", f"user = {json.dumps(ME)}"] + [f"{k} = {json.dumps(v)}" for k, v in swap.items()]
         self.put("memguard.toml", "\n".join(lines) + "\n")
 
     def fixtures(self, avail_mb, used_mb, some60=0.0, full10=0.0):
@@ -73,9 +79,24 @@ class Case(unittest.TestCase):
         self.put("swaps", swaps(used_mb))
 
     def drain_argv(self, *extra):
-        return [sys.executable, "-B", SWAP_DRAIN, "--config", self.path("memguard.toml"),
-                "--meminfo", self.path("meminfo"), "--psi", self.path("psi"), "--swaps", self.path("swaps"),
-                "--state-dir", self.state_dir, "--cgroup-root", self.dir, *extra]
+        return [
+            sys.executable,
+            "-B",
+            SWAP_DRAIN,
+            "--config",
+            self.path("memguard.toml"),
+            "--meminfo",
+            self.path("meminfo"),
+            "--psi",
+            self.path("psi"),
+            "--swaps",
+            self.path("swaps"),
+            "--state-dir",
+            self.state_dir,
+            "--cgroup-root",
+            self.dir,
+            *extra,
+        ]
 
     def run_drain(self, *extra, dry=True, timeout=30):
         argv = self.drain_argv(*extra)
@@ -88,12 +109,17 @@ class Case(unittest.TestCase):
 
     def stubs(self, swapoff_body):
         log = self.path("calls.log")
-        env = f'SWAPS="{self.path("swaps")}"; MEMINFO="{self.path("meminfo")}"; LOG="{log}"; ' \
-              f'STATE="{os.path.join(self.state_dir, "swap-drain.json")}"'
-        off = self.put("swapoff", f"#!/bin/bash\n{env}\necho \"swapoff $*\" >>\"$LOG\"\n{swapoff_body}\n")
-        on = self.put("swapon", f"#!/bin/bash\n{env}\necho \"swapon $*\" >>\"$LOG\"\n"
-                                f"grep -q swap_new \"$SWAPS\" || printf '%s\\n' "
-                                f"'/swap_new.img file {SWAP_KB} 0 -1' >>\"$SWAPS\"\n")
+        env = (
+            f'SWAPS="{self.path("swaps")}"; MEMINFO="{self.path("meminfo")}"; LOG="{log}"; '
+            f'STATE="{os.path.join(self.state_dir, "swap-drain.json")}"'
+        )
+        off = self.put("swapoff", f'#!/bin/bash\n{env}\necho "swapoff $*" >>"$LOG"\n{swapoff_body}\n')
+        on = self.put(
+            "swapon",
+            f'#!/bin/bash\n{env}\necho "swapon $*" >>"$LOG"\n'
+            f"grep -q swap_new \"$SWAPS\" || printf '%s\\n' "
+            f"'/swap_new.img file {SWAP_KB} 0 -1' >>\"$SWAPS\"\n",
+        )
         os.chmod(off, 0o755)
         os.chmod(on, 0o755)
         return ["--swapoff", off, "--swapon", on, "--tick", "0.1", "--fall-gb-per-min", "0"]
@@ -156,8 +182,17 @@ class DryRunDecisions(Case):
     def test_lock_held_reports_in_progress(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
         started = time.time() - 60
-        ms.write_state({"state": "draining", "pid": os.getpid(), "started": started, "updated": time.time(),
-                        "device": "/swap_new.img", "left_kb": 9000 * 1024}, self.state_dir)
+        ms.write_state(
+            {
+                "state": "draining",
+                "pid": os.getpid(),
+                "started": started,
+                "updated": time.time(),
+                "device": "/swap_new.img",
+                "left_kb": 9000 * 1024,
+            },
+            self.state_dir,
+        )
         fd = ms.try_lock(os.path.join(self.state_dir, "swap-drain.lock"), create=True)
         self.addCleanup(os.close, fd)
         hhmm = time.strftime("%H:%M", time.localtime(started))
@@ -170,10 +205,10 @@ class DryRunDecisions(Case):
         lock = self.put("heavy.lock", "")
         self.config(heavy_gate="", heavy_locks=[lock, self.path("absent.lock")])
         self.fixtures(avail_mb=27974, used_mb=15869)
-        self.assertEqual(self.run_drain().returncode, 0)        # free (and a missing file is fine)
+        self.assertEqual(self.run_drain().returncode, 0)  # free (and a missing file is fine)
         fd = os.open(lock, os.O_RDONLY)
         self.addCleanup(os.close, fd)
-        fcntl.flock(fd, fcntl.LOCK_EX)                           # what `flock lock <cmd>` takes
+        fcntl.flock(fd, fcntl.LOCK_EX)  # what `flock lock <cmd>` takes
         r = self.run_drain()
         self.assertEqual(r.returncode, 10)
         self.assertIn(f"skip heavy-lock: {lock} is held by a heavy run", r.stdout)
@@ -194,14 +229,17 @@ class DryRunDecisions(Case):
 
     def fake_gate(self, runners):
         # one file per variant: a rewrite in the same second would be served from a stale .pyc
-        return self.put(f"gate{runners}.py", textwrap.dedent(f"""\
+        return self.put(
+            f"gate{runners}.py",
+            textwrap.dedent(f"""\
             from collections import namedtuple
             R = namedtuple("R", "pid label")
             def scan_live_runners():
                 return [R(1000 + i, "pytest") for i in range({runners})]
             def _max_live():
                 return 2
-            """))
+            """),
+        )
 
     def test_heavy_runners_at_limit_skip(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
@@ -229,6 +267,18 @@ class DryRunDecisions(Case):
         self.config(heavy_gate=broken, heavy_locks=[])
         self.assertIn("live-runner scan unavailable (rc=3", self.run_drain().stdout)
 
+    def test_a_scan_without_a_configured_user_skips_instead_of_guessing_one(self):
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        self.put("memguard.toml", f"[swap]\nheavy_gate = {json.dumps(self.fake_gate(0))}\nheavy_locks = []\n")
+        r = self.run_drain()
+        self.assertEqual(r.returncode, 10)
+        self.assertIn("live-runner scan unavailable (ValueError: memguard.toml: user is not set", r.stdout)
+
+    def test_the_default_config_runs_no_scan_and_holds_no_lock(self):
+        self.fixtures(avail_mb=27974, used_mb=15869)
+        self.put("memguard.toml", "[swap]\n")
+        self.assertEqual(self.run_drain().returncode, 0)
+
     def test_dry_run_executes_and_writes_nothing(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
         self.run_drain("--swapoff", "/bin/false")
@@ -240,10 +290,12 @@ class Watchdog(Case):
 
     def test_drain_done_device_back_on(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
-        stub = self.stubs(textwrap.dedent(f"""\
-            sleep 0.4; cp "$STATE" "{self.path('mid-state.json')}"
+        stub = self.stubs(
+            textwrap.dedent(f"""\
+            sleep 0.4; cp "$STATE" "{self.path("mid-state.json")}"
             printf 'Filename Type Size Used Priority\\n' >"$SWAPS"
-            exit 0"""))
+            exit 0""")
+        )
         r = self.run_drain(*stub, dry=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.calls(), ["swapoff /swap_new.img", "swapon /swap_new.img"])
@@ -265,47 +317,68 @@ class Watchdog(Case):
         # the swap-in eats RAM: avail falls under the 6 GB floor; the kernel would then stop on
         # the pending SIGTERM and reinsert the device (it stays in /proc/swaps)
         low = self.put("meminfo-low", meminfo(4000, 9000))
-        stub = self.stubs(textwrap.dedent(f"""\
+        stub = self.stubs(
+            textwrap.dedent(f"""\
             trap 'echo TERM >>"$LOG"; exit 255' TERM
             cp "{low}" "$MEMINFO"
             for i in $(seq 100); do sleep 0.1; done
-            exit 0"""))
+            exit 0""")
+        )
         r = self.run_drain(*stub, dry=False)
         self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
-        self.assertEqual(self.calls(), ["swapoff /swap_new.img", "TERM"])     # no swapon: it never went off
+        self.assertEqual(self.calls(), ["swapoff /swap_new.img", "TERM"])  # no swapon: it never went off
         self.assertIn("abort /swap_new.img: MemAvailable 4000M < floor 6144M; SIGTERM to swapoff", r.stdout)
         self.assertIn("device stayed on with its pages", r.stdout)
         with open(self.path("swaps")) as f:
             self.assertIn("/swap_new.img", f.read())
         st = self.state()
         self.assertEqual((st["state"], st["last"]["result"]), ("idle", "aborted"))
-        self.assertIn("last_drain_finished", st)                 # an abort starts the cooldown too
+        self.assertIn("last_drain_finished", st)  # an abort starts the cooldown too
 
     def test_watchdog_aborts_on_psi(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
         high = self.put("psi-high", psi(full10=7.5))
-        stub = self.stubs(textwrap.dedent(f"""\
+        stub = self.stubs(
+            textwrap.dedent(f"""\
             trap 'echo TERM >>"$LOG"; exit 255' TERM
-            cp "{high}" "{self.path('psi')}"
-            for i in $(seq 100); do sleep 0.1; done"""))
+            cp "{high}" "{self.path("psi")}"
+            for i in $(seq 100); do sleep 0.1; done""")
+        )
         r = self.run_drain(*stub, dry=False)
         self.assertEqual(r.returncode, 12, r.stdout)
         self.assertIn("PSI full avg10 7.5 > 5", r.stdout)
 
     def test_sigterm_to_drain_aborts_swapoff(self):
         self.fixtures(avail_mb=27974, used_mb=15869)
-        stub = self.stubs(textwrap.dedent(f"""\
+        stub = self.stubs(
+            textwrap.dedent(f"""\
             trap 'echo TERM >>"$LOG"; exit 255' TERM
-            touch "{self.path('started')}"
-            for i in $(seq 100); do sleep 0.1; done"""))
-        argv = [sys.executable, "-B", SWAP_DRAIN, "--config", self.path("memguard.toml"),
-                "--meminfo", self.path("meminfo"), "--psi", self.path("psi"), "--swaps", self.path("swaps"),
-                "--state-dir", self.state_dir, "--cgroup-root", self.dir, *stub]
+            touch "{self.path("started")}"
+            for i in $(seq 100); do sleep 0.1; done""")
+        )
+        argv = [
+            sys.executable,
+            "-B",
+            SWAP_DRAIN,
+            "--config",
+            self.path("memguard.toml"),
+            "--meminfo",
+            self.path("meminfo"),
+            "--psi",
+            self.path("psi"),
+            "--swaps",
+            self.path("swaps"),
+            "--state-dir",
+            self.state_dir,
+            "--cgroup-root",
+            self.dir,
+            *stub,
+        ]
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
         deadline = time.time() + 10
         while not os.path.exists(self.path("started")) and time.time() < deadline:
             time.sleep(0.05)
-        proc.send_signal(signal.SIGTERM)                          # systemctl stop swap-drain
+        proc.send_signal(signal.SIGTERM)  # systemctl stop swap-drain
         out, _ = proc.communicate(timeout=20)
         self.assertEqual(proc.returncode, 12, out)
         self.assertIn("stop requested (SIGTERM)", out)
@@ -325,10 +398,16 @@ class Watchdog(Case):
         on = stub[stub.index("--swapon") + 1]
         with open(on) as f:
             body = f.read()
-        count = self.path("swapon.count")                       # fails twice, then works
+        count = self.path("swapon.count")  # fails twice, then works
         with open(on, "w") as f:
-            f.write(body.replace("grep -q", f'n=$(cat "{count}" 2>/dev/null || echo 0); echo $((n+1)) >"{count}"\n'
-                                            f'[ "$n" -lt 2 ] && {{ echo busy >&2; exit 1; }}\ngrep -q', 1))
+            f.write(
+                body.replace(
+                    "grep -q",
+                    f'n=$(cat "{count}" 2>/dev/null || echo 0); echo $((n+1)) >"{count}"\n'
+                    f'[ "$n" -lt 2 ] && {{ echo busy >&2; exit 1; }}\ngrep -q',
+                    1,
+                )
+            )
         r = self.run_drain(*stub, "--swapon-retry-s", "0", dry=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("swapon /swap_new.img failed rc=1 (try 1/5): busy", r.stdout)
@@ -339,7 +418,7 @@ class Watchdog(Case):
         stub = self.stubs("printf 'Filename Type Size Used Priority\\n' >\"$SWAPS\"")
         on = stub[stub.index("--swapon") + 1]
         with open(on, "w") as f:
-            f.write(f"#!/bin/bash\necho \"swapon $*\" >>\"{self.path('calls.log')}\"\necho nope >&2\nexit 1\n")
+            f.write(f'#!/bin/bash\necho "swapon $*" >>"{self.path("calls.log")}"\necho nope >&2\nexit 1\n')
         r = self.run_drain(*stub, "--swapon-retry-s", "0", dry=False)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertEqual(self.calls().count("swapon /swap_new.img"), 5)
@@ -363,7 +442,7 @@ class Watchdog(Case):
         with open(on) as f:
             body = f.read()
         with open(on, "w") as f:
-            f.write(body + "exit 1\n")                         # device back in /proc/swaps, rc 1
+            f.write(body + "exit 1\n")  # device back in /proc/swaps, rc 1
         r = self.run_drain(*stub, "--swapon-retry-s", "0", dry=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.calls().count("swapon /swap_new.img"), 1)
@@ -377,7 +456,7 @@ class Config(unittest.TestCase):
 
     def test_bad_keys_are_errors(self):
         with tempfile.NamedTemporaryFile("w", suffix=".toml") as f:
-            f.write("[swap]\ndrain_headroom_gb = \"8\"\n")
+            f.write('[swap]\ndrain_headroom_gb = "8"\n')
             f.flush()
             with self.assertRaisesRegex(ValueError, "wrong type"):
                 ms.load_config(f.name)

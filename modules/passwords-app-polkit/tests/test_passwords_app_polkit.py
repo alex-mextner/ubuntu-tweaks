@@ -33,7 +33,7 @@ class PolkitModule(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.home = self.root / "home/ultra"
+        self.home = self.root / "home/alice"
         self.checkout = self.home / "dev/passwords-app"
         (self.checkout / "data/polkit").mkdir(parents=True)
         (self.checkout / "data/polkit/io.github.alex_mextner.Passwords.policy").write_text(POLICY)

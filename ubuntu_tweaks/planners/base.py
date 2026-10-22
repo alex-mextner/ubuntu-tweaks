@@ -40,7 +40,6 @@ from ubuntu_tweaks.manifest import (
     Manifest,
     Post,
     SourceKind,
-    discover_modules,
     module_defaults,
 )
 from ubuntu_tweaks.planners.packages import PackageAction, installed_apt
@@ -231,7 +230,7 @@ def build(
     process: Process | None = None,
     env_overrides: EnvOverrides | None = None,
 ) -> list[Action]:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     enabled = _enabled(ctx, manifests, config)
     if not any(manifest.install.apt or manifest.steps or manifest.post for manifest in enabled):
@@ -287,7 +286,7 @@ def build(
                         manifest,
                         ctx.repo_root,
                         process=runner,
-                        module_config=module_config_json(config, manifest.name),
+                        module_config=module_config_json(config, manifest.name, manifest.source.repo),
                     )
                 )
             )
@@ -311,7 +310,7 @@ def build(
 
 
 def warnings(ctx: Context, backend: SettingsBackend) -> list[str]:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     asks_identity = any(
         step.name == "git-identity" for manifest in _enabled(ctx, manifests, config) for step in manifest.steps

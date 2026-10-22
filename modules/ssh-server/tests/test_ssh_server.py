@@ -48,7 +48,7 @@ PubkeyAuthentication yes
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 PermitRootLogin no
-AllowUsers ultra
+AllowUsers alice
 """
 STOCK_CONFIG = "Include /etc/ssh/sshd_config.d/*.conf\n\nPort 22\n#ListenAddress 0.0.0.0\nUsePAM yes\n"
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXampleEXampleEXampleEXampleEXample test@host"
@@ -131,9 +131,9 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.home = self.root / "home/ultra"
+        self.home = self.root / "home/alice"
         (self.home / ".ssh").mkdir(parents=True)
-        self.account = Account("ultra", self.home, 1000)
+        self.account = Account("alice", self.home, 1000)
 
     def write(self, relative, text):
         path = self.root / relative

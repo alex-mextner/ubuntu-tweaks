@@ -41,7 +41,7 @@ from ubuntu_tweaks.module_script import (  # noqa: E402
 )
 from ubuntu_tweaks.process import Process  # noqa: E402
 
-DEFAULT_REPO = "https://github.com/alex-mextner/firefox-passkey-qr.git"
+NO_REPO = "set [modules.firefox-passkey-qr] repo to the git URL of the firefox-passkey-qr repository"
 DEFAULT_CHECKOUT = "~/dev/firefox-passkey-qr"
 INSTALLER = "passkey-qr"
 TOKEN_PURPOSE = "ha-token"
@@ -99,8 +99,8 @@ class PasskeyQR(Module):
         remove_snap = options.get("remove_snap", False)
         if not isinstance(remove_snap, bool):
             raise ModuleError(f"[modules.firefox-passkey-qr] remove_snap must be true or false, got {remove_snap!r}")
-        repo = str(options.get("repo", DEFAULT_REPO))
-        if not repo.startswith("https://"):
+        repo = options.get("repo")
+        if repo is not None and not str(repo).startswith("https://"):
             raise ModuleError(f"[modules.firefox-passkey-qr] repo must be an https:// URL, got {repo!r}")
         ha_url = options.get("ha_url")
         if ha_url is not None and not str(ha_url).startswith(("http://", "https://")):
@@ -113,7 +113,7 @@ class PasskeyQR(Module):
         self._process = process
         self._is_root = is_root
         self._which = which
-        self._repo = repo
+        self._repo = None if repo is None else str(repo)
         self._ha_url = None if ha_url is None else str(ha_url)
         self._remove_snap = remove_snap
         self._checkout = Path(checkout)
@@ -149,6 +149,8 @@ class PasskeyQR(Module):
         present = self._installer_present()
         found = [Finding(present, f"installer {self._installer}")]
         if not present:
+            if self._repo is None:
+                found.append(Finding(False, "repository to clone", NO_REPO, manual=True))
             return found
         if self._supports("check"):
             code, output = self._run("check")
@@ -176,6 +178,8 @@ class PasskeyQR(Module):
 
     def plan(self) -> list[str]:
         if not self._installer_present():
+            if self._repo is None:
+                return [f"  needs manual: {NO_REPO}"]
             return [f"  clone {self._repo} to {self._checkout}, then:"]
         argv = ["--dry-run", *self._install_argv()] if self._supports("--yes") else ["--dry-run", "install"]
         code, output = self._run(*argv, timeout=180)
@@ -194,6 +198,8 @@ class PasskeyQR(Module):
         if not self._installer_present():
             if self._checkout.exists() and any(self._checkout.iterdir()):
                 raise ModuleError(f"{self._checkout} exists and is not a firefox-passkey-qr checkout")
+            if self._repo is None:
+                raise NeedsManual(NO_REPO)
             if self._which("git") is None:
                 raise NeedsManual("git is not installed (the base tools step installs it)")
             self._checkout.parent.mkdir(parents=True, exist_ok=True)

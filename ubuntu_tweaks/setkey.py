@@ -50,7 +50,7 @@ from ubuntu_tweaks.capture.rules import relocatable_schemas
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.extension import ExtensionModule
-from ubuntu_tweaks.manifest import Manifest, SettingsFile, SourceKind, discover_modules, module_defaults
+from ubuntu_tweaks.manifest import Manifest, SettingsFile, SourceKind, module_defaults
 from ubuntu_tweaks.profile import Config
 from ubuntu_tweaks.settings import (
     SettingsBackend,
@@ -197,7 +197,7 @@ def module_target(facts: SchemaFacts, backend: SettingsBackend, key: str) -> Res
 
 
 def enabled_modules(ctx: Context) -> tuple[tuple[Manifest, ...], Config]:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     return tuple(manifest for manifest in manifests if config.module_enabled(manifest.name)), config
 

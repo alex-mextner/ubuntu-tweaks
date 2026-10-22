@@ -9,3 +9,5 @@ root = false
 install = "firefox-passkey-qr install"
 check = "firefox-passkey-qr check"
 preview = "firefox-passkey-qr plan"
+# the author-published tool this module installs; override with [modules.firefox-passkey-qr] repo = "..."
+repo = "https://github.com/alex-mextner/firefox-passkey-qr.git"

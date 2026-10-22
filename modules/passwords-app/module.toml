@@ -8,3 +8,5 @@ kind = "system"
 root = false
 install = "passwords-app install"
 check = "passwords-app check"
+# the author-published tool this module installs; override with [modules.passwords-app] repo = "..."
+repo = "https://github.com/alex-mextner/passwords-app.git"

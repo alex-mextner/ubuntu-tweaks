@@ -47,13 +47,15 @@ PIPELINE_MODULES = (
     "rig",
     "dotfiles",
 )
-OPTIONAL_MODULES = ("firefox-passkey-qr", "rig", "dotfiles")  # off by default, a machine opts in
+OPTIONAL_MODULES = ("firefox-passkey-qr", "rig")  # off by default, a machine opts in (dotfiles is on)
 
 
 class ScriptedProcess(FakeProcess):
     """Module installers on an empty machine: every ``check`` reports drift (3), every ``preview`` one line."""
 
     def query(self, argv: Sequence[str], *, timeout: float = 60.0, cwd: Path | None = None) -> CommandResult:
+        if argv[0] == "env":  # the planner hands module options through `env UBUNTU_TWEAK_MODULE_CONFIG=... <script>`
+            argv = [part for part in argv[1:] if not part.startswith("UBUNTU_TWEAK_MODULE_CONFIG=")]
         if "/repo/modules/" not in argv[0]:
             return super().query(argv, timeout=timeout, cwd=cwd)
         if argv[-1] in ("check", "--check"):
@@ -82,7 +84,7 @@ class EmptyMachine(TempDirCase):
 
         def overrides(env: StepEnv) -> StepEnv:
             return dataclasses.replace(
-                env, root=self.root, home=self.home, user="ultra", group="ultra", uid=os.getuid(), which=lambda _: None
+                env, root=self.root, home=self.home, user="alice", group="alice", uid=os.getuid(), which=lambda _: None
             )
 
         def build(ctx: Context, backend: FakeBackend) -> list[Action]:

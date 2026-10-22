@@ -24,6 +24,8 @@ sys.dont_write_bytecode = True
 from ubuntu_tweaks.module_script import ModuleError, NeedsManual  # noqa: E402
 from ubuntu_tweaks.process import CommandResult, Process  # noqa: E402
 
+REPO = "https://git.example.org/tools/firefox-passkey-qr.git"
+
 
 def load_script():
     loader = importlib.machinery.SourceFileLoader("firefox_passkey_qr_script", str(MODULE / "firefox-passkey-qr"))
@@ -111,7 +113,8 @@ class Base(unittest.TestCase):
         self.process = KeyringProcess({})
 
     def module(self, options=None, *, is_root=False):
-        return pq.PasskeyQR(self.process, self.home, options or {}, is_root=is_root, which=self.tools.get)
+        options = {"repo": REPO, **(options or {})}
+        return pq.PasskeyQR(self.process, self.home, options, is_root=is_root, which=self.tools.get)
 
     def stub(self, **kw):
         make_stub(self.checkout, **{"has_yes": True, "has_check": True, **kw})
@@ -173,7 +176,12 @@ class Robustness(Base):
     def test_help_prose_with_the_word_check_is_not_a_check_subcommand(self):
         self.stub(has_check=False)
         script = self.checkout / "passkey-qr"
-        script.write_text(script.read_text().replace('HELP = "usage: passkey-qr [-h] [--dry-run] "', 'HELP = "please check the docs. usage: passkey-qr [-h] [--dry-run] "'))
+        script.write_text(
+            script.read_text().replace(
+                'HELP = "usage: passkey-qr [-h] [--dry-run] "',
+                'HELP = "please check the docs. usage: passkey-qr [-h] [--dry-run] "',
+            )
+        )
         self.assertFalse(self.module()._supports("check"))
 
     def test_a_check_that_exits_with_another_code_is_a_broken_checker(self):
@@ -252,8 +260,18 @@ class Install(Base):
 
     def test_a_missing_checkout_is_cloned_first(self):
         self.module().apply()
-        self.assertEqual(self.process.git[0][:3], ["git", "clone", pq.DEFAULT_REPO])
+        self.assertEqual(self.process.git[0][:3], ["git", "clone", REPO])
         self.assertTrue(self.installed())
+
+    def test_an_unset_repo_is_manual_when_there_is_nothing_to_clone(self):
+        unset = pq.PasskeyQR(self.process, self.home, {}, is_root=False, which=self.tools.get)
+        manual = [f for f in unset.findings() if f.manual]
+        self.assertEqual(len(manual), 1)
+        self.assertIn("[modules.firefox-passkey-qr] repo", manual[0].line())
+        self.assertIn("needs manual", "\n".join(unset.plan()))
+        with self.assertRaisesRegex(NeedsManual, r"\[modules\.firefox-passkey-qr\] repo"):
+            unset.apply()
+        self.assertEqual(self.process.git, [])
 
     def test_a_foreign_directory_is_not_touched_and_git_is_needed_to_clone(self):
         self.checkout.mkdir(parents=True)

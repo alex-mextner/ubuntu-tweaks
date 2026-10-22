@@ -42,7 +42,7 @@ class HyperdockModuleTests(TempDirCase):
         shutil.copytree(REPO_ROOT / "modules/hyperdock", self.repo / "modules/hyperdock")
         write(
             self.repo / "gnome-extensions/hyperdock/metadata.json",
-            json.dumps({"uuid": "hyperdock@alex-mextner", "schema-id": SCHEMA}),
+            json.dumps({"uuid": "hyperdock@example", "schema-id": SCHEMA}),
         )
         self.preset = parse_keyfile((REPO_ROOT / "modules/hyperdock/dock.ini").read_text(encoding="utf-8"))["/"]
         keys = {name: FakeKey(key_type(text), text) for name, text in self.preset.items()}

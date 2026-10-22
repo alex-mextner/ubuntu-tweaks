@@ -9,6 +9,7 @@ Public API:
 - ``Context(repo_root, profile, only)``: ``repo_root`` is the umbrella checkout, ``profile`` a
   ``Profile`` (already resolved from ``--profile`` / ``--machine``), ``only`` the frozenset
   from ``--only a,b`` (empty = everything); ``modules_dir`` is ``repo_root / "modules"``;
+  ``manifests()`` is every module, the profile's own included (``manifest.discover_modules``);
   ``selects(name)`` is True when ``only`` is empty or contains ``name``;
   ``require_modules(known)`` raises ``UnknownModuleError`` for a ``--only`` name not in ``known``.
 - ``REPO_ROOT``: the checkout this package runs from.
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ubuntu_tweaks.errors import UnknownModuleError
+from ubuntu_tweaks.manifest import Manifest, discover_modules
 from ubuntu_tweaks.profile import Profile
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +35,11 @@ class Context:
     @property
     def modules_dir(self) -> Path:
         return self.repo_root / "modules"
+
+    def manifests(self) -> tuple[Manifest, ...]:
+        """Every module: the engine's ``modules/`` plus the profile's own (a profile module overrides an engine
+        module of the same name)."""
+        return discover_modules(self.modules_dir, self.profile)
 
     def selects(self, name: str) -> bool:
         return not self.only or name in self.only

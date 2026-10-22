@@ -21,6 +21,7 @@ FILES = [
     ("swap-drain.timer", "etc/systemd/system/swap-drain.timer", 0o644),
     ("50-memguard-swap-drain.rules", "etc/polkit-1/rules.d/50-memguard-swap-drain.rules", 0o644),
 ]
+USER = "alice"
 
 
 def snapshot(root):
@@ -37,36 +38,25 @@ class InstallCheck(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def check(self, *args, root=True):
-        env = dict(os.environ)
+        env = dict(os.environ, MEMGUARD_USER=USER)
         if root:
             env["MEMGUARD_ROOT"] = self.root
         return subprocess.run([INSTALL, *args], env=env, capture_output=True, text=True, timeout=60)
 
     def install_all(self):
-        user = subprocess.run(
-            [
-                "python3",
-                "-B",
-                "-c",
-                "import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m;"
-                "print(m.load_config(sys.argv[1] + '/memguard.toml')['user'])",
-                MODULE,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
         for src, dst, mode in FILES:
             target = os.path.join(self.root, dst)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(os.path.join(MODULE, src)) as f:
                 text = f.read()
             if src.endswith(".rules"):
-                text = text.replace("@USER@", user)
+                text = text.replace("@USER@", USER)
+            if src == "memguard.toml":
+                text = text.replace('user = ""', f'user = "{USER}"')
             with open(target, "w") as f:
                 f.write(text)
             os.chmod(target, mode)
-        return user
+        return USER
 
     def test_empty_root_is_drift(self):
         r = self.check("--check")
@@ -163,6 +153,7 @@ class InstallCheck(unittest.TestCase):
             with open(path, "w") as f:
                 f.write(f"#!/bin/sh\necho {tool} called >&2\nexit 99\n")
             os.chmod(path, 0o755)
+        extra_env.setdefault("MEMGUARD_USER", USER)
         env = dict(os.environ, MEMGUARD_ROOT=self.root, PATH=bin_dir + os.pathsep + os.environ["PATH"], **extra_env)
         return subprocess.run([INSTALL], env=env, capture_output=True, text=True, timeout=60)
 
@@ -185,6 +176,8 @@ class InstallCheck(unittest.TestCase):
                 self.assertEqual(digest, hashlib.sha256(f.read()).hexdigest(), dst)
         with open(os.path.join(self.root, FILES[-1][1])) as f:
             self.assertNotIn("@USER@", f.read())
+        with open(os.path.join(self.root, "etc/memguard/memguard.toml")) as f:
+            self.assertNotIn('user = ""', f.read())
 
     def test_check_passes_after_a_staged_install_also_through_the_stamp(self):
         self.assertEqual(self.stage().returncode, 0)
@@ -215,10 +208,70 @@ class InstallCheck(unittest.TestCase):
 
     @unittest.skipIf(os.geteuid() == 0, "root may install")
     def test_a_real_install_without_a_root_override_needs_root(self):
-        r = subprocess.run([INSTALL], env={k: v for k, v in os.environ.items() if k != "MEMGUARD_ROOT"},
-                           capture_output=True, text=True, timeout=60)
+        r = subprocess.run(
+            [INSTALL],
+            env={k: v for k, v in os.environ.items() if k != "MEMGUARD_ROOT"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
         self.assertEqual(r.returncode, 1)
         self.assertIn("run with sudo", r.stderr)
+
+    def fake_bin(self, **scripts):
+        bin_dir = self.root.rstrip("/") + "-fakebin"
+        os.makedirs(bin_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, bin_dir, ignore_errors=True)
+        for name, body in scripts.items():
+            path = os.path.join(bin_dir, name)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\n" + body)
+            os.chmod(path, 0o755)
+        return bin_dir
+
+    def real_dry_run(self, bin_dir, **env):
+        """A non-staged --dry-run (reads the real /etc, writes nothing) with fake getent/id."""
+        base = {k: v for k, v in os.environ.items() if k not in ("MEMGUARD_ROOT", "SUDO_USER", "PKEXEC_UID")}
+        base["PATH"] = bin_dir + os.pathsep + base["PATH"]
+        return subprocess.run([INSTALL, "--dry-run"], env={**base, **env}, capture_output=True, text=True, timeout=60)
+
+    GETENT = (
+        'case "$2" in 1234) echo "alice:x:1234:1234::/home/alice:/bin/sh" ;; *) echo "$2:x:1:1::/h:/bin/sh" ;; esac\n'
+    )
+
+    def test_sudo_user_is_the_desktop_user(self):
+        r = self.real_dry_run(self.fake_bin(getent=self.GETENT), SUDO_USER="alice", PKEXEC_UID="1234")
+        self.assertIn("memguard: desktop user: alice", r.stdout, r.stderr)
+
+    def test_pkexec_uid_is_resolved_when_there_is_no_sudo_user(self):
+        r = self.real_dry_run(self.fake_bin(getent=self.GETENT), PKEXEC_UID="1234")
+        self.assertIn("memguard: desktop user: alice", r.stdout, r.stderr)
+
+    def test_root_without_sudo_user_or_pkexec_uid_or_configured_user_fails(self):
+        fake_id = 'case "$1" in -u) echo 0 ;; -un) echo root ;; *) exec /usr/bin/id "$@" ;; esac\n'
+        r = self.real_dry_run(self.fake_bin(id=fake_id, getent=self.GETENT), SUDO_USER="root")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("memguard.toml: user is not set and no SUDO_USER/PKEXEC_UID", r.stderr)
+
+    def test_a_staged_install_writes_the_resolved_user_into_the_installed_config_and_the_rule(self):
+        self.assertEqual(self.stage(MEMGUARD_USER="alice").returncode, 0)
+        with open(os.path.join(self.root, "etc/memguard/memguard.toml")) as f:
+            self.assertIn('\nuser = "alice"', f.read())
+        with open(os.path.join(self.root, FILES[-1][1])) as f:
+            self.assertIn('subject.user === "alice"', f.read())
+        self.assertEqual(self.check("--check").returncode, 0)
+
+    def test_check_compares_against_the_rendering_for_the_resolved_user(self):
+        self.assertEqual(self.stage(MEMGUARD_USER="alice").returncode, 0)
+        r = subprocess.run(
+            [INSTALL, "--check"],
+            env=dict(os.environ, MEMGUARD_ROOT=self.root, MEMGUARD_USER="bob"),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(r.returncode, 3)
+        self.assertIn('+user = "bob"', r.stdout)
 
     def test_unknown_flag_is_a_usage_error(self):
         self.assertEqual(self.check("--bogus").returncode, 2)

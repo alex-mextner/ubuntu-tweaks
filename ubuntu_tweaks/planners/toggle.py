@@ -30,7 +30,6 @@ from gi.repository import GLib  # noqa: E402
 from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase  # noqa: E402
 from ubuntu_tweaks.context import Context  # noqa: E402
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules  # noqa: E402
-from ubuntu_tweaks.manifest import discover_modules  # noqa: E402
 from ubuntu_tweaks.settings import SettingsBackend  # noqa: E402
 
 SCHEMA = "org.gnome.shell"
@@ -154,7 +153,7 @@ def extras(ctx: Context, backend: SettingsBackend) -> Sequence[str]:
         metadata = module.metadata()
         if metadata is not None:
             declared.add(metadata.uuid)
-    for manifest in discover_modules(ctx.modules_dir):
+    for manifest in ctx.manifests():
         if manifest.extension is not None:
             declared.update(manifest.extension.conflicts, manifest.extension.retire)
     return [

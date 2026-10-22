@@ -13,11 +13,13 @@ Public API:
   ``"submodule"``, ``"local"``, ``"builtin"``, ``"system"``). ``ego`` is reserved and rejected
   with ``not supported yet (#20)``.
 - ``SettingsMode``: ``ENFORCE`` (default) or ``SEED``.
-- ``Source(kind, path, install, check, root, preview)``: ``path`` is set for submodule/local (relative to
+- ``Source(kind, path, install, check, root, preview, repo)``: ``path`` is set for submodule/local (relative to
   the repo root); ``install``, ``check`` and ``preview`` (optional read-only plan command) are argv
   tuples, set for ``system`` only, whose ``argv[0]`` is a path inside the module directory: a runner
   must execute ``manifest.directory / argv[0]`` with the rest as arguments, never a ``$PATH`` lookup;
-  ``root`` (default True) says whether the installer needs sudo.
+  ``root`` (default True) says whether the installer needs sudo; ``repo`` (optional, system only) is the
+  default git URL of the tool the module fetches: the planner hands it to the installer as the option
+  ``repo`` unless ``[modules.<name>] repo`` in the profile sets one.
 - ``ExtensionSpec(conflicts, retire)``, ``SettingsFile(file, schema, mode)``,
   ``Seed(key, provider)``, ``Migration(from_uuid, from_path)``, ``Deps(apt)``.
 - ``Install(apt, provides)``, ``Step(name, args)`` and ``Post(name, run, check, needs_root, after,
@@ -29,10 +31,13 @@ Public API:
   ``phase`` (``base`` / ``packages`` / ``system`` as a ``Phase``, or ``None``) place the module's
   install-time actions in the plan; ``manual`` is the optional hint printed in the closing ``Manual
   steps`` block when the module's installer exits 10 (how the user finishes it).
-- ``parse_manifest(name, text, directory) -> Manifest``.
-- ``load_manifest(directory) -> Manifest`` (module name = directory name).
-- ``discover_modules(modules_dir) -> tuple[Manifest, ...]``: sorted by name; directories
-  without ``module.toml`` are not modules yet and are skipped.
+- ``parse_manifest(name, text, directory, origin="engine") -> Manifest``.
+- ``Manifest.origin`` is ``"engine"`` (``modules/<name>/``) or ``"profile"`` (``<profile>/modules/<name>/``, same
+  manifest and kinds; a ``submodule`` is refused, a ``local`` path is relative to the module directory).
+- ``load_manifest(directory, origin="engine") -> Manifest`` (module name = directory name).
+- ``discover_modules(modules_dir, profile=None) -> tuple[Manifest, ...]``: sorted by name; directories
+  without ``module.toml`` are not modules yet and are skipped; with a ``profile`` that exists, its own modules
+  are added and one with the name of an engine module replaces it.
 - ``module_defaults(manifests) -> TomlTable``: ``{"modules": {name: {"enabled": bool}}}``, the
   lowest layer for ``Profile.load_config``.
 """
@@ -43,20 +48,22 @@ import re
 import shlex
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from ubuntu_tweaks.dconf_path import is_dconf_dir_path
 from ubuntu_tweaks.actions import DEFAULT_ORDER, Phase
 from ubuntu_tweaks.errors import ConfigError
-from ubuntu_tweaks.profile import TomlTable, TomlValue
+from ubuntu_tweaks.profile import Profile, TomlTable, TomlValue
 
 MANIFEST_FILE = "module.toml"
 _NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _EGO_MESSAGE = "source kind 'ego' is not supported yet (#20)"
 MAX_ORDER = 999
 PACKAGE_PLACEHOLDER = re.compile(r"\{packages\.(apt|snap|flatpak|brew)\}")
+type Origin = Literal["engine", "profile"]
 MODULE_PHASES = {"base": Phase.BASE, "packages": Phase.PACKAGES, "system": Phase.SYSTEM}
 POST_AFTER_INSTALL = "install"
 
@@ -81,6 +88,7 @@ class Source:
     check: tuple[str, ...] = ()
     root: bool = True
     preview: tuple[str, ...] = ()
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,7 @@ class Manifest:
     steps: tuple[Step, ...] = ()
     post: tuple[Post, ...] = ()
     manual: str = ""  # how the user completes the step the installer reports as manual (exit 10)
+    origin: Origin = "engine"  # "profile": the module lives in the profile's modules/ directory
 
 
 class _Reader:
@@ -248,6 +257,16 @@ def _command(reader: _Reader, key: str) -> tuple[str, ...]:
     return argv
 
 
+def _profile_source(source: Source, directory: Path, reader: _Reader) -> Source:
+    """A module of the profile cannot be a git submodule of the engine; a ``local`` extension is found next
+    to the module, so its path is made absolute (the engine resolves relative ones against its own checkout)."""
+    if source.kind is SourceKind.SUBMODULE:
+        raise reader.fail("a profile module cannot be a git submodule of the engine; use kind local or system")
+    if source.kind is SourceKind.LOCAL and source.path is not None:
+        return replace(source, path=str(directory / source.path))
+    return source
+
+
 def _parse_source(reader: _Reader) -> Source:
     kind_text = reader.required_string("kind")
     if kind_text == "ego":
@@ -263,13 +282,14 @@ def _parse_source(reader: _Reader) -> Source:
         _relative_path(reader, path, "path")
         return Source(kind, path=path)
     if kind is SourceKind.SYSTEM:
-        reader.only("kind", "install", "check", "root", "preview")
+        reader.only("kind", "install", "check", "root", "preview", "repo")
         return Source(
             kind,
             install=_command(reader, "install"),
             check=_command(reader, "check"),
             root=reader.boolean("root", True),
             preview=_command(reader, "preview") if "preview" in reader.table else (),
+            repo=reader.string("repo"),
         )
     reader.only("kind")
     return Source(kind)
@@ -387,7 +407,7 @@ def _parse_posts(readers: list[_Reader]) -> tuple[Post, ...]:
     return tuple(posts)
 
 
-def parse_manifest(name: str, text: str, directory: Path) -> Manifest:
+def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engine") -> Manifest:
     where = str(directory / MANIFEST_FILE)
     if not _NAME.fullmatch(name):
         raise ConfigError(f"{where}: invalid module name {name!r}; use lowercase letters, digits, '.', '_' and '-'")
@@ -417,6 +437,8 @@ def parse_manifest(name: str, text: str, directory: Path) -> Manifest:
     if source_reader is None:
         raise root.fail("missing required table [source]")
     source = _parse_source(source_reader)
+    if origin == "profile":
+        source = _profile_source(source, directory, root)
 
     extension_reader = root.sub("extension")
     has_code = source.kind in (SourceKind.SUBMODULE, SourceKind.LOCAL)
@@ -456,24 +478,36 @@ def parse_manifest(name: str, text: str, directory: Path) -> Manifest:
         steps=steps,
         post=_parse_posts(root.array("post")),
         manual=root.string("manual") or "",
+        origin=origin,
     )
 
 
-def load_manifest(directory: Path) -> Manifest:
+def load_manifest(directory: Path, origin: Origin = "engine") -> Manifest:
     path = directory / MANIFEST_FILE
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise ConfigError(f"{path}: cannot read: {error.strerror or error}") from error
-    return parse_manifest(directory.name, text, directory)
+    return parse_manifest(directory.name, text, directory, origin)
 
 
-def discover_modules(modules_dir: Path) -> tuple[Manifest, ...]:
+def _load_dir(modules_dir: Path, origin: Origin) -> tuple[Manifest, ...]:
     if not modules_dir.is_dir():
         return ()
     return tuple(
-        load_manifest(directory) for directory in sorted(modules_dir.iterdir()) if (directory / MANIFEST_FILE).is_file()
+        load_manifest(directory, origin)
+        for directory in sorted(modules_dir.iterdir())
+        if (directory / MANIFEST_FILE).is_file()
     )
+
+
+def discover_modules(modules_dir: Path, profile: Profile | None = None) -> tuple[Manifest, ...]:
+    """The engine's modules plus the profile's own (``<profile>/modules/<name>/``, spec *Profile modules*);
+    a profile module with the name of an engine module replaces it."""
+    found = {manifest.name: manifest for manifest in _load_dir(modules_dir, "engine")}
+    if profile is not None and profile.exists:
+        found.update({manifest.name: manifest for manifest in _load_dir(profile.modules_dir, "profile")})
+    return tuple(found[name] for name in sorted(found))
 
 
 def module_defaults(manifests: Sequence[Manifest]) -> TomlTable:

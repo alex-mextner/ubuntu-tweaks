@@ -31,6 +31,7 @@ def load_script():
 
 fp = load_script()
 
+
 def signed_zip(tag="x"):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -92,7 +93,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.home = self.root / "home/ultra"
+        self.home = self.root / "home/alice"
         self.stage = self.home / ".local/state/ubuntu-tweaks/firefox"
         self.stage.mkdir(parents=True)
         self.xpi = self.stage / "passwords-app.xpi"
@@ -103,7 +104,7 @@ class Base(unittest.TestCase):
 
     def module(self, machine=None, options=None, *, is_root=True):
         return fp.FirefoxPolicy(
-            machine or FakeSnap(), self.root, Account("ultra", self.home, os.getuid()), options or {}, is_root=is_root
+            machine or FakeSnap(), self.root, Account("alice", self.home, os.getuid()), options or {}, is_root=is_root
         )
 
 
@@ -201,7 +202,9 @@ class ExtensionCopy(Base):
             self.module().apply()
         self.xpi.write_bytes(signed_zip())
         with self.assertRaises(ModuleError):
-            fp.FirefoxPolicy(FakeSnap(), self.root, Account("ultra", self.home, os.getuid() + 1), {}, is_root=True).apply()
+            fp.FirefoxPolicy(
+                FakeSnap(), self.root, Account("alice", self.home, os.getuid() + 1), {}, is_root=True
+            ).apply()
 
     def test_nothing_staged_is_a_manual_step_and_writes_nothing(self):
         self.xpi.unlink()

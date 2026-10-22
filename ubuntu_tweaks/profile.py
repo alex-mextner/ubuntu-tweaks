@@ -10,14 +10,16 @@ profile that does not exist is a ``ConfigError``.
 
 Public API:
 
-- ``DEFAULT_PROFILE_RELPATH`` (``.files/ubuntu``, relative to ``$HOME``), ``PROFILE_ENV``
-  (``UBUNTU_TWEAK_PROFILE``), ``HOSTNAME_FILE`` (``/etc/hostname``).
+- ``DEFAULT_PROFILE_RELPATH`` (``.files/ubuntu``, relative to ``$HOME``: only where a profile is
+  expected when nothing was found), ``PROFILE_ENV`` (``UBUNTU_TWEAK_PROFILE``), ``HOSTNAME_FILE``
+  (``/etc/hostname``).
 - ``detect_machine(hostname_file=HOSTNAME_FILE) -> str``: stripped file content, else
   ``socket.gethostname()``.
 - ``Profile.resolve(profile=None, machine=None, *, env=None, hostname_file=HOSTNAME_FILE,
-  home=None) -> Profile``: location is ``profile`` > ``$UBUNTU_TWEAK_PROFILE`` >
-  ``<home>/.files/ubuntu``; machine is ``machine`` > ``detect_machine()`` and must be one path
-  component.
+  home=None, locate=None) -> Profile``: location is ``profile`` > ``$UBUNTU_TWEAK_PROFILE`` >
+  ``locate()`` (``identity.locate``: the dotfiles repository found on disk or through ``gh``; without
+  a ``locate`` the placeholder ``<home>/.files/ubuntu``); machine is ``machine`` > ``detect_machine()``
+  and must be one path component. ``Profile.location`` keeps what ``locate`` found.
 - ``Profile`` (frozen): ``root``, ``machine``, ``machine_source`` (``"flag"`` | ``"hostname"``);
   paths ``overlay_dir``, ``profile_toml``, ``machine_toml``, ``settings_dir``,
   ``overlay_settings_dir``, ``files_dir``, ``overlay_files_dir``, ``packages_toml``,
@@ -59,6 +61,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.identity import Location
 
 type TomlValue = str | int | float | bool | datetime | date | time | list[TomlValue] | TomlTable
 type TomlTable = dict[str, TomlValue]
@@ -321,6 +324,7 @@ class Profile:
     root: Path
     machine: str
     machine_source: MachineSource = "hostname"
+    location: Location | None = None
 
     @classmethod
     def resolve(
@@ -331,25 +335,35 @@ class Profile:
         env: Mapping[str, str] | None = None,
         hostname_file: Path = HOSTNAME_FILE,
         home: Path | None = None,
+        locate: Callable[[], Location] | None = None,
     ) -> Profile:
         environment = os.environ if env is None else env
         if profile is not None and not str(profile).strip():
             raise ConfigError("--profile needs a directory, got an empty value")
         requested = profile if profile is not None else environment.get(PROFILE_ENV) or None
+        location: Location | None = None
         if requested is not None:
             root = Path(requested).expanduser().absolute()
             if not root.is_dir():
                 raise ConfigError(f"profile directory {root} does not exist")
+        elif locate is not None:
+            location = locate()
+            root = location.root
         else:
             base = home if home is not None else Path.home()
             root = base / DEFAULT_PROFILE_RELPATH
         if machine is not None:
-            return cls(root, _validate_machine_name(machine), "flag")
-        return cls(root, _validate_machine_name(detect_machine(hostname_file)), "hostname")
+            return cls(root, _validate_machine_name(machine), "flag", location)
+        return cls(root, _validate_machine_name(detect_machine(hostname_file)), "hostname", location)
 
     @property
     def overlay_dir(self) -> Path:
         return self.root / "machines" / self.machine
+
+    @property
+    def modules_dir(self) -> Path:
+        """The profile's own modules, ``<profile>/modules/<name>/module.toml`` (spec *Profile modules*)."""
+        return self.root / "modules"
 
     @property
     def profile_toml(self) -> Path:

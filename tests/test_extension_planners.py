@@ -31,9 +31,9 @@ EXTENSION_MODULE = '[extension]\nconflicts = ["dock@x"]\nretire = ["lamp@x"]\n'
 class ExtensionLinkTests(Scenario):
     def setUp(self) -> None:
         super().setUp()
-        self.source = self.add_extension("gnome-extensions/eng@ultra", "eng@ultra")
-        self.add_module("eng", path="gnome-extensions/eng@ultra")
-        self.link = self.extensions_dir / "eng@ultra"
+        self.source = self.add_extension("gnome-extensions/eng@example", "eng@example")
+        self.add_module("eng", path="gnome-extensions/eng@example")
+        self.link = self.extensions_dir / "eng@example"
 
     def plan(self) -> Plan:
         return Plan.build(extension_links.build(self.context(), self.backend()))
@@ -41,15 +41,15 @@ class ExtensionLinkTests(Scenario):
     def test_missing_link_is_planned_as_link_and_converges(self) -> None:
         plan = self.plan()
         self.assertEqual([action.kind for action in plan.actions], ["link"])
-        self.assertIn("~/.local/share/gnome-shell/extensions/eng@ultra -> ", plan.actions[0].describe())
+        self.assertIn("~/.local/share/gnome-shell/extensions/eng@example -> ", plan.actions[0].describe())
         plan.execute()
         self.assertEqual(os.path.realpath(self.link), str(self.source.resolve()))
         self.assertEqual(len(self.plan()), 0)
 
     def test_the_uuid_comes_from_metadata_not_the_directory_name(self) -> None:
-        write(self.source / "metadata.json", '{"uuid": "renamed@ultra"}')
+        write(self.source / "metadata.json", '{"uuid": "renamed@example"}')
         self.plan().execute()
-        self.assertTrue((self.extensions_dir / "renamed@ultra").is_symlink())
+        self.assertTrue((self.extensions_dir / "renamed@example").is_symlink())
         self.assertFalse(self.link.exists())
 
     def test_real_directory_in_the_way_is_backed_up_and_flagged_link_replace(self) -> None:
@@ -317,8 +317,8 @@ class ToggleTests(Scenario):
 
 class DiscoveryTests(Scenario):
     def test_all_four_planners_contribute_to_the_discovered_plan(self) -> None:
-        self.add_extension("gnome-extensions/eng@ultra", "eng@ultra")
-        self.add_module("eng", path="gnome-extensions/eng@ultra")
+        self.add_extension("gnome-extensions/eng@example", "eng@example")
+        self.add_module("eng", path="gnome-extensions/eng@example")
         kinds = {a.kind for a in discovered_build_actions(self.context(), self.backend())}
         self.assertTrue({"link", "enable", "compile-schemas"} <= kinds)
 

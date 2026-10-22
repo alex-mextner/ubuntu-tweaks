@@ -29,7 +29,7 @@ from ubuntu_tweaks.commands._support import has_gi
 from ubuntu_tweaks.actions import Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
-from ubuntu_tweaks.manifest import discover_modules, module_defaults
+from ubuntu_tweaks.manifest import module_defaults
 from ubuntu_tweaks.process import elevate
 from ubuntu_tweaks.process import run as run_command
 
@@ -59,7 +59,7 @@ def _binary(name: str) -> Callable[[], bool]:
 
 def planned_installs(ctx: Context) -> dict[str, str]:
     """apt package -> the enabled module whose ``[install] apt`` installs it (the first, by order)."""
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     planned: dict[str, str] = {}
     for manifest in sorted(manifests, key=lambda item: (item.order, item.name)):
@@ -82,7 +82,7 @@ def requirements(ctx: Context, *, honor_planned: bool = True) -> list[Requiremen
         Requirement("git", "git", "submodules, update", _binary("git"), planned.get("git")),
         Requirement("glib-compile-schemas", "libglib2.0-bin", "extension schemas", _binary("glib-compile-schemas")),
     ]
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     for manifest in manifests:
         if not ctx.selects(manifest.name) or not config.module_enabled(manifest.name):

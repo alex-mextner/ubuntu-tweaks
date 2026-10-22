@@ -106,7 +106,7 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(manifest.source.check, ("install.sh", "--check"))
 
     def test_minimal_local_and_builtin(self) -> None:
-        local = parse('[source]\nkind = "local"\npath = "gnome-extensions/english-in-overview@ultra"\n')
+        local = parse('[source]\nkind = "local"\npath = "gnome-extensions/english-in-overview@ubuntu-tweaks"\n')
         self.assertEqual((local.source.kind, local.description, local.extension), (SourceKind.LOCAL, "", None))
         builtin = parse(
             '[source]\nkind = "builtin"\n[[settings]]\nfile = "k.ini"\nschema = "org.gnome.desktop.interface"\n'

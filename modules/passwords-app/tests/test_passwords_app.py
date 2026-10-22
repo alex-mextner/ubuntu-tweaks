@@ -27,6 +27,7 @@ def load_script():
 
 
 pw = load_script()
+REPO = "https://git.example.org/tools/passwords-app.git"
 HEAD = "0123456789abcdef0123456789abcdef01234567"
 SECRET_ID = "someone@example.com"
 MUTATING = {"clone", "enable", "start", "restart", "install.sh"}
@@ -83,7 +84,7 @@ class FakeMachine(Process):
             return CommandResult(0 if self.active else 3, "active\n" if self.active else "inactive\n", "")
         if argv[0] == "busctl" and "list" in argv:
             return CommandResult(
-                0, f"{pw.BUS_NAME}  123 passwords-appd ultra :1.99 user@1000.service -\n" if self.active else "", ""
+                0, f"{pw.BUS_NAME}  123 passwords-appd alice :1.99 user@1000.service -\n" if self.active else "", ""
             )
         if argv[0] == "busctl" and "introspect" in argv:
             return CommandResult(0 if self.active else 1, "", "")
@@ -117,7 +118,10 @@ class Base(unittest.TestCase):
         self.tools = {"git": "/usr/bin/git", "uv": "/usr/bin/uv"}
 
     def module(self, machine, options=None, *, is_root=False):
-        return pw.PasswordsApp(machine, self.home, {}, options or {}, is_root=is_root, which=self.tools.get, sleep=lambda seconds: None)
+        options = {"repo": REPO, **(options or {})}
+        return pw.PasswordsApp(
+            machine, self.home, {}, options, is_root=is_root, which=self.tools.get, sleep=lambda seconds: None
+        )
 
     def machine(self, **kw):
         return FakeMachine(self.home, self.checkout, **kw)
@@ -186,7 +190,12 @@ class Check(Base):
         machine.make_checkout()
         machine.run_installer()
         host = self.home / ".mozilla/native-messaging-hosts" / pw.HOST_NAME
-        for text in ("[]", '"x"', "null", json.dumps({"path": 3, "allowed_extensions": "passwords-app@alex-mextner.github.io"})):
+        for text in (
+            "[]",
+            '"x"',
+            "null",
+            json.dumps({"path": 3, "allowed_extensions": "passwords-app@alex-mextner.github.io"}),
+        ):
             host.write_text(text)
             self.assertTrue(self.module(machine)._host_manifest_problem(), text)
 
@@ -212,12 +221,28 @@ class Check(Base):
         self.assertIsNone(pw.daemon_state(json.dumps({"data": []})))
 
 
+class UnsetRepo(Base):
+    def unset(self, machine):
+        return pw.PasswordsApp(
+            machine, self.home, {}, {}, is_root=False, which=self.tools.get, sleep=lambda seconds: None
+        )
+
+    def test_findings_report_a_manual_finding_and_apply_needs_manual(self):
+        machine = self.machine()
+        manual = [f for f in self.unset(machine).findings() if f.manual]
+        self.assertEqual(len(manual), 1)
+        self.assertIn("[modules.passwords-app] repo", manual[0].line())
+        with self.assertRaisesRegex(NeedsManual, r"\[modules\.passwords-app\] repo"):
+            self.unset(machine).apply()
+        self.assertEqual(machine.executed, [])
+
+
 class Install(Base):
     def test_fresh_machine_converges(self):
         machine = self.machine()
         module = self.module(machine)
         module.apply()
-        self.assertEqual(machine.executed[0], ("git", "clone", pw.DEFAULT_REPO, str(self.checkout)))
+        self.assertEqual(machine.executed[0], ("git", "clone", REPO, str(self.checkout)))
         self.assertEqual(machine.executed[1], (str(self.checkout / "scripts/install.sh"),))
         unmet = [f.line() for f in module.findings() if not f.ok]
         self.assertEqual(unmet, [])

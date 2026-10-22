@@ -26,7 +26,8 @@ Steps (``[[step]] name = ...``, arguments as extra keys of the entry):
 - ``git-identity``: ``git config --global user.name`` / ``user.email`` from ``[git] name`` / ``email``
   of ``profile.toml`` / ``machine.toml``; a value that is not set there is not touched (no default).
 - ``gh-login`` (``host``, ``token_ref``): ``gh auth login --with-token`` with the token of the keychain
-  item ``token_ref`` (default ``ubuntu-tweaks/gh-token``; ``[git] token_ref`` overrides).
+  item named by ``[git] token_ref``. There is no default item: without ``token_ref`` the step is
+  ``needs manual: gh auth login`` and ``check()`` stays ``gh auth status``.
 - ``git-credential-helper`` (``host``): ``gh auth setup-git`` for the host.
 - ``brew-prefix`` (``prefix``): creates the Homebrew prefix owned by the user, the one root step the
   installer would otherwise ask sudo for.
@@ -57,7 +58,10 @@ from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.profile import Config, TomlValue
 
 DEFAULT_BREW_PREFIX = "/home/linuxbrew/.linuxbrew"
-DEFAULT_TOKEN_REF = "ubuntu-tweaks/gh-token"
+NO_TOKEN_REF = (
+    "no [git] token_ref set in profile.toml; run `gh auth login`, "
+    "or set `[git] token_ref` to a keychain item holding a token"
+)
 KEYCHAIN_CALLER = "ubuntu-tweaks"
 DOWNLOAD_TIMEOUT_SECONDS = 60
 GH_STATUS_TIMEOUT_SECONDS = 30
@@ -272,10 +276,10 @@ class GhLoginAction(Action):
     phase = Phase.BASE
     kind = "gh-login"
 
-    def __init__(self, env: StepEnv, host: str, token_ref: str) -> None:
+    def __init__(self, env: StepEnv, host: str, token_ref: str | None) -> None:
         self._env = env
         self._host = host
-        self._ref = token_ref
+        self._ref = token_ref  # None: no [git] token_ref, so no keychain item is ever guessed
         self._problem: str | None | object = _UNSET
 
     def _keychain(self, *words: str) -> list[str]:
@@ -283,6 +287,7 @@ class GhLoginAction(Action):
 
     def _token_problem(self) -> str | None:
         """Why no token can be taken from the keychain, or ``None`` when one can."""
+        assert self._ref is not None
         result = self._env.process.query([*self._keychain("exists"), self._ref])
         reasons = {
             0: None,
@@ -297,6 +302,8 @@ class GhLoginAction(Action):
         return f"`keychain exists` exited {result.returncode}"
 
     def describe(self) -> str:
+        if self._ref is None:
+            return f"needs manual: gh auth login ({NO_TOKEN_REF})"
         if self._problem is _UNSET:
             self._problem = self._token_problem()  # one keychain probe per action, not one per describe()
         if self._problem is None:
@@ -312,6 +319,8 @@ class GhLoginAction(Action):
     def run(self) -> None:
         if self._env.which("gh") is None:
             raise ManualStepRequired("gh auth login (gh is not installed yet: its package step did not run)")
+        if self._ref is None:
+            raise ManualStepRequired(f"gh auth login ({NO_TOKEN_REF})")
         problem = self._token_problem()
         if problem is not None:
             raise ManualStepRequired(f"gh auth login ({problem}; store a token with `keychain set {self._ref}`)")
@@ -437,7 +446,7 @@ def _gh_login(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[
     where = f"module {module} step gh-login"
     _only_args(args, where, "host", "token_ref")
     section = git_section(env.config)  # the profile is the user's: it wins over what a manifest ships
-    ref = section.get("token_ref") or _text_arg(args, "token_ref", where, DEFAULT_TOKEN_REF)
+    ref = section.get("token_ref") or (_text_arg(args, "token_ref", where) if "token_ref" in args else None)
     host = section.get("host") or _text_arg(args, "host", where, "github.com")
     return [GhLoginAction(env, host, ref)]
 

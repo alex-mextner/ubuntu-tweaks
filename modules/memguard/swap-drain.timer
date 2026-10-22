@@ -3,7 +3,7 @@
 # cooldown is over), so most runs are a one-line skip. On demand: `memguard swap-drain`.
 [Unit]
 Description=memguard swap-drain every 10 min (gated: most runs skip)
-Documentation=https://github.com/alex-mextner/ubuntu-tweaks/blob/main/docs/specs/memguard.md
+Documentation=file:///usr/local/lib/memguard/memguard_swap.py
 
 [Timer]
 OnBootSec=10min

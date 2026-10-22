@@ -11,7 +11,7 @@
 # (the output says which), anything else is a failure. Options come from `[modules.rig]` of
 # profile.toml / machine.toml as JSON in UBUNTU_TWEAK_MODULE_CONFIG (never a secret):
 #
-#   repo          git URL of rig-cli                  (default https://git.hyperide.ai/ultrabricks/rig-cli)
+#   repo          git URL of rig-cli, REQUIRED (no default: the repository is private to its author's forge)
 #   dir           where the checkout lives            (default ~/dev/rig-cli)
 #   profile_url   private rig profile repo to `rig profile init` when none is set up yet (default none)
 #   profile_sync  false = never touch the rig profile (default true)
@@ -20,7 +20,6 @@
 # Spec: docs/specs/ubuntu-tweak-cli.md, "Optional modules: rig, dotfiles".
 set -euo pipefail
 
-default_repo=https://git.hyperide.ai/ultrabricks/rig-cli
 
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -41,7 +40,7 @@ value = json.loads(os.environ.get("UBUNTU_TWEAK_MODULE_CONFIG") or "{}").get(sys
 print(str(value).lower() if isinstance(value, bool) else value)' "$1" "$2"
 }
 
-repo_url=$(opt repo "$default_repo")
+repo_url=$(opt repo "")
 dir=$(opt dir "$HOME/dev/rig-cli")
 profile_url=$(opt profile_url "")
 profile_sync=$(opt profile_sync true)
@@ -51,11 +50,22 @@ case "$dir" in /*) ;; *) echo "[modules.rig] dir must be absolute or start with 
 case "$repo_url" in -*) echo "[modules.rig] repo must not start with '-': $repo_url" >&2; exit 2 ;; esac
 case "$profile_url" in -*) echo "[modules.rig] profile_url must not start with '-': $profile_url" >&2; exit 2 ;; esac
 
+
 link="$HOME/.local/bin/rig"
 rig="$dir/bin/rig"
 profile_checkout="${XDG_CONFIG_HOME:-$HOME/.config}/rig/profile/repo"
 
 has_checkout() { [ -f "$dir/riglib/cli.py" ] && [ -x "$rig" ]; }
+
+# no repo and nothing to update: needs manual; with a checkout on disk the repo option is not needed
+no_repo="set [modules.rig] repo to the git URL of rig-cli"
+if [ -z "$repo_url" ] && ! has_checkout; then
+  case "$mode" in
+    plan) echo "needs manual: $no_repo"; exit 0 ;;
+    check) echo "drift: [modules.rig] repo is not set"; exit 3 ;;
+    *) echo "needs manual: $no_repo" >&2; exit 10 ;;
+  esac
+fi
 link_ok() { [ -L "$link" ] && [ "$(readlink -f "$link")" = "$(readlink -f "$rig")" ]; }
 profile_configured() { [ -e "$profile_checkout/.git" ]; }
 manual() { echo "needs manual: $1" >&2; exit 10; }

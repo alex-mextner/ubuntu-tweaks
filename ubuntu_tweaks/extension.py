@@ -35,7 +35,7 @@ from pathlib import Path
 
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
-from ubuntu_tweaks.manifest import Manifest, SourceKind, discover_modules, module_defaults
+from ubuntu_tweaks.manifest import Manifest, SourceKind, module_defaults
 
 METADATA_FILE = "metadata.json"
 RELOGIN_HINT = "Log out and back in to load new or changed GNOME extension code (Shell on Wayland reads it at login)."
@@ -93,7 +93,7 @@ class ExtensionModule:
 
 
 def extension_modules(ctx: Context, *, enabled_only: bool = True) -> list[ExtensionModule]:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     found: list[ExtensionModule] = []
     for manifest in manifests:

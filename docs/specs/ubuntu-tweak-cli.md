@@ -73,26 +73,36 @@ as any behavior change.
 
 Request 7 is answered by splitting the system in two:
 
-- **Engine = this repo** (`alex-mextner/ubuntu-tweaks`, public): the `ubuntu-tweak` CLI, the
-  modules (hyperdock, english-in-overview, memguard, apple-hid-battery) and the machinery that
-  applies a profile. There is no second tool.
-- **Profile = a directory of personal data**, by default `~/.files/ubuntu` (the `ubuntu/`
-  subdirectory of the private `alex-mextner/.files` repo): Settings-panel values, linked
-  config files, packages, root-level system settings and per-machine overlays.
+- **Engine = this repo** (`alex-mextner/ubuntu-tweaks`, public open source): the `ubuntu-tweak` CLI, the
+  generic modules (base tools, zsh, clipboard, git and gh, Homebrew, ssh server, memguard, apple-hid-battery,
+  and the bundled extensions hyperdock and english-in-overview), the modules that integrate tools published by
+  the project author (*Author-published tool modules*) and the machinery that applies a profile.
+  There is no second tool.
+- **Profile = a directory of personal data**, the `ubuntu/` subdirectory of the user's own dotfiles repository
+  (`.files`, `dotfiles`, `.dotfiles` or `dot-files` on their GitHub account; *Profile discovery*):
+  Settings-panel values, linked config files, packages, root-level system settings, per-machine overlays and
+  the user's own modules (*Profile modules*).
 
-The public engine never contains personal settings; the private profile never contains engine
-code. The mac-era dotfiles at the root of `.files` (zsh, zplug, brew) are not touched by this
-system; `ubuntu/` is self-contained. Profile location: `--profile DIR` >
-`$UBUNTU_TWEAK_PROFILE` > `~/.files/ubuntu`. An explicit location that does not exist is
-invalid config (exit 2); a missing default location means "no profile" and only module
-defaults apply.
+The public engine never contains personal settings and names no person, host or repository owner of its own
+(request 14): the dotfiles repository is found through `gh`, the only places that name a tool of the author
+are the manifests and installers of the *Author-published tool modules* (each switchable, each default URL
+overridable), other tools that belong to one person are modules of that person's profile, and
+person-specific values (git name and email, the keychain item of a token) come from the profile only and have
+no default. `tests/test_no_identity.py` fails on a new occurrence of the author's identifiers;
+`tests/identity_allowlist.txt` lists each allowed path and why (the project's own repository URL, the upstream
+URL of a bundled extension, the tool references of the author-published modules). The private profile never
+contains engine code.
+Whatever else a dotfiles repository holds (zsh, zplug, brew) is not touched by this system; `ubuntu/` is
+self-contained. Profile location: `--profile DIR` > `$UBUNTU_TWEAK_PROFILE` > the profile found by
+*Profile discovery*. An explicit location that does not exist is invalid config (exit 2); no discovered
+profile means "no profile" and only module defaults apply, with the header saying what was looked for.
 
 Fresh machine:
 
 ```sh
-gh repo clone alex-mextner/.files ~/.files
-git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init      # doctor -> submodules -> apply preview -> --commit
+gh auth login                                          # once; the dotfiles repository is found through it
+git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/ubuntu-tweaks
+~/ubuntu-tweaks/bin/ubuntu-tweak init      # doctor -> submodules -> apply preview -> --commit
 ```
 
 ### Safety invariants
@@ -134,7 +144,7 @@ Covered by `tests/test_launcher.py`.
 
 | Command | What it does |
 |---|---|
-| `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` prints the exact `gh repo clone alex-mextner/.files ~/.files` command and continues with the module-only plan. Re-running is safe. |
+| `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
 | `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing. |
 | `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
 | `status` | Drift both ways (see *Drift*), grouped as Missing / Modified / Extra. Exit 3 when anything declared is Missing or Modified; extras alone exit 0. |
@@ -215,6 +225,7 @@ that is absolute or contains `..` are invalid config (exit 2).
     kind = "system"
     install = "install.sh"
     check = "install.sh --check"   # exit 0 = installed files match; must be read-only
+    repo = "https://example.org/tool.git"   # optional, system only: default git URL of the tool this module installs
     ```
 
     The action's `check()` runs the checker; its `run()` runs the installer through
@@ -238,8 +249,9 @@ that is absolute or contains `..` are invalid config (exit 2).
     real root can verify is listed in `docs/specs/memguard.md`, *Real-root verification*). `apple-hid-battery` checks the running
     kernel: module present, loaded at
     boot, livepatch enabled, or absent on kernels with the upstream fix (>= 7.3).
-    A `system` module may also set `root = false`, `preview`, read `UBUNTU_TWEAK_MODULE_CONFIG` and exit 10
-    from its installer; see *Init pipeline*.
+    A `system` module may also set `root = false`, `preview` and `repo` (the default git URL of the tool it
+    installs, handed to the installer as the option `repo`: *Author-published tool modules*), read
+    `UBUNTU_TWEAK_MODULE_CONFIG` and exit 10 from its installer; see *Init pipeline*.
   - `ego`: an extension from extensions.gnome.org by uuid and optional version. The
     manifest schema reserves it and validation rejects it with "not supported yet (#20)"
     until it is implemented. Source kinds are one class each behind one interface
@@ -283,10 +295,13 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
-| 10 | optional, off unless a machine enables them: rig (+ tmux, omp, `ctmux`), the `.files` checkout | `rig` (100), `dotfiles` (110) |
+| 10 | rig (opt-in: + tmux, omp, `ctmux`) and your dotfiles repository (found through gh) cloned, with the profile in it; `dotfiles` is on by default and a no-op when there is none | `rig` (100), `dotfiles` (110) |
 
 `ctmux` is not a module: it is a first-class rig tool (`tools.items.ctmux`), installed by `rig activate`
 inside step 10.
+
+Any other tool of a person's own is a module of their profile (*Profile modules*) and takes any `order` it
+likes.
 
 <a id="init-order-table"></a>
 **Order of every module** (the golden `init` preview of an empty machine, `tests/golden/init_empty_machine.txt`,
@@ -308,7 +323,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
 | `rig` | 100 | `system` | off |
-| `dotfiles` | 110 | `system` | off |
+| `dotfiles` | 110 | `system` | on |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
 
@@ -432,21 +447,24 @@ Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
 [git]                          # profile.toml, machine.toml wins
 name = "Ada Lovelace"
 email = "ada@example.org"
-token_ref = "ubuntu-tweaks/gh-token"   # optional keychain item; this is the default
+token_ref = "example/gh-token"         # optional: the keychain item that holds a token; no default
 host = "github.com"                    # optional
 ```
 
 `git-identity` runs `git config --global user.name` / `user.email` only for the keys set; without `[git]`
 nothing is planned and the plan prints a warning. `gh-login` takes the token **only** from the keychain
-item `token_ref` (the `keychain` CLI, GNOME Keyring / Secret Service), at run time:
+item that `[git] token_ref` names (no default; the `keychain` CLI, GNOME Keyring / Secret Service), at run time:
 `keychain exec --no-prompt --caller ubuntu-tweaks --stdin <ref> -- gh auth login --hostname <host>
 --with-token`; the value is never in argv, an environment variable, a file, the profile or this process,
-and its output is masked by `keychain`. Items under `ubuntu-tweaks/` belong to the caller `ubuntu-tweaks`;
-another namespace needs a grant in `~/.config/keychain-cli/policy.toml`. When the keychain is missing, locked,
+and its output is masked by `keychain`. The caller name `ubuntu-tweaks` owns the items under `ubuntu-tweaks/`;
+an item in any other namespace (such as `example/gh-token`) needs a grant in `~/.config/keychain-cli/policy.toml`. When the keychain is missing, locked,
 denies access or has no item, the action is `needs manual: gh auth login (<reason>; store a token with
 `keychain set <ref>`)` and `status` lists it Missing. A token that exists but is rejected, or an unreachable
 host, is the same manual step (`gh auth login` failing never aborts the plan). `git-credential-helper` runs
 `gh auth setup-git --hostname <host> --force`.
+With no `[git] token_ref` no keychain item is ever guessed: the `gh-login` step is `needs manual: gh auth login
+(no [git] token_ref set in profile.toml; run `gh auth login`, or set `[git] token_ref` to a keychain item holding
+a token)` and `status` lists it Missing.
 
 **Homebrew installer pin.** `brew-prefix` creates `/home/linuxbrew/.linuxbrew` owned by the user with
 `sudo install -d` (the only root part; the installer then finds a writable prefix and needs no sudo).
@@ -471,7 +489,7 @@ the following are verified with fake-root unit tests and must be checked by hand
 machine (as for `memguard`): `ubuntu-tweak init --commit` on a fresh VM installs the apt batch; `getent
 passwd $USER` shows `/usr/bin/zsh` afterwards (log out and in); `ls -ld /home/linuxbrew/.linuxbrew` is owned
 by the user and `/home/linuxbrew/.linuxbrew/bin/brew --version` works; a second `init --commit` reports
-`0 changed`; with a token stored by `keychain set ubuntu-tweaks/gh-token`, `gh auth status` is logged in
+`0 changed`; with a token stored by `keychain set <your token_ref>` (the item `[git] token_ref` names), `gh auth status` is logged in
 and `git config --global --get-all credential.https://github.com.helper` names `gh auth git-credential`;
 without one, `status` lists `gh-login` as Missing and `apply --commit` still exits 0. Not yet observed on a
 real fresh machine: the Homebrew installer running non-interactively against a pre-created prefix
@@ -502,7 +520,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 
 | Step | Module | Why only you | How you complete it |
 |---|---|---|---|
-| `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set ubuntu-tweaks/gh-token` (GNOME keyring), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
+| `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set <your token_ref>` (GNOME keyring; the item `[git] token_ref` names, no default), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
 | git identity | `git-gh` | not planned, only warned | set `[git] name` / `email` in `profile.toml` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
 | `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` (or `pkexec`); `--yes` only skips the apt confirmation, never the password |
@@ -513,7 +531,8 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | signed extension missing | `firefox-policy` | nothing to force-install yet | do the AMO step above first |
 | extension not active | `firefox-autologin` | Firefox must show the WebExtension-backend prompt | apply `firefox-policy`, restart Firefox, answer the prompt, check `about:policies` |
 | Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (see *Firefox*): without it the bridge step is skipped. Until firefox-passkey-qr PR 2 is merged the installer cannot run unattended: the module reports a manual step, run `passkey-qr install` in `~/dev/firefox-passkey-qr` |
-| rig / `.files` clone | `rig`, `dotfiles` (opt-in) | forge credentials, or a directory in the way | `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote`; resolve a diverged `~/.files` |
+| gh login or clone | `dotfiles` | the repository is found through your gh login | `gh auth login`; set `[modules.dotfiles] repo` or pass `--dotfiles-repo OWNER/NAME`; move a directory that is in the way; resolve a diverged checkout |
+| rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
 
 ### One command on a fresh machine
@@ -521,15 +540,16 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 Request 13. `scripts/bootstrap.sh` (POSIX `sh`, at most 40 lines) takes a stock Ubuntu with neither `curl` nor
 `git` to a running `init`: when `git`, `curl`, the CA bundle or `python3-gi` is missing it runs `sudo apt-get update`
 and `sudo apt-get install -y git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
-without them), clones `alex-mextner/ubuntu-tweaks` with its submodules into `~/xp/ubuntu-tweaks` (or
+without them), clones this project's repository (`$UBUNTU_TWEAKS_REPO`, default `alex-mextner/ubuntu-tweaks`) with its submodules into `~/ubuntu-tweaks` (or
 `$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated), then runs
 `bin/ubuntu-tweak init "$@"`. The commit is explicit: with no arguments it is the **preview**; `--yes` is the
 only word that turns it into `init --commit --yes` (apply and install without asking); any other argument
 (`--commit`, `--no-sudo`) goes to `init` unchanged. It is the one-liner of the README:
 `curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scripts/bootstrap.sh | sh -s -- --yes`
 (once on `main`; with no `curl` at all, `wget -qO- <url> | sh -s -- --yes`, or `sudo apt-get install -y curl` first).
-`sudo` still asks for the password on the terminal. A private profile (`~/.files/ubuntu`) is not cloned by it: the
-first `init` prints the exact clone command and the *Manual steps* block lists the gh login it needs.
+`sudo` still asks for the password on the terminal. The user's dotfiles repository (with the profile) is not cloned
+by it: `init --commit` clones it through the `dotfiles` module (*Profile discovery*); the first preview names it
+and says it is not cloned yet, and the *Manual steps* block lists the gh login it needs when gh is logged out.
 `tests/test_bootstrap.py` runs the script with fake `sudo`, `apt-get`, `git` and `python3` on `PATH` and checks the argv.
 
 ### Modules at cutover
@@ -538,7 +558,7 @@ first `init` prints the exact clone command and the *Manual steps* block lists t
 |---|---|---|
 | `hyperdock` | submodule `gnome-extensions/hyperdock` → `alex-mextner/hyperdock`, branch `mac-tahoe` | from today's `install.sh`: symlink, schemas, enable, Ubuntu Dock conflict, Magic Lamp retire, `dock.ini` (enforce), Screenshots stack seed, migration from `dash2dock-lite` |
 | `english-in-overview` | local `gnome-extensions/english-in-overview@ultra` | symlink, enable |
-| `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it) |
+| `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it). The desktop user is detected from `SUDO_USER` (else `PKEXEC_UID`), never a default name, and the installer writes it into the installed `/etc/memguard/memguard.toml`; the heavy-run options `heavy_gate`, `heavy_hook` and `heavy_locks` default to empty (off) |
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
 | `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
@@ -553,7 +573,8 @@ default and switchable per machine. No other module is added until it has real c
 
 ### Profile layout
 
-`<profile>` = `~/.files/ubuntu` by default.
+`<profile>` = the `ubuntu/` directory of the user's dotfiles repository, found by *Profile discovery* (`--profile
+DIR` and `$UBUNTU_TWEAK_PROFILE` override).
 
 ```
 <profile>/
@@ -563,6 +584,7 @@ default and switchable per machine. No other module is added until it has real c
   files/                    # mirrors $HOME: files/.config/mimeapps.list -> ~/.config/mimeapps.list
   packages.toml             # apt / snap / flatpak names
   system.toml               # root-level: timezone, locale, console keyboard
+  modules/<name>/           # the profile's own modules (module.toml + their scripts), see *Profile modules*
   machines/<machine>/       # overlay, one dir per machine
     machine.toml            # same schema as profile.toml; wins over it
     settings/**/*.ini       # key-level overlay bundles on top of the shared bundles
@@ -828,27 +850,130 @@ and the plan line says `(after apt-get update)`. A manager that is not on the ma
 installed". A `flatpak_remote` that is empty, starts with `-` or contains whitespace, and a
 non-boolean `apt_update`, are invalid config (exit 2).
 
-### Optional modules: rig, dotfiles
+### Profile discovery
 
-Init step 10 (request 9): both are `kind = "system"` with `root = false` (the installer runs as the user, no
-sudo, see *system modules, additions*), `enabled = false` by default, and switched on per machine in the
-profile: `machines/<host>/machine.toml`
+Request 14: the engine names nobody. `ubuntu_tweaks/identity.py` (pure; every command goes through an injected
+`Process`, tests pass a fake `gh`) finds the dotfiles repository and the profile in it, first hit wins:
+
+1. **An explicit repository**: `--dotfiles-repo OWNER/NAME` (a global flag) or `$UBUNTU_TWEAK_DOTFILES_REPO`;
+   the flag wins and is exported to the `dotfiles` module. The module's own `[modules.dotfiles] repo` (slug, git
+   URL or absolute path) reaches only the module.
+2. **A checkout on disk that holds a profile**: the one the `dotfiles` module recorded, then `~/.files`,
+   `~/dotfiles`, `~/.dotfiles`, `~/dot-files`. No network, no `gh`.
+3. **The cache** of an earlier `gh` answer, `~/.local/state/ubuntu-tweaks/dotfiles.json` (`$XDG_STATE_HOME`),
+   valid for one hour, so `gh` is not asked on every command; `--refresh` (a global flag) ignores it. It is the
+   only file discovery writes; a read-only state directory only costs the cache.
+4. **`gh`**: `gh api user -q .login` is the authenticated user, then `gh repo list <login> --json
+   name,nameWithOwner,isPrivate,isArchived,defaultBranchRef --limit 300` is filtered to the user's own repository
+   named, in this order, `.files`, `dotfiles`, `.dotfiles`, `dot-files` (case-insensitive, archived ones skipped;
+   a full 300-entry listing may hide a match, so each missing name is then asked with `gh repo view`). When
+   several exist, the first by that order is used and the header says so (`note: several dotfiles
+   repositories found (...): using ...`), never silently.
+
+`gh` missing, not logged in, or unreachable is never a prompt and never a crash: the header and the `dotfiles`
+step say `needs manual: not logged in to GitHub: run `gh auth login`` (or that gh is not installed, or that
+GitHub could not be asked), nothing is cached, and the run goes on with the modules only. A found repository
+and "none found" are cached. With no repository the header says `no dotfiles repository for <login> (looked
+for .files, dotfiles, .dotfiles, dot-files); only the modules apply` and how to create one.
+
+`gh` is never waited on for long: each `gh` call is capped at 15 s (a module check is killed at 60 s), an
+unreachable GitHub is cached for 60 s (one slow command, not every command), and the cache is keyed by gh's
+`hosts.yml` and by the token variables `GH_TOKEN` / `GITHUB_TOKEN` / `GH_ENTERPRISE_TOKEN` (hashed, never
+stored), so a new `gh auth login` or another account is never answered from the old cache.
+
+**The profile inside the repository** is the first of `ubuntu/`, `ubuntu-tweaks/` (a directory with a
+`profile.toml` or any other profile entry) and the repository root (with a `profile.toml`); `[modules.dotfiles]
+path` names it instead (relative, no `..`; `.` is the root). **The clone target** is `~/.files` for a repository
+named `.files`, else `~/<repository name>`; `[modules.dotfiles] dir` (`~/...` or absolute) overrides it, and the
+module records the checkout it used so the next command finds it (step 2). A repository found but not cloned
+yet makes the profile path `<clone target>/ubuntu`; the header says `found your dotfiles repository
+<owner/name>; it is not cloned yet` and that `init --commit` clones it. `Profile.resolve` takes the discovered
+location as its default, after `--profile` and `$UBUNTU_TWEAK_PROFILE`.
+
+### Profile modules
+
+Request 14: a tool that belongs to one person and is not one of the *Author-published tool modules* (a password
+manager, a terminal wrapper, a browser tweak) is not engine code. The profile carries it as a module of its own, `<profile>/modules/<name>/module.toml`, with the
+same manifest and the same kinds as the engine's (*Modules*): `system`, `builtin` and `local` work as there, a
+`local` extension `path` is relative to the module's directory, a `submodule` is refused (it would be a
+submodule of the engine checkout). Rules:
+
+- Discovery reads the engine's `modules/` first, then the profile's `modules/`; a profile module with the name
+  of an engine module **replaces** it. Everything that lists or plans modules (`list`, `machine`, `show`,
+  `doctor`, `apply`, `status`, `init`, `capture`, bundles' `requires-module`) goes through the one
+  `Context.manifests()`; `list` labels the source `profile module <name>/<installer>`. A profile that does not
+  exist supplies none; a broken manifest is invalid config (exit 2) naming its file.
+- Enabled state, options and per-machine switches are the same as for any module: `[modules.<name>]
+  enabled`, extra keys reach the installer as JSON in `UBUNTU_TWEAK_MODULE_CONFIG`.
+- **The engine never runs profile module code outside the normal plan.** `list`, `machine`, `show` and `capture`
+  read manifests only. `apply`/`status` run the module's read-only `check` (and `preview`) exactly like an
+  engine module's, print the install command in the plan, and run the installer only with `--commit`, through
+  `sudo` when the manifest says `root = true`. Profile code comes only from the profile the user pointed at or
+  that discovery found in their own repository.
+
+Tests: `tests/test_profile_modules.py`.
+
+### Author-published tool modules
+
+`passwords-app`, `passwords-app-polkit`, `firefox`, `firefox-policy`, `firefox-autologin`, `firefox-passkey-qr`
+and `rig` integrate tools published by the project author: passwords-app (the iCloud Keychain password manager
+and its Firefox extension), firefox-passkey-qr, rig and ctmux (installed by rig). They are ordinary modules
+(*Modules*); the engine does not hide them, and it does not force them on another user:
+
+- **Default source.** The manifest key `[source] repo = "<url>"` (system modules only) is the one place of a
+  module's default URL. The engine hands it to the installer as the option `repo` of
+  `UBUNTU_TWEAK_MODULE_CONFIG`; the profile overrides it with `[modules.<name>] repo = "..."` (the profile
+  wins):
+
+  ```toml
+  # modules/passwords-app/module.toml
+  [source]
+  kind = "system"
+  install = "passwords-app install"
+  check = "passwords-app check"
+  repo = "https://github.com/alex-mextner/passwords-app.git"
+
+  # profile.toml or machine.toml: use your own fork instead
+  [modules.passwords-app]
+  repo = "https://example.org/me/passwords-app.git"
+  ```
+
+  | Module | Tool | Default `repo` |
+  |---|---|---|
+  | `passwords-app` | passwords-app | `https://github.com/alex-mextner/passwords-app.git` (public; an `https://` URL only) |
+  | `firefox-passkey-qr` | firefox-passkey-qr | `https://github.com/alex-mextner/firefox-passkey-qr.git` (public; an `https://` URL only) |
+  | `rig` | rig | **none**: its forge is private. The module is `needs manual: set [modules.rig] repo ...` until the profile sets it |
+  | `passwords-app-polkit`, `firefox`, `firefox-policy`, `firefox-autologin` | work on the passwords-app checkout and its extension | none (they clone nothing) |
+
+- **No repo, existing checkout.** A module that has no `repo` and finds its checkout on disk needs nothing: it
+  never clones.
+- **Another user** switches any of them off with `[modules.<name>] enabled = false`, or replaces one with a
+  profile module of the same name (*Profile modules*): a profile module wins over an engine module.
+- **The identifiers belong to the tools**: the Passwords extension id and bus name, the polkit action namespace
+  and the upstream references are those tools' own, not engine configuration.
+  `tests/identity_allowlist.txt` lists each file that carries them as a *tool reference*.
+
+### The rig module
+
+Init step 10 (request 9; the name *Optional modules: rig, dotfiles* in requests 9 and 11 means this section and
+*The dotfiles module*). `kind = "system"` with `root = false` (the installer runs as the user, no sudo, see
+*Service modules*), `enabled = false` by default, and switched on per machine in the profile:
+`machines/<host>/machine.toml`
 
 ```toml
 [modules.rig]
 enabled = true
-profile_url = "https://git.hyperide.ai/<login>/.rig-profile"   # optional; omit when the profile is already set up
-[modules.dotfiles]
-enabled = true
+repo = "<git URL of rig-cli>"                  # required: the module has no default (*Author-published tool modules*)
+profile_url = "<git URL of your rig profile>"  # optional; omit when the profile is already set up
 ```
 
-Both installers take `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3; exit 10 when python3 is missing) and exit 10 for a
-needed manual step; options arrive as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` and are never secrets.
+`modules/rig/install.sh` takes `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3; exit 10
+when python3 is missing) and exit 10 for a needed manual step; options arrive as JSON in
+`UBUNTU_TWEAK_MODULE_CONFIG` and are never secrets.
 
 | Module (order) | `install.sh` does | `--check` is satisfied when |
 |---|---|---|
-| `rig` (100) | clones `git.hyperide.ai/ultrabricks/rig-cli` (option `repo`) to `~/dev/rig-cli` (`dir`), fast-forwards a tree without local changes, symlinks `~/.local/bin/rig`, runs `rig profile sync` (or `rig profile init <profile_url>` when none is set up; `profile_sync = false` skips), then `rig activate commit` (`activate = false` skips) | checkout and link are right, the rig profile is in sync (when one exists), `rig activate --json` has no config switch left to write and `rig status` reports no drift |
-| `dotfiles` (110) | `gh repo clone alex-mextner/.files ~/.files` when `gh` is logged in, else `git clone https://github.com/alex-mextner/.files`; an existing checkout is fetched and fast-forwarded only when it has no local changes | `~/.files` is a git checkout rooted there, its `origin` is the configured `repo` (when one is set), and it is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
+| `rig` (100) | clones the repository of the option `repo` to `~/dev/rig-cli` (`dir`), fast-forwards a tree without local changes, symlinks `~/.local/bin/rig`, runs `rig profile sync` (or `rig profile init <profile_url>` when none is set up; `profile_sync = false` skips), then `rig activate commit` (`activate = false` skips) | checkout and link are right, the rig profile is in sync (when one exists), `rig activate --json` has no config switch left to write and `rig status` reports no drift |
 
 - **rig does the activating.** `rig activate commit` (rig-cli ticket 745, "rig profile carries tmux and omp
   config; rig activate bootstraps a machine") syncs the profile (config, `~/.tmux.conf` user region, omp
@@ -857,22 +982,67 @@ needed manual step; options arrive as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` and a
   machine-level plan, listing what the machine cannot support. `ctmux` (github.com/alex-mextner/ctmux-cli) is
   cloned and installed by rig on macOS and Ubuntu (ctmux's own `install.sh` owns the OS gate and `--check`).
   `[deps] apt = ["python3-yaml"]` is what rig reads its config with.
-- **Manual steps (exit 10):** a clone that fails (forge credentials: `fj auth login` / `gh auth login`), a
-  directory or file where the checkout or the symlink should go (never replaced), a profile conflict (`rig
-  profile sync --take local|remote`), a `.files` checkout that is behind and has local changes or has diverged.
-  Anything else non-zero is a failure.
-- **`dotfiles` never touches the mac-era files** (zsh, zplug, brew): it writes nothing in `$HOME` but the
-  checkout, links nothing, and fast-forwards only a tree without local changes; tests assert a `.zshrc` in the
-  repository stays byte-identical and `$HOME` holds only `.files`.
+- **Manual steps (exit 10):** no `repo` (`needs manual: set [modules.rig] repo ...`), a clone that fails (forge
+  credentials: `fj auth login` / `gh auth login`), a directory or file where the checkout or the symlink should
+  go (never replaced), a profile conflict (`rig profile sync --take local|remote`). Anything else non-zero is a
+  failure.
 - Needs the Base slice's manifest (`[source] root = false`, `preview`, exit 10, `UBUNTU_TWEAK_MODULE_CONFIG`).
-  Tests: `modules/rig/tests/test_install.py`, `modules/dotfiles/tests/test_install.py` (a local git repo and a
-  stub `rig`; throwaway `HOME`).
+  Tests: `modules/rig/tests/test_install.py` (a local git repo and a stub `rig`; throwaway `HOME`).
 - **Manual real-run checklist** (root and the forge are not available to tests): `ubuntu-tweak apply` shows
-  `run rig: modules/rig/install.sh` with the plan under it; with `[modules.rig] enabled = true`, `apply --commit`
-  clones, links, syncs, activates; `rig activate` afterwards lists no config change; `apply` again reports
-  `0 changed`; `ubuntu-tweak status` shows rig neither Missing nor Modified; `rig profile status` is in sync;
-  with `[modules.dotfiles] enabled = true` on a machine without `~/.files`, `apply --commit` leaves `~/.files`
-  with the `ubuntu/` profile directory and nothing else changed in `$HOME`.
+  `run rig: modules/rig/install.sh` with the plan under it; with `[modules.rig] enabled = true` and `repo` set,
+  `apply --commit` clones, links, syncs, activates; `rig activate` afterwards lists no config change; `apply`
+  again reports `0 changed`; `ubuntu-tweak status` shows rig neither Missing nor Modified; `rig profile status`
+  is in sync.
+
+### The `dotfiles` module
+
+Init step 10 (request 9, generalized by request 14). `kind = "system"` with `root = false` (the installer runs as
+the user, no sudo, see *Service modules*), **enabled by default** and a machine opts out with `[modules.dotfiles]
+enabled = false` in its `machine.toml`. It is a no-op with a clear message when there is nothing to find. Options
+(`[modules.dotfiles]` in `profile.toml` / `machine.toml`, JSON in `UBUNTU_TWEAK_MODULE_CONFIG`, never secrets):
+
+```toml
+[modules.dotfiles]
+repo = "alice/dotfiles"     # optional: OWNER/NAME, a git URL or an absolute path; default: found through gh
+dir  = "~/src/dotfiles"     # optional: the checkout; default ~/.files for a repository named .files, else ~/<name>
+path = "ubuntu"             # optional: the profile inside the repository; default: ubuntu/, ubuntu-tweaks/, the root
+```
+
+`--dotfiles-repo OWNER/NAME` reaches it as `$UBUNTU_TWEAK_DOTFILES_REPO` and wins over `repo`. `modules/dotfiles/
+install.sh` takes `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3; exit 10 when python3 is
+missing) and exit 10 for a needed manual step. It asks `ubuntu_tweaks/identity.py` (`python3 -m
+ubuntu_tweaks.identity resolve`, *Profile discovery*) which repository to use and where, so the engine and the
+module always agree.
+
+| Situation | `install.sh` | `--check` |
+|---|---|---|
+| a repository is known and its checkout is absent | `gh repo clone <owner/name> <dir>` when `gh` is logged in, else `git clone https://github.com/<owner/name>` (a public repository); a URL or a path is `git clone`d as given; the checkout is recorded for the next command | drift: the checkout is missing |
+| a checkout exists | fetches and fast-forwards it only when it has no local changes | exit 0 when it is a git checkout rooted there, its `origin` is the repository asked for (`same_repo`: URL spellings and case are ignored, two named hosts must agree; skipped when none is known), and it is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
+| gh finds no repository of that name | prints `no dotfiles repository found for <login> (looked for .files, dotfiles, .dotfiles, dot-files): nothing to install; ...`, exit 0 | exit 0 |
+| gh is missing, logged out or unreachable and no checkout is on disk | exit 10: `needs manual: not logged in to GitHub: run `gh auth login``; never a prompt | drift (exit 3) with the same text |
+| the checkout is another repository (`origin`), a regular file, a directory that is not a checkout, behind with local changes, diverged | exit 10, nothing is changed | drift |
+
+- **It never touches non-profile files.** It writes nothing in `$HOME` but the checkout and the one state file
+  `~/.local/state/ubuntu-tweaks/dotfiles.json` (*Profile discovery*), links nothing, and fast-forwards only a
+  tree without local changes; tests assert a `.zshrc` in the repository stays byte-identical and `$HOME` holds
+  only the checkout.
+- **The profile arrives in the same run, before any other module runs.** The plan of `init`/`apply` is built
+  before the clone, so it holds the modules only and its header says the repository is not cloned yet. When the
+  profile was missing, `apply --commit` clones it **first**: the BASE-phase tool installs (`git`, `gh`) run, then the `dotfiles`
+  module's action, and no other action runs before it. Then it looks for the profile again (`identity.locate`), re-resolves the
+  configuration, prints `profile: <dir> (cloned by this run)` and rebuilds the plan with it, so a profile that
+  disables a module is honoured before that module runs, and one `init --commit` on a fresh machine applies the
+  settings too. No other system module triggers it. If the clone failed, the run ends as before, with the
+  manual step.
+- **`[modules.dotfiles] dir` wins.** A configured `dir` that holds a git checkout without a profile in it is
+  still the module's directory: it is fast-forwarded, never cloned over.
+- Tests: `modules/dotfiles/tests/test_install.py` (a local git repository, a stub `gh` executable, throwaway
+  `HOME` and state directory), `tests/test_apply_commands.py` (the same-run profile).
+- **Manual real-run checklist** (the network is not available to tests): with `gh auth login` done and a
+  repository `<login>/.files` holding `ubuntu/profile.toml`, on a machine without `~/.files`: `ubuntu-tweak
+  apply` names the repository and says it is not cloned; `apply --commit` leaves `~/.files` with the profile
+  and applies it in the same run; `apply` again reports `0 changed`; with `gh` logged out the header and the
+  closing manual block say `gh auth login`.
 
 ### Panel coverage
 
@@ -1399,12 +1569,14 @@ marked):
 
 Request 9: *passwords-app is installed and configured first; every automatic login takes its passwords from
 it.* The app is `alex-mextner/passwords-app` (iCloud Keychain sync into the GNOME Keyring, session-bus API
-`io.github.alex_mextner.Passwords`, native-messaging host for browsers).
+`io.github.alex_mextner.Passwords`, native-messaging host for browsers). The module and its identifiers are
+the tool's own (*Author-published tool modules*).
 
 `passwords-app` (user level) facts: `git` and `uv` on `PATH` (its installer needs both); the checkout
-(`checkout` option, default `~/dev/passwords-app`, cloned from `repo`, default
-`https://github.com/alex-mextner/passwords-app.git` when missing; an existing checkout is **never pulled or
-reset**, it is the owner's working copy); installed from the checkout's current commit (the installed commit
+(`checkout` option, default `~/dev/passwords-app`, cloned from `repo` when missing: the manifest's
+`[source] repo`, `https://github.com/alex-mextner/passwords-app.git`, unless the profile sets
+`[modules.passwords-app] repo`; an existing checkout is **never pulled or reset**, it is the owner's working
+copy); installed from the checkout's current commit (the installed commit
 is recorded in `~/.local/state/ubuntu-tweaks/passwords-app.rev`, so a moved `HEAD` re-runs the installer);
 the user unit file; the Firefox native-messaging manifest names an executable host and
 `passwords-app@alex-mextner.github.io`; `passwords-appd.service` enabled and active; the bus name is owned
@@ -1507,7 +1679,8 @@ Orders (the init pipeline's `order` key, steps 5-7): `ssh-server` 50, `passwords
 *Phone-QR passkeys* (`firefox-passkey-qr`, user level, **off by default**: it replaces the Firefox snap by
 Mozilla's deb, so a machine opts in with `[modules.firefox-passkey-qr] enabled = true` in its
 `machine.toml`). It runs the installer of <https://github.com/alex-mextner/firefox-passkey-qr> (checkout
-`~/dev/firefox-passkey-qr`, cloned when missing; options `checkout`, `repo`, `ha_url`, `remove_snap`). Read
+`~/dev/firefox-passkey-qr`, cloned when missing from `repo`: the manifest's `[source] repo` unless the profile
+sets one; options `checkout`, `repo`, `ha_url`, `remove_snap`). Read
 from its source: five steps, each asking first: (1) apt build/runtime packages, (2) Mozilla's Firefox deb
 with the apt pin and a copy of the snap profile, optionally removing the snap, (3) the Bluetooth step,
 (4) `credentialsd` and a patched `xdg-desktop-portal` built from source into `/usr/local`, (5) the
@@ -1548,15 +1721,17 @@ machine without Bluetooth and with Home Assistant, `bluetoothctl list` shows a v
 ### Install
 
 ```sh
-git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/xp/ubuntu-tweaks
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init            # preview: doctor, submodules, CLI link, apply plan
-~/xp/ubuntu-tweaks/bin/ubuntu-tweak init --commit   # do it
+gh auth login                                          # once: the dotfiles repository is found through your gh login
+git clone --recurse-submodules https://github.com/alex-mextner/ubuntu-tweaks ~/ubuntu-tweaks
+~/ubuntu-tweaks/bin/ubuntu-tweak init            # preview: doctor, submodules, CLI link, apply plan
+~/ubuntu-tweaks/bin/ubuntu-tweak init --commit   # do it
 ```
 
 `install.sh` stays as a two-line wrapper, `exec bin/ubuntu-tweak init --commit "$@"`: the old
 script always installed, so the old instructions keep working and keep meaning "install".
-With a profile, clone `.files` first (see *Engine and profile*); without one, `init` prints
-the exact clone command and applies the modules only.
+`init --commit` clones the user's dotfiles repository itself (module `dotfiles`, *Profile discovery*); when
+gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.sh` clones the engine to
+`$UBUNTU_TWEAKS_DIR` (default `~/ubuntu-tweaks`) from `$UBUNTU_TWEAKS_REPO` (default: this project's repository).
 
 ### Testing
 
@@ -1606,19 +1781,32 @@ the exact clone command and applies the modules only.
   empty machine as a golden file (`tests/golden/init_empty_machine.txt`; regenerate with
   `UPDATE_GOLDEN=1` and review the diff); `doctor` reporting `planned`. Everything goes through
   `FakeProcess` and a fake root directory (`StepEnv.root`); nothing touches the real system.
+- Profile discovery and profile modules (`tests/test_identity.py`, `tests/test_profile_modules.py`,
+  `modules/dotfiles/tests/test_install.py`; no PyGObject needed): a fake `gh` (found, none, several, forks and
+  archived skipped, logged out, missing, offline, a listing as long as the limit), the cache (one hour, one
+  minute for an unreachable GitHub, a new gh account), checkouts of another repository refused, the clone
+  target and the profile directory rules, `--dotfiles-repo` / `--refresh`; a profile module discovered,
+  overriding an engine module of the same name, planned like any other and run only at `--commit`; the
+  `dotfiles` installer against a throwaway `HOME`, a local git repository and a stub `gh` executable.
+  `tests/test_no_identity.py` greps the engine tree for the author's identifiers and fails on any new hit
+  that `tests/identity_allowlist.txt` does not allow: that file lists, one `path | reason` line each, the
+  project references (the repository URL, a bundled upstream), the tool references of the author-published
+  modules (default repository URL, extension id, bus name) and verbatim requests, and an entry whose file has
+  no hit any more fails too.
 
 ## Decisions
 
 - **Python, stdlib plus `python3-gi`**, not bash: the plan/preview and the typed dconf
-  diff are the core of the tool, and bash cannot compare GVariants. Not a `rig` plugin:
-  this repo is public, and its users have no reason to install a dev tool.
-- **The engine is `ubuntu-tweaks`, the profile is `.files/ubuntu`**: the CLI, the plan model
-  and the modules already live here; a second tool would duplicate them. Personal data goes
-  to the private repo only, so the public engine stays shareable.
+  diff are the core of the tool, and bash cannot compare GVariants. Not a plugin of a personal dev
+  tool: this repo is public, and its users have no reason to install one.
+- **The engine is `ubuntu-tweaks`, the profile is the `ubuntu/` directory of the user's dotfiles
+  repository**: the CLI, the plan model and the modules already live here; a second tool would duplicate
+  them. Personal data goes to the user's own repository only, so the public engine stays shareable and
+  names nobody (request 14).
 - **TOML manifests per module**, not one central file: a module is added or removed as
   one directory, and `tomllib` is in the stdlib.
 - **No lockfile**: drift is recomputed from the modules against the machine each time, as
-  in rig. The submodule commit recorded in git is the version lock.
+  other reconcilers do. The submodule commit recorded in git is the version lock.
 - **The repo's preset wins on `apply`** (enforce), the user's taste lives in the profile:
   otherwise every run would have to guess which side changed.
 - **Only the keys a bundle lists are enforced**: absent keys are never reset, so a

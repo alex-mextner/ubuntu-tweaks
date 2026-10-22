@@ -23,20 +23,22 @@ Public API:
 - ``profile_lines(ctx) -> list[str]``: the ``machine:`` / ``profile:`` header lines.
 - ``apply(ctx, *, commit, no_sudo, extra_actions=(), backend_factory=open_backend,
   relogin_hint=False) -> int``: prints the preview, or executes and prints ``N changed``.
-- ``RELOGIN_HINT``, ``CLONE_PROFILE_COMMAND``.
+- ``RELOGIN_HINT``.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
-from ubuntu_tweaks.manifest import discover_modules
 from ubuntu_tweaks.planners import build_actions, collect_warnings
-from ubuntu_tweaks.profile import DEFAULT_PROFILE_RELPATH
+from ubuntu_tweaks.identity import Location, locate, missing_lines
+from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import (
     GioBackend,
     SettingsBackend,
@@ -49,7 +51,6 @@ type BackendFactory = Callable[[Context], SettingsBackend]
 MAX_PASSES = 3
 SCHEMA_AFFECTING = frozenset({"submodule", "compile-schemas", "link", "link-replace"})
 CODE_CHANGING = frozenset({"submodule", "link", "link-replace"})
-CLONE_PROFILE_COMMAND = "gh repo clone alex-mextner/.files ~/.files"
 
 
 def open_backend(ctx: Context) -> SettingsBackend:
@@ -61,7 +62,7 @@ def open_backend(ctx: Context) -> SettingsBackend:
 
 
 def build_plan(ctx: Context, backend: SettingsBackend, extra_actions: Iterable[Action] = ()) -> Plan:
-    manifests = discover_modules(ctx.modules_dir)
+    manifests = ctx.manifests()
     ctx.require_modules({manifest.name for manifest in manifests})
     return Plan.build([*extra_actions, *build_actions(ctx, backend)], only=ctx.only)
 
@@ -74,8 +75,7 @@ def profile_lines(ctx: Context) -> list[str]:
         lines.append(f"profile: {tilde(profile.root)}")
     else:
         lines.append(f"profile: {tilde(profile.root)} (not found: module defaults only)")
-        if profile.root == Path.home() / DEFAULT_PROFILE_RELPATH:
-            lines.append(f"  to use your personal settings: {CLONE_PROFILE_COMMAND}")
+        lines += missing_lines(profile.location or Location(profile.root))
     return lines
 
 
@@ -102,6 +102,24 @@ def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sud
         )
 
 
+DOTFILES_MODULE = "dotfiles"
+
+
+def _profile_acquisition(ctx: Context, plan: Plan) -> tuple[Action, ...]:
+    """What to run first when the profile is missing and this plan would clone it: the BASE-phase tool installs
+    (``git`` and ``gh`` come from there), then the dotfiles module's action, and nothing else."""
+    if ctx.profile.exists:
+        return ()
+    clone = tuple(a for a in plan.actions if a.kind == "system-module" and a.scope == DOTFILES_MODULE)
+    return (*(a for a in plan.actions if a.phase == Phase.BASE), *clone) if clone else ()
+
+
+def _arrived_profile(ctx: Context, relocate: Callable[[], Location] | None) -> Profile | None:
+    """The profile once the dotfiles module ran: ``None`` while it is still not there."""
+    where = relocate() if relocate is not None else locate(home=Path.home(), env=os.environ)
+    return dataclasses.replace(ctx.profile, root=where.root, location=where) if where.root.is_dir() else None
+
+
 def _manual_key(action: Action) -> tuple[str, str | None, str]:
     """Identity of an action across plan rebuilds: its ``key``, else its text (which may embed live state)."""
     return (action.kind, action.scope, action.key or action.describe())
@@ -115,6 +133,7 @@ def apply(
     extra_actions: Iterable[Action] = (),
     backend_factory: BackendFactory = open_backend,
     relogin_hint: bool = False,
+    relocate: Callable[[], Location] | None = None,
 ) -> int:
     extras = tuple(extra_actions)
     backend = backend_factory(ctx)
@@ -134,6 +153,19 @@ def apply(
     changed = 0
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
+    acquire = _profile_acquisition(ctx, plan)
+    if acquire:
+        # the profile decides which modules are on (a profile may switch ssh-server off): clone it first, alone
+        first = Plan(acquire, 0).execute(no_sudo=no_sudo, on_start=announce)
+        changed += first.changed
+        manual.update({_manual_key(action): (action, message) for action, message in first.manual})
+        arrived = _arrived_profile(ctx, relocate)
+        if arrived is not None:
+            ctx = dataclasses.replace(ctx, profile=arrived)
+            print(f"profile: {tilde(arrived.root)} (cloned by this run)", flush=True)
+        rebuilt = build_plan(ctx, backend_factory(ctx), extras)
+        plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
+    result = ExecutionResult(0, (), ())
     while True:
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:

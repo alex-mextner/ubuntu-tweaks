@@ -293,6 +293,20 @@ class RigInstall(unittest.TestCase):
         res = self.run_install("--check")
         self.assertEqual(res.returncode, 3)
 
+    def test_an_unset_repo_is_manual_in_every_mode_and_does_nothing(self):
+        before = tree(self.home)
+        res = self.run_install("--plan", options={"repo": ""})
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("needs manual: set [modules.rig] repo to the git URL of rig-cli", res.stdout)
+        res = self.run_install("--check", options={"repo": ""})
+        self.assertEqual(res.returncode, 3)
+        self.assertIn("drift: [modules.rig] repo is not set", res.stdout)
+        res = self.run_install(options={"repo": ""})
+        self.assertEqual(res.returncode, 10)
+        self.assertIn("needs manual: set [modules.rig] repo", res.stderr)
+        self.assertEqual(tree(self.home), before)
+        self.assertFalse(os.path.exists(self.dir))
+
     def test_usage(self):
         res = self.run_install("--bogus")
         self.assertEqual(res.returncode, 2)

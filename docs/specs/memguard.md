@@ -17,7 +17,7 @@ model (`modules/<name>/module.toml`, actions with `check()`/`run()`, `apply --co
    более удачные идеи и реализации. и пусть оно умеет будет расширяемым, чтобы rig в него
    мог агентов закинуть которые много ресурсов жрут например.»
 2. «например omp-supervisor и omp-steer кажется должно быть в agent-tools»
-3. «важно чтобы все что мы настраиваем в систему сохранялось в ~/xp/ubuntu-tweaks/»
+3. «важно чтобы все что мы настраиваем в систему сохранялось в репозитории ubuntu-tweaks»
 
 ### Decisions approved by the owner (2026-10-11)
 
@@ -198,7 +198,7 @@ protect = true                                                 # never frozen or
 How rig plugs in (owned by rig, documented here as the reference use of the extension
 point): `~/.config/memguard/policy.d/50-agents.toml` matches
 `cgroup = "user.slice/*/omp.slice/omp-*.scope"`, `display.exec = "tg-ctl omp-live status
---memguard"` (name "omp session: CRYPT", detail = cwd/title), `warn → notify.exec =
+--memguard"` (name "agent session: CRYPT", detail = cwd/title), `warn → notify.exec =
 "omp-steer --memguard"` (delivers mem-sentinel's steer text into the owning session),
 `critical → freeze`. The daemon never sees those names.
 
@@ -249,7 +249,7 @@ The window (like macOS "Your system has run out of application memory"):
   Memory was recovered by pausing the largest apps. Quit what you don't need, or
   resume them once memory is free.
 
-  [icon] omp session: CRYPT      — ~/xp/sme-archiving-gc      9.1 GB   [Quit] [Resume]
+  [icon] agent session: CRYPT    — ~/projects/archiving       9.1 GB   [Quit] [Resume]
   [icon] Docker: fake-gcs         — container 3f2a…            2.4 GB   [Quit] [Resume]
   [icon] Chrome                   — 37 windows                 5.8 GB   [Quit] [Resume]
 
@@ -340,14 +340,15 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   - `psi`: memory `some avg60` < 5 and `full avg10` < 1. `fall`: MemAvailable not falling
     faster than 1 GB/min, sampled over `fall_window_s` (15 s) by the oneshot itself.
   - `cooldown`: `drain_cooldown_min` (20) since the last drain finished, done or aborted.
-  - `heavy-run`: the heavy-op gate's own `/proc` live-runner scan (`heavy_op_memory_gate.py`,
-    found through the `cmd` of the installed omp hook; run as the desktop user, never as
-    root, because the gate is a user-writable file) reports fewer than its
-    `RIG_HEAVY_OP_MAX_LIVE` runners. A scan that cannot run skips the drain too (fail
-    closed: the drain is the disruptive side); `heavy_gate = ""` turns the scan off.
-  - `heavy-lock`: a shared non-blocking `flock` on every `heavy_locks` path (default
-    `/tmp/3d-cli-heavy.lock`, the lock agents queue heavy runs with) succeeds. The drain
-    holds it until it ends, so a queued `flock /tmp/3d-cli-heavy.lock <cmd>` waits for the
+  - `heavy-run` (off by default): a heavy-operation gate's own `/proc` live-runner scan (a
+    script exposing `scan_live_runners()` and `_max_live()`, named by `heavy_gate` or found
+    through the `cmd` of the JSON file `heavy_hook`; run as the desktop user, never as
+    root, because the gate is a user-writable file) reports fewer runners than its limit
+    (or `heavy_max_live`). A scan that cannot run skips the drain too (fail
+    closed: the drain is the disruptive side); `heavy_gate = ""` (the default) turns the scan off.
+  - `heavy-lock`: a shared non-blocking `flock` on every `heavy_locks` path (default none;
+    the lock files heavy runs are queued with) succeeds. The drain
+    holds it until it ends, so a queued `flock <lockfile> <cmd>` waits for the
     drain instead of starting in the middle of it. Lock files are never created (with
     `fs.protected_regular=2` a root-owned file in `/tmp` would lock the user out) and never
     opened through a symlink. The unit has no `PrivateTmp=`.
@@ -382,7 +383,12 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
     starts the unit and prints the decision (`--wait`: also the result). The polkit rule
     `/etc/polkit-1/rules.d/50-memguard-swap-drain.rules` lets the desktop user (`user`) start
     and stop exactly `swap-drain.service`, no sudo, no password; any other unit or verb falls
-    through to the default policy. `--dry-run` decides locally and executes nothing.
+    through to the default policy. `--dry-run` decides locally and executes nothing. The desktop
+    user is never hardcoded: `install.sh` takes `$SUDO_USER`, else the `$PKEXEC_UID` account,
+    else `user` of `memguard.toml` (a non-root `--dry-run`/`--check` uses the invoking user;
+    no user at all exits 1 with `memguard.toml: user is not set and no SUDO_USER/PKEXEC_UID`),
+    and writes it into the installed `/etc/memguard/memguard.toml` (`user = "..."`) for the
+    polkit rule and swap-drain's heavy scan; `--check` compares against that rendering.
 
   Exit codes (`swap-drain` and `memguard swap-drain`): 0 drained/started, 1 error, 2 usage or
   config, 10 skipped, 11 already in progress, 12 aborted (10–12 are `SuccessExitStatus`).
@@ -410,8 +416,7 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   (`memguard_swap.active_drain`), then judges swap on `swap_*_after_kb`
   (`memguard_swap.effective_swap_kb`) and leaves the device's pages still in swap out of any
   MemAvailable fall rate (the swap-in lowers both equally). Consumers: the heavy-op gate
-  ([rig-cli#693](https://git.hyperide.ai/ultrabricks/rig-cli/issues/693); the gate lives in
-  agent-tools, rig installs it) and the memguard daemon's (d) check.
+  (a gate that reads the state file; it lives outside this repo) and the memguard daemon's (d) check.
 - **Alternatives**: no `/proc/sys/vm` knob swaps pages back in (`drop_caches` drops clean page
   cache, `compact_memory` defragments, `swappiness`/`watermark_scale_factor` shape future
   reclaim only). `vm.swappiness` stays 10: lowering it does not return swapped pages and does
@@ -456,7 +461,7 @@ kernel headers and Secure Boot off for the HID module; never the workstation) ca
 
 1. memguard: files end up `root:root`; `/etc/polkit-1/rules.d` stays unreadable for the desktop
    user and `install.sh --check` as that user still exits 0 through the stamp; `getent passwd`
-   resolves the configured `user`; `systemctl daemon-reload`, `enable --now swap-drain.timer` and
+   resolves the detected desktop user; `systemctl daemon-reload`, `enable --now swap-drain.timer` and
    `restart` work; the closing `runuser -u <user> -- memguard swap-drain --dry-run` runs; polkitd
    accepts the rule.
 2. apple-hid-battery: `make -C … KDIR=/lib/modules/<k>/build` builds the real `.ko`; `depmod -a`,
@@ -520,9 +525,8 @@ Apple Magic Keyboard Touch ID (`004C:0321`, `hid_apple`) and Magic Trackpad 2 (`
 `hid_magicmouse`) over Bluetooth report 100 % / 0 % battery because
 `hidinput_query_battery_capacity()` in `hid-input.c` reads `buf[1]`, while Apple's report
 `0x90` is `[id, flags, charge]`. Upstream fix d07644524b65 (7.3) is absent in Ubuntu
-7.0.0-15/-38. Source session "🍎 MAGIC" 2026-10-09T23:51Z, transcript
-`~/.omp/agent/sessions/-tmp/2026-10-09T23-51-08-062Z_01a12313-e21e-7499-8c19-02a237636fc2.jsonl`;
-the C source and Makefile recovered from it are in the repo verbatim.
+7.0.0-15/-38. The C source and Makefile, recovered from the session that diagnosed it, are in the
+repo verbatim.
 
 - Fix: kernel livepatch (klp object `hid`) replacing that one function; it locates the
   battery field in the report and reads `buf[1 + report_offset / 8]`, scaled by

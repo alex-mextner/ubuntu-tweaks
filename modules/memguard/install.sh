@@ -10,7 +10,8 @@
 #                                           exit 0 = installed files match the repo, 3 = drift
 #
 # MEMGUARD_ROOT=DIR prefixes every destination (tests; skips the systemd timer probe and the
-# user lookup). With it the install is *staged*: it needs no root, writes the files and the stamp
+# user lookup). With it the install is *staged*: it needs no root, takes the user from
+# $MEMGUARD_USER (default: the current user), writes the files and the stamp
 # under DIR and never touches systemd or runuser. Idempotent: a second run prints
 # "nothing to change". Spec: docs/specs/memguard.md.
 set -euo pipefail
@@ -23,7 +24,7 @@ case "${1:-}" in
   --dry-run) dry=1 ;;
   --check) dry=1; check=1 ;;
   "") ;;
-  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $0 [--dry-run|--check]" >&2; exit 2 ;;
 esac
 if [ "$dry" = 0 ] && [ -z "$root" ] && [ "$(id -u)" != 0 ]; then
@@ -42,8 +43,41 @@ sys.path.insert(0, here)
 import memguard_swap
 memguard_swap.load_config(f"{here}/memguard.toml")
 EOF
-user=$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m; print(m.load_config(sys.argv[1] + "/memguard.toml")["user"])' "$here")
-[ -n "$root" ] || getent passwd "$user" >/dev/null || { echo "memguard.toml: user '$user' does not exist" >&2; exit 1; }
+cfg_user=$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m; print(m.load_config(sys.argv[1] + "/memguard.toml")["user"])' "$here")
+
+# The desktop user: staged mode takes $MEMGUARD_USER or the current user; a real install takes
+# $SUDO_USER, else the $PKEXEC_UID account, else `user` of memguard.toml; a non-root dry run or
+# --check (run by the desktop user itself) falls back to the current user.
+user=
+if [ -n "$root" ]; then
+  user=${MEMGUARD_USER:-$(id -un)}
+else
+  [ "${SUDO_USER:-}" != root ] && user=${SUDO_USER:-}
+  if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    user=$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)
+  fi
+  [ -n "$user" ] || user=$cfg_user
+  if [ -z "$user" ] && [ "$(id -u)" != 0 ]; then user=$(id -un); fi
+fi
+if [ -z "$user" ]; then
+  echo "memguard.toml: user is not set and no SUDO_USER/PKEXEC_UID" >&2
+  exit 1
+fi
+if ! [[ $user =~ ^[A-Za-z_][A-Za-z0-9_.-]*\$?$ ]]; then
+  echo "memguard: refusing user name '$user'" >&2
+  exit 1
+fi
+[ -n "$root" ] || getent passwd "$user" >/dev/null || { echo "memguard: user '$user' does not exist" >&2; exit 1; }
+[ "$check" = 1 ] || echo "memguard: desktop user: $user"
+
+# memguard.toml with `user = "<resolved user>"` (the repo copy leaves it empty = detect).
+render_toml() {
+  if grep -q '^user = ' "$here/memguard.toml"; then
+    sed "s|^user = \"[^\"]*\"|user = \"$user\"|" "$here/memguard.toml"
+  else
+    sed "s|^\[swap\]\$|&\nuser = \"$user\"|" "$here/memguard.toml"
+  fi
+}
 
 # source : target : mode
 files=(
@@ -68,6 +102,8 @@ for entry in "${files[@]}"; do
   out="$render/$src"
   case "$src" in
     *.rules) sed "s/@USER@/$user/g" "$here/$src" >"$out" ;;
+    # the installed copy carries the resolved user: swap-drain reads it at run time
+    memguard.toml) render_toml >"$out" ;;
     *) cp "$here/$src" "$out" ;;
   esac
   stamp_lines+=("$mode $(sha256sum <"$out" | cut -d' ' -f1) $dst")

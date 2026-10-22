@@ -5,6 +5,7 @@ from unittest import mock
 
 from tests.util import TempDirCase, write
 from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.identity import Location, RepoRef, Source
 from ubuntu_tweaks.profile import PROFILE_ENV, Keyboard, Packages, Profile, SystemConfig, TomlValue, merge_layers
 
 
@@ -26,6 +27,25 @@ class ResolveTests(TempDirCase):
         self.assertEqual(Profile.resolve(str(flag), env=env, hostname_file=hostname, home=home).root, flag)
         self.assertEqual(Profile.resolve(None, env=env, hostname_file=hostname, home=home).root, from_env)
         self.assertEqual(Profile.resolve(None, env={}, hostname_file=hostname, home=home).root, home / ".files/ubuntu")
+
+    def test_the_default_location_is_what_the_locator_found_and_it_keeps_the_finding(self) -> None:
+        found = Location(self.tmp / "dotfiles/ubuntu", self.tmp / "dotfiles", RepoRef("alice/dotfiles"), Source.GH)
+        hostname = write(self.tmp / "hostname", "box\n")
+        profile = Profile.resolve(None, env={}, hostname_file=hostname, home=self.tmp, locate=lambda: found)
+        self.assertEqual((profile.root, profile.location), (self.tmp / "dotfiles/ubuntu", found))
+
+    def test_a_flag_or_the_environment_never_asks_the_locator(self) -> None:
+        (self.tmp / "p").mkdir()
+        hostname = write(self.tmp / "hostname", "box\n")
+
+        def boom() -> Location:
+            raise AssertionError("the locator must not run")
+
+        for profile, env in ((str(self.tmp / "p"), {}), (None, {PROFILE_ENV: str(self.tmp / "p")})):
+            self.assertEqual(
+                Profile.resolve(profile, env=env, hostname_file=hostname, home=self.tmp, locate=boom).root,
+                self.tmp / "p",
+            )
 
     def test_missing_default_profile_is_allowed(self) -> None:
         profile = Profile.resolve(None, env={}, hostname_file=write(self.tmp / "h", "box"), home=self.tmp / "nohome")
