@@ -39,11 +39,12 @@ from ubuntu_tweaks.module_script import (  # noqa: E402
     main,
     module_config,
 )
-from ubuntu_tweaks.process import Process  # noqa: E402
+from ubuntu_tweaks.process import CommandError, Process  # noqa: E402
 
 NO_REPO = "set [modules.firefox-passkey-qr] repo to the git URL of the firefox-passkey-qr repository"
 DEFAULT_CHECKOUT = "~/dev/firefox-passkey-qr"
 INSTALLER = "passkey-qr"
+EXIT_WAITING = 3  # `passkey-qr install`: finished what it could, something waits for a person
 TOKEN_PURPOSE = "ha-token"
 OPTIONS = {"checkout", "repo", "ha_url", "remove_snap"}
 UPSTREAM_CHANGE = "https://github.com/alex-mextner/firefox-passkey-qr/pull/2 (`--yes`, `check`)"
@@ -214,7 +215,17 @@ class PasskeyQR(Module):
         token = keyring_secret(self._process, TOKEN_PURPOSE)
         overrides = {**({"HA_TOKEN": token} if token else {}), **({"HA_URL": self._ha_url} if self._ha_url else {})}
         with environment(**overrides):
-            self._process.execute([str(self._installer), *self._install_argv()], cwd=self._checkout)
+            try:
+                self._process.execute([str(self._installer), *self._install_argv()], cwd=self._checkout)
+            except CommandError as error:
+                if error.returncode != EXIT_WAITING:  # 3 is reserved by `passkey-qr install`; failures exit 1
+                    raise
+                # the installer already printed what waits for a person (a Home Assistant token, a running
+                # Firefox, no Bluetooth and no Home Assistant) and every other step ran: not a failure
+                raise NeedsManual(
+                    f"`{INSTALLER} {' '.join(self._install_argv())}` finished what it could; the lines above "
+                    "say what waits for you (then run apply again, finished steps are skipped)"
+                ) from error
 
 
 def build(env: Mapping[str, str]) -> PasskeyQR:

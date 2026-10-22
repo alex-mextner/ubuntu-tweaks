@@ -680,7 +680,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | AMO signing key | `firefox` | the key belongs to the owner's AMO account | `secret-tool store` the items `purpose=amo-jwt-issuer` and `purpose=amo-jwt-secret` (the install output prints the commands) |
 | signed extension missing | `firefox-policy` | nothing to force-install yet | do the AMO step above first |
 | extension not active | `firefox-autologin` | Firefox must show the WebExtension-backend prompt | apply `firefox-policy`, restart Firefox, answer the prompt, check `about:policies` |
-| Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (see *Firefox*): without it the bridge step is skipped. Until firefox-passkey-qr PR 2 is merged the installer cannot run unattended: the module reports a manual step, run `passkey-qr install` in `~/dev/firefox-passkey-qr` |
+| Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (the exact command is under *Firefox*): without it the bridge step waits for you (the other steps still run; `needs manual`, re-run `apply` after storing it) |
 | gh login or clone | `dotfiles` | the repository is found through your gh login | `gh auth login`; set `[modules.dotfiles] repo` or pass `--dotfiles-repo OWNER/NAME`; move a directory that is in the way; resolve a diverged checkout |
 | rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
@@ -1997,7 +1997,7 @@ Mozilla's deb, so a machine opts in with `[modules.firefox-passkey-qr] enabled =
 `machine.toml`). It runs the installer of <https://github.com/alex-mextner/firefox-passkey-qr> (checkout
 `~/dev/firefox-passkey-qr`, cloned when missing from `repo`: the manifest's `[source] repo` unless the profile
 sets one; options `checkout`, `repo`, `ha_url`, `remove_snap`). Read
-from its source: five steps, each asking first: (1) apt build/runtime packages, (2) Mozilla's Firefox deb
+from its source: five steps (it asks first; `--yes` answers): (1) apt build/runtime packages, (2) Mozilla's Firefox deb
 with the apt pin and a copy of the snap profile, optionally removing the snap, (3) the Bluetooth step,
 (4) `credentialsd` and a patched `xdg-desktop-portal` built from source into `/usr/local`, (5) the
 native-messaging link and the Mozilla-signed `credentialsd-helper` add-on. **Step 3 is the installer's own
@@ -2008,18 +2008,47 @@ never decides this. Verified by running the real installer's `--dry-run --yes in
 machine's `hci0` the step prints `local adapter(s) found: hci0 - nothing to do`; with an empty
 `PASSKEY_QR_BLUETOOTH_DIR` and `HA_URL` set it lists the bridge commands.
 
+- *One command on a new machine*: enable the module in the profile (`profile.toml` for every machine, or one
+  `machines/<host>/machine.toml`), store the Home Assistant token if the PC has no Bluetooth, run bootstrap:
+
+  ```toml
+  [modules.firefox-passkey-qr]
+  enabled = true
+  # ha_url = "http://100.x.y.z:8123"   # only when the lookup (homeassistant.local, tailscale peers) must not be used
+  # remove_snap = true                  # also remove the Firefox snap once the deb works (default: keep it)
+  ```
+
+  ```sh
+  secret-tool store --label='Home Assistant token' application ubuntu-tweaks purpose ha-token   # once, PC without Bluetooth
+  sh bootstrap.sh --yes      # the module's step runs `passkey-qr --yes install`
+  ```
+
+  The installer's package, build and install steps were run on a stock Ubuntu 26.04.1 root in an unprivileged
+  `bwrap` (no systemd session); the session-bound steps were verified on `ubuntu-pc`.
 - *Preview*: the module's `plan` is the installer's `--dry-run` output (every command, `sudo` marked, the
   token never printed), indented under the action.
-- *Run*: only through the installer's own bypass: `passkey-qr --yes [--remove-snap] install`. The installer
-  had neither `--yes` nor a check, so they are added upstream
-  (<https://github.com/alex-mextner/firefox-passkey-qr/pull/2>, branch `feat/yes-check-plan`, not merged):
-  `--yes` never prompts, a missing token skips the bridge step, a running Firefox stops the Firefox step,
-  and **the snap is kept unless `--remove-snap`** (profile option `remove_snap`, default false). Until that
-  PR is merged and the checkout updated, the module reports `needs manual: run <installer> install
-  interactively` and the fact stays Missing; it never runs the installer without `--yes` and never fakes
-  success. The feature is detected from the installer's `--help`, not from a version number.
-- *Check*: the installer's `check` (exit 0/3: Firefox deb, a Bluetooth adapter, `credentialsd`, the
-  native-messaging manifest, apt packages); an installer without it is judged from its `status` rows.
+- *Run*: only through the installer's own bypass: `passkey-qr --yes [--remove-snap] install`
+  (<https://github.com/alex-mextner/firefox-passkey-qr/pull/2>). `--yes` never prompts and never closes,
+  starts or opens a browser; **the snap is kept unless `--remove-snap`** (profile option `remove_snap`,
+  default false). What only a person can do does not stop the other steps: it is skipped, listed at the end
+  and the installer exits **3** (reserved: its failures exit 1), which the module reports as `needs manual`
+  pointing at the lines the installer printed (the fact stays Missing, the next `apply` continues; any other
+  non-zero exit stays an error). What waits for a person: Home Assistant's token (the Bluetooth step only), a running Firefox (the
+  profile copy and the switch of the start profile), no Bluetooth and no Home Assistant at all (a USB dongle), a
+  second Firefox install registered in `installs.ini`, and a session that has to log out and in once for the
+  new D-Bus activation files. Firefox is not restarted: the policy is in place and the extension installs
+  at its next start. With an older checkout that has no `--yes`, the module reports `needs manual: run
+  <installer> install interactively`; it never runs the installer without `--yes` and never fakes success.
+  The feature is detected from the installer's `--help`, not from a version number.
+- *Check*: the installer's `check` (exit 0/3, read-only, no log file): Firefox deb, a Bluetooth adapter, the
+  build dependencies, `credentialsd`, libdex and the patched portal installed, the portal answering with the
+  Credential interface, the native-messaging link, the portal accepting the helper's app id, the Firefox
+  policy entry for the add-on; an installer without `check` is judged from its `status` rows. The row
+  "Firefox restarted: extension active" is context only: it needs a started Firefox.
+- *Policy entry*: the installer writes the add-on into `/etc/firefox/policies/policies.json` itself
+  (`normal_installed`, merged with the other entries) and treats a `force_installed` entry for the same URL as
+  already satisfied, so `[modules.firefox-policy] credentialsd_helper = true` and this module never fight over
+  the file.
 - *Secrets*: Home Assistant's long-lived token comes from the Secret Service (`purpose ha-token`) into the
   installer's `HA_TOKEN` for that run only; the installer itself stores it in
   `~/.config/ha-ble-vhci/token` (mode 600), which is outside every repository and profile, and its URL is the
