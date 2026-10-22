@@ -11,7 +11,8 @@ and goes on). A missing *default* profile is not an error: the header says which
 found, none, or ``needs manual: ... gh auth login`` (``reconcile.header_lines``) and the plan covers the modules only. The CLI link has its own kinds
 (``cli-link``, ``cli-link-replace``): it is not extension code, so it triggers neither the re-login
 hint nor the staged settings pass; ``--only`` limits ``init`` to the named modules, so it drops the
-CLI link. Re-running is safe (every action is idempotent).
+CLI link. Re-running is safe (every action is idempotent). With ``--commit`` (and no ``--no-sudo``) root is obtained
+once, through one ``elevation.RootSession`` shared by the apt install and the plan (exit 6 when it cannot be).
 
 Pipeline order (spec, *Init pipeline*): there is no list of steps in this file. The ``apply`` plan is
 ordered by ``(phase, order)`` and every pipeline step is a module whose ``module.toml`` declares its
@@ -23,12 +24,13 @@ dock 80, optional modules 100+) and ``phase``; a tool a module installs itself i
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.commands import doctor
+from ubuntu_tweaks.commands._support import confirm, root_session, say
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.elevation import RootSession
 from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.symlink import SymlinkAction
 
@@ -43,12 +45,6 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     parser.set_defaults(handler=run)
 
 
-def _confirm(question: str) -> bool:
-    if not sys.stdin.isatty():
-        return False
-    return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
-
-
 def _step(number: int, key: str) -> None:
     if ui.rich():
         print(ui.heading(ui.t("init.step", n=number, total=2, text=ui.t(key))))
@@ -56,11 +52,12 @@ def _step(number: int, key: str) -> None:
         print("doctor:" if number == 1 else "apply:")
 
 
-def _say(kind: str, text: str) -> None:
-    print(ui.say(kind, text))
-
-
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    with root_session(args, "init --commit", skip="init --commit --no-sudo") as root:
+        return _run(ctx, args, root)
+
+
+def _run(ctx: Context, args: argparse.Namespace, root: RootSession) -> int:
     if ui.rich():
         print(ui.heading("ubuntu-tweak init") + " " + ui.style("(set up this machine)", "dim"))
     _step(1, "init.step.doctor")
@@ -69,20 +66,21 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     if absent:
         packages = " ".join(sorted({item.apt for item in absent}))
         if not args.commit:
-            _say("info", f"init --commit would install: sudo apt-get install -y {packages}")
+            say("info", f"init --commit would install: sudo apt-get install -y {packages}")
         elif args.no_sudo:
-            _say("manual", f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
-        elif args.yes or _confirm(f"Install {packages} with sudo apt-get?"):
+            say("manual", f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
+        elif args.yes or confirm(f"Install {packages} with sudo apt-get?"):
+            root.require(1, f"apt-get install {packages}")
             doctor.install(absent)
             absent = doctor.missing(needed)
             if absent:
-                _say("error", "Still missing after install: " + ", ".join(item.label for item in absent))
+                say("error", "Still missing after install: " + ", ".join(item.label for item in absent))
                 return int(ExitCode.DRIFT)
         else:
-            _say("error", f"Missing packages: {packages}. Re-run with --yes, or run: ubuntu-tweak doctor --yes")
+            say("error", f"Missing packages: {packages}. Re-run with --yes, or run: ubuntu-tweak doctor --yes")
             return int(ExitCode.DRIFT)
     if doctor.missing([item for item in needed if item.apt == "python3-gi"]):
-        _say("error", "apply preview skipped: python3-gi is missing (install it first).")
+        say("error", "apply preview skipped: python3-gi is missing (install it first).")
         return int(ExitCode.DRIFT)
 
     from ubuntu_tweaks import reconcile
@@ -98,4 +96,5 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         extra_actions=[cli_link],
         title="",
         preview_footer="init.preview_footer",
+        root=root,
     )

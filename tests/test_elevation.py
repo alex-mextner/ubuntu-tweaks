@@ -6,6 +6,7 @@ Nothing here runs the real sudo (the machine running the tests may not even be a
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tests.util import Said, host
 from ubuntu_tweaks import process
@@ -70,13 +71,23 @@ class AlreadyAllowedTests(SessionCase):
         self.assertEqual((fake.queries, fake.executed, said.lines), ([SUDO_CHECK], [], []))
 
     def test_the_prefix_follows_the_strategy_and_ends_with_the_session(self) -> None:
-        with RootSession(
-            process=FakeProcess({SUDO_CHECK: CommandResult(0)}), host=host(), say=Said(), command=FIX
-        ) as root:
+        with (
+            mock.patch("os.geteuid", return_value=1000),  # process.elevate looks at the real uid too
+            RootSession(
+                process=FakeProcess({SUDO_CHECK: CommandResult(0)}), host=host(), say=Said(), command=FIX
+            ) as root,
+        ):
             root.require(1, "system")
             self.assertEqual(process.elevate(["id"]), ["sudo", "--", "id"])
             self.assertEqual(process.root_prefix(), ("sudo", "--"))
         self.assertIsNone(process.root_prefix())
+
+    def test_a_valid_ticket_without_a_terminal_but_with_askpass_keeps_asking_through_it(self) -> None:
+        root, _, _ = self.session(host(askpass=True), FakeProcess({SUDO_CHECK: CommandResult(0)}))
+
+        root.require(1, "system")
+
+        self.assertEqual(root.prefix, ("sudo", "-A", "--"))
 
 
 class KeepAliveTests(SessionCase):
@@ -237,17 +248,25 @@ class UnavailableTests(SessionCase):
         self.assertIn(FIX, str(caught.exception))
         self.assertEqual(fake.executed, [])
 
-    def test_pkexec_alone_without_a_display_does_not_blame_a_missing_terminal(self) -> None:
-        root, fake, _ = self.session(host(terminal=True, tools=frozenset({"pkexec"})))
+    def test_pkexec_alone_with_neither_terminal_nor_display_says_so(self) -> None:
+        root, fake, _ = self.session(host(tools=frozenset({"pkexec"})))
 
         with self.assertRaises(RootUnavailable) as caught:
             root.require(1, "system")
 
         self.assertEqual(caught.exception.cause, Cause.NO_PROMPT)
-        self.assertIn("only pkexec is installed", str(caught.exception))
-        self.assertIn("apt-get install -y sudo", str(caught.exception))
-        self.assertNotIn("no terminal", str(caught.exception))
+        self.assertIn("sudo is not installed", str(caught.exception))
+        self.assertIn("pkexec has no terminal or graphical session to ask on", str(caught.exception))
         self.assertEqual((fake.queries, fake.executed), ([], []))
+
+    def test_a_display_without_pkexec_is_not_reported_as_no_graphical_session(self) -> None:
+        root, _, _ = self.session(host(graphical=True), FakeProcess({SUDO_CHECK: PASSWORD_NEEDED}))
+
+        with self.assertRaises(RootUnavailable) as caught:
+            root.require(1, "system")
+
+        self.assertIn("pkexec is not installed", str(caught.exception))
+        self.assertNotIn("graphical", str(caught.exception))
 
     def test_neither_sudo_nor_pkexec(self) -> None:
         root, fake, _ = self.session(host(terminal=True, tools=frozenset()))
@@ -279,6 +298,14 @@ class GraphicalTests(SessionCase):
 
     def test_a_graphical_session_without_sudo_uses_pkexec(self) -> None:
         root, fake, _ = self.session(host(graphical=True, tools=frozenset({"pkexec"})))
+
+        root.require(1, "system")
+
+        self.assertEqual(fake.executed, [(PKEXEC_CHECK, None)])
+        self.assertEqual(root.prefix, ("pkexec",))
+
+    def test_pkexec_on_a_terminal_without_a_display_is_used_too(self) -> None:
+        root, fake, _ = self.session(host(terminal=True, tools=frozenset({"pkexec"})))
 
         root.require(1, "system")
 

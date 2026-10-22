@@ -194,7 +194,8 @@ runs the strategy below once per run (later calls are no-ops) and, for the durat
   `doctor --yes` and `fix`: only when the plan holds an unsatisfied root action (or `doctor` has an apt package to
   install) and `--no-sudo` is absent; after the preview is printed and before the first action of the plan runs.
   When a rebuilt plan (a profile that was just cloned, a staged pass) holds root actions the first one did not, the
-  call is repeated and acquires then, still before those actions run. A preview, `status`, `list` and every
+  call is repeated and acquires then, still before those root actions run (but after the steps that need no root
+  already ran: a failure then says so instead of "Nothing was changed"). A preview, `status`, `list` and every
   `--no-sudo` run never ask and never look at sudo.
 - **Strategy**, the first row that applies wins:
 
@@ -203,20 +204,22 @@ runs the strategy below once per run (later calls are no-ops) and, for the durat
   | 1 | the process is root (euid 0) | nothing to do |
   | 2 | `NoNewPrivs: 1` in `/proc/self/status` | `RootUnavailable` (`no-new-privs`): setuid helpers are neutered, so sudo and pkexec cannot work from here, NOPASSWD or not (a sandbox, a container, a restricted agent shell) |
   | 3 | neither `sudo` nor `pkexec` exists | `RootUnavailable` (`no-tool`) |
-  | 4 | `sudo -n true` succeeds (NOPASSWD, or a ticket still valid) | go on, no prompt |
-  | 5 | a controlling terminal (`/dev/tty` opens) and `sudo` | one line says why (how many root actions, which kinds), then `sudo -v` once with its own password prompt; a refresh thread runs `sudo -n -v` every 60 s until the run ends, so the password is asked **once** however long the run is |
-  | 6 | `SUDO_ASKPASS` is set and `sudo` exists | `sudo -A -v` once; root commands run as `sudo -A --` |
-  | 7 | a graphical session (`DISPLAY` or `WAYLAND_DISPLAY`) and `pkexec` | `pkexec true` once to prove it works; root commands run through `pkexec` (polkit keeps no ticket we could refresh, so it may ask again per action) |
-  | 8 | none of the above | `RootUnavailable` (`no-prompt`): nothing here can ask for a password |
+  | 4 | `sudo -n true` succeeds (NOPASSWD, or a ticket still valid) | go on, no prompt; the refresh thread below also runs, so a ticket about to expire cannot lapse mid-run |
+  | 5 | a controlling terminal (`/dev/tty` opens) and `sudo` | one line says why (how many root actions, which kinds), then `sudo -v` once with its own password prompt; the refresh thread runs `sudo -n -v` every 60 s until the run ends, so the password is asked **once** however long the run is (a hung refresh never holds the exit for more than a second) |
+  | 6 | `SUDO_ASKPASS` is set and `sudo` exists | `sudo -A -v` once; root commands run as `sudo -A --` (also when `sudo -n true` already works and there is no terminal, so a ticket that lapses is asked for again through it) |
+  | 7 | `pkexec` exists and there is a graphical session (`DISPLAY` or `WAYLAND_DISPLAY`) or a terminal (pkexec starts its own text agent there) | `pkexec true` once to prove it works; root commands run through `pkexec` (polkit keeps no ticket we could refresh, so it may ask again per action; a dismissed dialog then fails that action, not exit 6) |
+  | 8 | none of the above | `RootUnavailable` (`no-prompt`): nothing here can ask for a password; the message lists what is missing (sudo not passwordless, no terminal, no `SUDO_ASKPASS`, pkexec absent or without a terminal or session) |
 
   sudo or pkexec rejecting the request (wrong password after sudo's three tries, sudo's own prompt timeout, a user
   who may not use sudo: sudo answers 1 for all of them) is `RootUnavailable` (`rejected`). There is no retry loop:
-  the run stops before the first action, nothing is half-applied.
+  the run stops before the first root action.
 - **The error.** `RootUnavailable` is an `UbuntuTweakError` with exit code **6** (`ExitCode.NO_ROOT`), no
-  traceback. Its message names the cause and ends with the exact command to run from a normal terminal, the
-  command that was run with its `--commit` / `--yes` (e.g. `ubuntu-tweak fix`, `ubuntu-tweak apply --commit`, with
-  `--only` kept), plus the alternative `--no-sudo` (root actions are skipped and listed). In a terminal the
-  `fix:` line repeats the command.
+  traceback. Its message names the cause and ends with the exact command to run from a normal terminal: the
+  command that was run, with the `--profile` / `--machine` / `--only` / `--dotfiles-repo` the user gave (e.g.
+  `ubuntu-tweak fix`, `ubuntu-tweak apply --commit --only eng`); and, where skipping root is meaningful, the
+  alternative `... --no-sudo` (root actions are skipped and listed; `doctor --yes` has none). In a terminal the
+  `fix:` line repeats the command. `ExitCode.NO_ROOT` is also what `update --commit` returns when its `apply`
+  child fails this way.
 - **Tests** use a `Host` value (euid, controlling terminal, `SUDO_ASKPASS`, display, `NoNewPrivs`, the tools on
   `PATH`; `Host.detect()` reads the real ones) and `FakeProcess`, so no test needs real sudo.
 
@@ -231,13 +234,15 @@ for the whole run:
 2. `apply --commit` of the whole plan (`--only` narrows it as everywhere): the plan is printed, one question
    "Apply N action(s) (M need root)?" is asked on a terminal (`--yes` skips it), root is obtained, the plan runs.
    Without a terminal and without `--yes` nothing is changed: it says so and ends with exit 3 while drift
-   remains (invariant 1: no change without explicit consent).
-3. `status`, printed as the command does; then one closing line. When items are left, each is listed with its
-   reason (the manual step's message, or "still not satisfied after running").
+   remains (invariant 1: no change without explicit consent). So there are two questions when packages are
+   missing and one otherwise, and never more than one password. As for `apply --commit`, the answer also covers
+   the rebuilt plans the preview announces (a profile cloned by this run, extension code that adds schemas).
+3. `status`, printed as the command does; then one closing line. When items are left, each manual step is listed
+   with its message (anything else left is under Missing in the `status` output just above).
 
 Exit code: 0 only when `status` is clean (extras and warnings alone keep 0), 3 when drift is left or the run was
-not confirmed, 6 when root was needed and could not be obtained (before anything changed). Idempotent: a second
-run reports `0 changed` and exits 0. `fix` has no `--no-sudo`: root is its point; `apply --no-sudo` is the other way.
+not confirmed, 6 when root was needed and could not be obtained (before the first root action). Idempotent: a
+second run reports `0 changed` and exits 0. `fix` has no `--no-sudo`: root is its point; `apply --commit --no-sudo` is the other way.
 
 ### Modules
 

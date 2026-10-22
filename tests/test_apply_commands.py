@@ -3,13 +3,14 @@
 import argparse
 import contextlib
 import io
+import sys
 import types
 import unittest
 from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
-from tests.util import write
+from tests.util import host, write
 
 try:
     from tests.actions_scenario import Scenario
@@ -19,6 +20,7 @@ try:
     from ubuntu_tweaks import process
     from ubuntu_tweaks.process import CommandError
     from ubuntu_tweaks.context import Context
+    from ubuntu_tweaks.elevation import RootSession
     from ubuntu_tweaks.errors import ExitCode, UnknownModuleError
     from ubuntu_tweaks.extension import RELOGIN_HINT
     from ubuntu_tweaks.planners import extension_links, schemas, submodule, toggle
@@ -369,6 +371,7 @@ class InitCommandTests(CommandScenario):
         self.real_apply = reconcile.apply
         for patcher in (
             mock.patch.object(doctor, "requirements", return_value=[]),
+            mock.patch.object(init, "root_session", return_value=RootSession(command="x", host=host(euid=0))),
             mock.patch.object(
                 reconcile,
                 "apply",
@@ -428,7 +431,7 @@ class InitCommandTests(CommandScenario):
         with (
             mock.patch.object(doctor, "requirements", return_value=[absent]),
             mock.patch.object(doctor, "install") as install,
-            mock.patch.object(init.sys.stdin, "isatty", return_value=False),
+            mock.patch.object(sys.stdin, "isatty", return_value=False),
         ):
             code, out = self.run_init(commit=True)
         self.assertEqual(code, ExitCode.DRIFT)
@@ -499,6 +502,7 @@ class DoctorTests(CommandScenario):
         with (
             contextlib.redirect_stdout(out),
             mock.patch.object(doctor, "requirements", return_value=needed),
+            mock.patch.object(doctor, "root_session", return_value=RootSession(command="x", host=host(euid=0))),
         ):
             code = doctor.run(self.context(), argparse.Namespace(yes=yes))
         return code, out.getvalue()

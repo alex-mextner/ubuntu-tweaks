@@ -4,7 +4,8 @@ Accessed via: ``bin/ubuntu-tweak apply``.
 
 Without ``--commit`` it prints the plan and changes nothing; with ``--commit`` it executes it and
 prints ``N changed`` (a second run prints ``0 changed``). ``--no-sudo`` skips root actions and
-says so. The work is in ``ubuntu_tweaks.reconcile``, imported lazily because it needs PyGObject.
+says so; otherwise root is obtained once, before the first root action (``elevation``, exit 6 when it
+cannot be). The work is in ``ubuntu_tweaks.reconcile``, imported lazily because it needs PyGObject.
 """
 
 from __future__ import annotations
@@ -24,9 +25,10 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    from ubuntu_tweaks.commands._support import require_gi
+    from ubuntu_tweaks.commands._support import require_gi, root_session
 
     require_gi()
     from ubuntu_tweaks import reconcile
 
-    return reconcile.apply(ctx, commit=args.commit, no_sudo=args.no_sudo)
+    with root_session(args, "apply --commit", skip="apply --commit --no-sudo") as root:
+        return reconcile.apply(ctx, commit=args.commit, no_sudo=args.no_sudo, root=root)

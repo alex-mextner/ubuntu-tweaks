@@ -8,6 +8,7 @@ Checks ``python3-gi`` (importable ``gi``), ``dconf-cli`` (``dconf``), ``git``, `
 that an enabled module installs itself (``[install] apt``: ``git`` by ``base-tools`` / ``git-gh``, a
 module's dependency) is reported ``planned``, not ``MISSING``: ``init`` / ``apply`` install it, so
 ``doctor`` does not fail on tools the pipeline is about to install. Read-only unless ``--yes``, which
+first obtains root once (``elevation.RootSession``: exit 6 with the command to run when it cannot) and
 installs the missing apt packages with ``sudo apt-get install -y`` (without sudo when already root).
 Exit 0 when nothing is missing, 3 when something is (still missing after ``--yes`` counts too). Does
 not import PyGObject: it must work without it.
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Phase
-from ubuntu_tweaks.commands._support import has_gi
+from ubuntu_tweaks.commands._support import has_gi, root_session
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.manifest import module_defaults
@@ -174,7 +175,9 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
                 f"{len(absent)} missing. Install with: ubuntu-tweak doctor --yes   (sudo apt-get install -y {packages})"
             )
         return int(ExitCode.DRIFT)
-    install(absent)
+    with root_session(args, "doctor --yes") as root:
+        root.require(1, f"apt-get install {packages}")
+        install(absent)
     print("After install:")
     absent = report(needed)
     return int(ExitCode.DRIFT if absent else ExitCode.OK)
