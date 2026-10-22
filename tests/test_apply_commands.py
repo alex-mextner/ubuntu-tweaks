@@ -3,7 +3,6 @@
 import argparse
 import contextlib
 import io
-import sys
 import types
 import unittest
 from collections.abc import Callable
@@ -382,7 +381,7 @@ class InitCommandTests(CommandScenario):
             self.addCleanup(patcher.stop)
 
     def run_init(self, ctx: Context | None = None, **flags: bool) -> tuple[int, str]:
-        args = argparse.Namespace(**{"commit": False, "yes": False, "no_sudo": False, **flags})
+        args = argparse.Namespace(**{"commit": False, "no_sudo": False, **flags})
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = init.run(ctx or self.context(), args)
@@ -426,17 +425,21 @@ class InitCommandTests(CommandScenario):
         _, out = self.run_init(ctx)
         self.assertIn("needs manual: not logged in to GitHub: run `gh auth login`", out)
 
-    def test_commit_with_missing_packages_stops_without_yes(self) -> None:
-        absent = doctor.Requirement("tmux", "tmux", "module x", lambda: False)
+    def test_commit_installs_missing_packages_without_a_question(self) -> None:
+        state = {"present": False}
+        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: state["present"])]
+
+        def fake_install(absent: list[object]) -> None:
+            state["present"] = True
+
         with (
-            mock.patch.object(doctor, "requirements", return_value=[absent]),
-            mock.patch.object(doctor, "install") as install,
-            mock.patch.object(sys.stdin, "isatty", return_value=False),
+            mock.patch.object(doctor, "requirements", return_value=needed),
+            mock.patch.object(doctor, "install", side_effect=fake_install) as install,
+            mock.patch("builtins.input", side_effect=AssertionError("--commit is the consent: nothing is asked")),
         ):
-            code, out = self.run_init(commit=True)
-        self.assertEqual(code, ExitCode.DRIFT)
-        install.assert_not_called()
-        self.assertIn("ubuntu-tweak doctor --yes", out)
+            code, _ = self.run_init(commit=True)
+        self.assertEqual(code, 0)
+        install.assert_called_once()
 
     def test_cli_link_alone_is_not_extension_code(self) -> None:
         self.run_init(commit=True)
@@ -455,27 +458,11 @@ class InitCommandTests(CommandScenario):
             mock.patch.object(doctor, "requirements", return_value=[absent]),
             mock.patch.object(doctor, "install") as install,
         ):
-            code, out = self.run_init(commit=True, no_sudo=True, yes=True)
+            code, out = self.run_init(commit=True, no_sudo=True)
         self.assertEqual(code, 0)
         install.assert_not_called()
         self.assertIn("Not installing tmux (--no-sudo)", out)
         self.assertTrue((self.home / ".local/bin/ubuntu-tweak").is_symlink())
-
-    def test_commit_yes_installs_then_continues(self) -> None:
-        state = {"present": False}
-        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: state["present"])]
-
-        def fake_install(absent: list[object]) -> None:
-            state["present"] = True
-
-        with (
-            mock.patch.object(doctor, "requirements", return_value=needed),
-            mock.patch.object(doctor, "install", side_effect=fake_install) as install,
-        ):
-            code, out = self.run_init(commit=True, yes=True)
-        self.assertEqual(code, 0)
-        install.assert_called_once()
-        self.assertIn("changed", out)
 
     def test_preview_with_missing_packages_does_not_install(self) -> None:
         absent = doctor.Requirement("tmux", "tmux", "module x", lambda: False)
@@ -486,7 +473,7 @@ class InitCommandTests(CommandScenario):
             code, out = self.run_init()
         self.assertEqual(code, 0)
         install.assert_not_called()
-        self.assertIn("init --commit would install: sudo apt-get install -y tmux", out)
+        self.assertIn("init --commit would first install: sudo apt-get install -y tmux", out)
 
     def test_missing_gi_skips_the_apply_preview(self) -> None:
         gi = doctor.Requirement("python3-gi (PyGObject)", "python3-gi", "the CLI", lambda: False)
@@ -494,6 +481,79 @@ class InitCommandTests(CommandScenario):
             code, out = self.run_init()
         self.assertEqual(code, ExitCode.DRIFT)
         self.assertIn("apply preview skipped", out)
+
+
+class ApplyRequirementsTests(CommandScenario):
+    """``apply --commit`` is the repair: missing apt packages are installed in the same run, with no question."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        real_apply = reconcile.apply
+        for patcher in (
+            mock.patch.object(apply, "root_session", return_value=RootSession(command="x", host=host(euid=0))),
+            mock.patch.object(
+                reconcile,
+                "apply",
+                side_effect=lambda ctx, **kwargs: real_apply(ctx, backend_factory=self.factory, **kwargs),
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_apply_command(self, needed: list[doctor.Requirement], **flags: bool) -> tuple[int, str]:
+        args = argparse.Namespace(**{"commit": False, "no_sudo": False, **flags})
+        out = io.StringIO()
+        with mock.patch.object(doctor, "requirements", return_value=needed), contextlib.redirect_stdout(out):
+            code = apply.run(self.context(), args)
+        return code, out.getvalue()
+
+    def test_commit_installs_the_missing_packages_then_applies_without_asking(self) -> None:
+        state = {"present": False}
+        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: state["present"])]
+
+        def fake_install(absent: list[object]) -> None:
+            state["present"] = True
+
+        with (
+            mock.patch.object(doctor, "install", side_effect=fake_install) as install,
+            mock.patch("builtins.input", side_effect=AssertionError("--commit is the consent: nothing is asked")),
+        ):
+            code, out = self.run_apply_command(needed, commit=True)
+        self.assertEqual(code, 0)
+        install.assert_called_once()
+        self.assertIn("changed", out)
+
+    def test_preview_names_the_packages_and_installs_nothing(self) -> None:
+        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: False)]
+        with mock.patch.object(doctor, "install") as install:
+            code, out = self.run_apply_command(needed)
+        self.assertEqual(code, 0)
+        install.assert_not_called()
+        self.assertIn("apply --commit would first install: sudo apt-get install -y tmux", out)
+        self.assertIn("Plan: ", out)
+
+    def test_still_missing_after_the_install_ends_the_run_with_drift(self) -> None:
+        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: False)]
+        with mock.patch.object(doctor, "install"):
+            code, out = self.run_apply_command(needed, commit=True)
+        self.assertEqual(code, ExitCode.DRIFT)
+        self.assertIn("Still missing after install: tmux", out)
+
+    def test_no_sudo_does_not_install_and_goes_on(self) -> None:
+        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: False)]
+        with mock.patch.object(doctor, "install") as install:
+            code, out = self.run_apply_command(needed, commit=True, no_sudo=True)
+        self.assertEqual(code, 0)
+        install.assert_not_called()
+        self.assertIn("Not installing tmux (--no-sudo)", out)
+
+    def test_missing_gi_ends_the_run_before_the_plan(self) -> None:
+        gi = doctor.Requirement("python3-gi (PyGObject)", "python3-gi", "the CLI", lambda: False)
+        with mock.patch.object(doctor, "install") as install:
+            code, out = self.run_apply_command([gi], commit=True, no_sudo=True)
+        self.assertEqual(code, ExitCode.DRIFT)
+        install.assert_not_called()
+        self.assertIn("apply skipped: python3-gi is missing", out)
 
 
 class DoctorTests(CommandScenario):

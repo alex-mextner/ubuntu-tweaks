@@ -1,13 +1,12 @@
-"""``ubuntu-tweak init [--commit] [--yes] [--no-sudo]``: set up a fresh system.
+"""``ubuntu-tweak init [--commit] [--no-sudo]``: set up a fresh system.
 
 Accessed via: ``bin/ubuntu-tweak init`` (and the ``install.sh`` wrapper, which passes ``--commit``).
 
 Steps: ``doctor`` -> the ``apply`` plan extended with the symlink ``~/.local/bin/ubuntu-tweak``
 -> the CLI (submodule init is a ``submodule`` action of the plan, ``git submodule update --init
---recursive``). Without ``--commit`` everything is only printed (invariant 1). With ``--commit``
-missing apt packages are installed first, after a confirmation on a terminal or at once with
-``--yes``; without either, ``init`` stops and names the command (``--no-sudo`` skips the install
-and goes on). A missing *default* profile is not an error: the header says which dotfiles repository gh
+--recursive``). Without ``--commit`` (or with ``--dry-run``) everything is only printed (invariant 1). With
+``--commit`` the missing apt packages are installed first, with no question (``--commit`` is the consent;
+``--no-sudo`` skips the install and goes on). A missing *default* profile is not an error: the header says which dotfiles repository gh
 found, none, or ``needs manual: ... gh auth login`` (``reconcile.header_lines``) and the plan covers the modules only. The CLI link has its own kinds
 (``cli-link``, ``cli-link-replace``): it is not extension code, so it triggers neither the re-login
 hint nor the staged settings pass; ``--only`` limits ``init`` to the named modules, so it drops the
@@ -28,10 +27,9 @@ from pathlib import Path
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.commands import doctor
-from ubuntu_tweaks.commands._support import confirm, root_session, say
+from ubuntu_tweaks.commands._support import root_session
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.elevation import RootSession
-from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.symlink import SymlinkAction
 
 CLI_LINK = Path(".local/bin/ubuntu-tweak")
@@ -40,7 +38,6 @@ CLI_LINK = Path(".local/bin/ubuntu-tweak")
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("init", help="fresh system: doctor, submodules, CLI link, apply (--commit runs it)")
     parser.add_argument("--commit", action="store_true", help="install packages and apply (default: preview only)")
-    parser.add_argument("--yes", action="store_true", help="install missing apt packages without asking")
     parser.add_argument("--no-sudo", action="store_true", help="skip actions that need root and say so")
     parser.set_defaults(handler=run)
 
@@ -61,27 +58,9 @@ def _run(ctx: Context, args: argparse.Namespace, root: RootSession) -> int:
     if ui.rich():
         print(ui.heading("ubuntu-tweak init") + " " + ui.style("(set up this machine)", "dim"))
     _step(1, "init.step.doctor")
-    needed = doctor.requirements(ctx, honor_planned=not args.no_sudo)  # no sudo: the module's apt batch cannot run
-    absent = doctor.report(needed)
-    if absent:
-        packages = " ".join(sorted({item.apt for item in absent}))
-        if not args.commit:
-            say("info", f"init --commit would install: sudo apt-get install -y {packages}")
-        elif args.no_sudo:
-            say("manual", f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
-        elif args.yes or confirm(f"Install {packages} with sudo apt-get?"):
-            root.require(1, f"apt-get install {packages}")
-            doctor.install(absent)
-            absent = doctor.missing(needed)
-            if absent:
-                say("error", "Still missing after install: " + ", ".join(item.label for item in absent))
-                return int(ExitCode.DRIFT)
-        else:
-            say("error", f"Missing packages: {packages}. Re-run with --yes, or run: ubuntu-tweak doctor --yes")
-            return int(ExitCode.DRIFT)
-    if doctor.missing([item for item in needed if item.apt == "python3-gi"]):
-        say("error", "apply preview skipped: python3-gi is missing (install it first).")
-        return int(ExitCode.DRIFT)
+    blocked = doctor.ensure_requirements(ctx, args, root, command="init", show_report=True, skipped="apply preview")
+    if blocked is not None:
+        return blocked
 
     from ubuntu_tweaks import reconcile
 

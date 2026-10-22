@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scr
 ```
 
 Without `--yes` it only previews (`init` without `--commit`); `--yes` is the explicit consent that turns it into
-`init --commit --yes`. No `curl` yet: `wget -qO- <same url> | sh -s -- --yes` or `sudo apt-get install -y curl`
+`init --commit`. No `curl` yet: `wget -qO- <same url> | sh -s -- --yes` or `sudo apt-get install -y curl`
 first. `init` ends with a **Manual steps** block (gh token, AMO key, iCloud sign-in, ...): what only you can
 finish, each with how, all in the spec's *Manual steps* table. The same by hand:
 
@@ -40,8 +40,7 @@ The dotfiles repo is found through `gh` in your account under the names `.files`
 Then log out and back in (the Shell on Wayland loads extension code only at login). Repo
 extensions, including the dock submodule, are symlinked into
 `~/.local/share/gnome-shell/extensions`, so the repo stays the source of truth. Re-running is safe.
-`./install.sh` still works: it is `bin/ubuntu-tweak init --commit`; a non-interactive run needs
-`--yes` to install missing apt packages (`./install.sh --yes`).
+`./install.sh` still works: it is `bin/ubuntu-tweak init --commit`.
 
 Upgrading a clone from before the dock rename (submodule path
 `gnome-extensions/dash2dock-lite@icedman.github.com` → `gnome-extensions/hyperdock`):
@@ -64,20 +63,22 @@ password **once**, before the first root action, and keeps the sudo ticket alive
 asks. Where it cannot ask (a sandbox with `no_new_privs`, no terminal, a wrong password) it stops before the first
 root action with exit **6**, says why and prints the command to run from a normal terminal.
 
-To repair everything that is not right on this machine, run **`ubuntu-tweak fix`** in a terminal. It shows the plan
-and asks before it changes anything (your answer is its `--commit`; one more question first when apt packages are
-missing), asks for sudo once, installs the missing packages, applies the whole plan and ends with `status`: exit 0
-only when nothing is left, and what only you can finish is listed with the reason. `fix --yes` skips the questions.
-A second run says `0 changed`.
+**One command repairs everything.** `ubuntu-tweak apply --commit` (and `init --commit` on a fresh machine) asks for
+sudo once, installs the apt packages that are missing (what `doctor --yes` does), applies the whole plan and ends with
+`N changed` and what only you can finish, each with the reason. `--commit` is the consent: nothing else is asked.
+There is no separate `fix` command. A second run says `0 changed`.
+
+**`--dry-run` everywhere.** Every command accepts `--dry-run`: it previews exactly like the run without `--commit`,
+changes nothing, never asks for sudo and says `dry run: nothing was changed`; together with `--commit` it is a usage
+error (exit 2).
 
 | Command | What it does |
 |---|---|
 | `init [--commit]` | fresh system: `doctor`, submodules, CLI link in `~/.local/bin`, then `apply`; preview without `--commit` |
-| `apply [--commit] [--no-sudo]` | print the plan (what would change), or run it; a second run says `0 changed` |
+| `apply [--commit] [--no-sudo]` | print the plan (what would change), or repair the machine: sudo once, missing apt packages, then the plan; a second run says `0 changed` |
 | `status` | Missing / Modified / Extra; exit 3 when anything declared is missing or modified |
 | `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
 | `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them (asks for sudo once) |
-| `fix [--yes]` | repair everything: install missing packages, apply the whole plan, then `status`; one sudo prompt; exit 0 only when status is clean, 3 when something is left, 6 when root cannot be had |
 | `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | read-only inventory of the live system, printed as the exact diff the profile would get (SUMMARY block first; `--dry-run` is the explicit no-write mode, `--summary` prints only the summary); `--commit` writes it into the profile working tree (never runs git) |
 | `bundles [--show NAME]` | read-only: the settings bundles, where each applies, shadowed / duplicated / conflicting keys |

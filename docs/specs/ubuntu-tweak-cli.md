@@ -75,7 +75,12 @@ as any behavior change.
     through gh, profile-supplied modules) is in *Engine and profile*, *Profile discovery* and *Profile modules*;
     the output half is in *Output*: every interactive output is colored and explained, `status` first.
 15. «ubuntu-tweaks должен уметь запрашивать sudo и чинить всё что не так» — the engine obtains root itself,
-    once and up front (*Elevation*), and `ubuntu-tweak fix` repairs every drift in one command (*Commands*).
+    once and up front (*Elevation*), and repairs every drift in one command (request 18).
+18. «Зачем fix? Разве не init/apply должен быть только? Как в rig» — there is no `fix` command: `apply --commit`
+    and `init --commit` ask for sudo once, install the missing apt packages (what `doctor --yes` does) and apply
+    the plan in the same run, with no question in between (*Repair in one command*, *Elevation*). Where `rig`
+    differs and no decision of the user is recorded, the difference is listed under *Decisions*.
+19. «И --dry-run добавь везде» — every command accepts `--dry-run` (*Dry run*).
 
 ## Requirements
 
@@ -154,13 +159,12 @@ Covered by `tests/test_launcher.py`.
 
 | Command | What it does |
 |---|---|
-| `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
+| `init [--commit] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs the missing apt packages as part of the run, with no question: `--commit` is the consent, the preview names the packages; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it (*Repair in one command*). `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
 | `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing and says so. In a terminal: badges, `[sudo]` marks, a reason per action, numbered progress and a summary (*Output*). |
 | `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan holds root actions (and not `--no-sudo`), root is obtained once before the first of them runs (*Elevation*; exit 6 when it cannot be). When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
 | `status [--explain\|-v] [--json]` | Drift both ways (see *Drift*, *Output*), grouped as Missing / Modified / Extra / Manual, with a verdict line, a definition of each group and the next command in a terminal; compact text when piped; `--json` for scripts. Exit 3 when anything declared is Missing or Modified; extras and manual items alone exit 0. |
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
 | `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install` (root is obtained first, *Elevation*). |
-| `fix [--yes]` | Repairs everything that is not right, in one command (*fix*): `doctor`'s missing apt packages, then `apply --commit` of the whole plan (modules, settings, files, packages, system, services), then `status`. Root is asked for once (*Elevation*). It prints the plan, asks one question on a terminal and changes nothing without the answer `y` or `--yes`. Exit 0 only when `status` is clean afterwards, 3 when something is left (each item with its reason), 6 when root cannot be obtained. A second run reports `0 changed`. |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
 | `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, settings bundle and linked file whether it comes from the shared profile or the machine overlay. |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive, SUMMARY block first (see *capture*). `--dry-run` is the explicit no-write mode (excludes `--commit`); `--summary` prints only the summary. |
@@ -171,7 +175,7 @@ Covered by `tests/test_launcher.py`.
 
 Global flags, accepted before or after the command: `--profile DIR`, `--machine NAME`,
 `--only <name,…>` (modules for `apply`/`status`, panels for `capture`), and the output flags
-`--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*).
+`--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*), and `--dry-run` (see *Dry run*).
 
 Exit codes: 0 ok, 1 internal error, 2 invalid config, 3 drift, 4 unknown module, 5 refused
 (secret finding or unsafe path), 6 root needed but not obtainable (*Elevation*). The constants live in one place,
@@ -191,7 +195,7 @@ runs the strategy below once per run (later calls are no-ops) and, for the durat
 `process.elevate()` prefix root commands the way the strategy found to work.
 
 - **When it asks.** `apply --commit`, `init --commit`, `update --commit` (through its `apply --commit` child),
-  `doctor --yes` and `fix`: only when the plan holds an unsatisfied root action (or `doctor` has an apt package to
+  `doctor --yes`: only when the plan holds an unsatisfied root action (or there is an apt package to
   install) and `--no-sudo` is absent; after the preview is printed and before the first action of the plan runs.
   When a rebuilt plan (a profile that was just cloned, a staged pass) holds root actions the first one did not, the
   call is repeated and acquires then, still before those root actions run (but after the steps that need no root
@@ -216,33 +220,44 @@ runs the strategy below once per run (later calls are no-ops) and, for the durat
 - **The error.** `RootUnavailable` is an `UbuntuTweakError` with exit code **6** (`ExitCode.NO_ROOT`), no
   traceback. Its message names the cause and ends with the exact command to run from a normal terminal: the
   command that was run, with the `--profile` / `--machine` / `--only` / `--dotfiles-repo` the user gave (e.g.
-  `ubuntu-tweak fix`, `ubuntu-tweak apply --commit --only eng`); and, where skipping root is meaningful, the
+  `ubuntu-tweak apply --commit`, `ubuntu-tweak apply --commit --only eng`); and, where skipping root is meaningful, the
   alternative `... --no-sudo` (root actions are skipped and listed; `doctor --yes` has none). In a terminal the
   `fix:` line repeats the command. `ExitCode.NO_ROOT` is also what `update --commit` returns when its `apply`
   child fails this way.
 - **Tests** use a `Host` value (euid, controlling terminal, `SUDO_ASKPASS`, display, `NoNewPrivs`, the tools on
   `PATH`; `Host.detect()` reads the real ones) and `FakeProcess`, so no test needs real sudo.
 
-### fix
+### Repair in one command
 
-`ubuntu-tweak fix [--yes]` is the "repair everything" entry (request 15). Steps, in order, with one `RootSession`
-for the whole run:
+Request 18. There is no `fix` command: `apply --commit` and `init --commit` are the repair, as in `rig`. Steps of
+one `--commit` run, in order, with one `RootSession` for the whole run:
 
-1. `doctor`: the report; when apt packages are missing that no module installs itself, the question "Install … with
-   sudo apt-get?" (`--yes` skips it), then root is obtained and `apt-get install -y` runs. Still missing after
-   that ends the run with exit 3.
-2. `apply --commit` of the whole plan (`--only` narrows it as everywhere): the plan is printed, one question
-   "Apply N action(s) (M need root)?" is asked on a terminal (`--yes` skips it), root is obtained, the plan runs.
-   Without a terminal and without `--yes` nothing is changed: it says so and ends with exit 3 while drift
-   remains (invariant 1: no change without explicit consent). So there are two questions when packages are
-   missing and one otherwise, and never more than one password. As for `apply --commit`, the answer also covers
-   the rebuilt plans the preview announces (a profile cloned by this run, extension code that adds schemas).
-3. `status`, printed as the command does; then one closing line. When items are left, each manual step is listed
-   with its message (anything else left is under Missing in the `status` output just above).
+1. **Requirements** (what `doctor` checks: `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas`, the enabled
+   modules' `[deps] apt`): the ones missing that no module installs itself are installed with
+   `apt-get install -y` after root was obtained once. No question is asked: `--commit` is the consent and the
+   preview already said `apply --commit would first install: sudo apt-get install -y <packages>`. Still missing
+   afterwards ends the run with exit 3. `--no-sudo` skips the install, says so and goes on when the plan can still
+   be built (it cannot without `python3-gi`: exit 3).
+2. The plan runs as before (*Plan and actions*): root is already held, so the plan's own `[sudo]` actions never
+   ask again; rebuilt plans (a profile cloned by this run, extension code that adds schemas) run in the same call.
+3. The run ends with `N changed`, the re-login hint and the manual steps with their reasons; `status` afterwards
+   is the check (exit 0 when nothing declared is left).
 
-Exit code: 0 only when `status` is clean (extras and warnings alone keep 0), 3 when drift is left or the run was
-not confirmed, 6 when root was needed and could not be obtained (before the first root action). Idempotent: a
-second run reports `0 changed` and exits 0. `fix` has no `--no-sudo`: root is its point; `apply --commit --no-sudo` is the other way.
+Without `--commit` (or with `--dry-run`) nothing is installed or applied and no sudo is asked; the preview lists
+the apt packages the commit would install first. A run that cannot get root stops before the first root action with
+exit 6 and the command to run from a normal terminal (*Elevation*). Idempotent: a second run reports `0 changed`.
+
+### Dry run
+
+Request 19. Every command accepts `--dry-run`, before or after the command name. For a command that can change
+something (`apply`, `init`, `update`, `doctor`, `capture`, `bundle-move`, `note`) it is the explicit spelling of the
+default preview: the same output and the same exit code as the run without `--commit` / `--yes`, one extra line
+`dry run: nothing was changed` on stderr, no sudo, no write anywhere except the session log (*Session log*), no
+question. It excludes the command's commit word (`--commit`, `--yes` of `doctor`): both together are a usage
+error, exit 2 (`ConfigError`) with the message `--dry-run and --commit exclude each other`. A read-only command
+(`status`, `list`, `machine`, `bundles`, `show`) accepts it as a no-op with the same stderr line, so a script can
+pass `--dry-run` to every command it runs. `cli.py` resolves it once for all commands: the flag is a global flag
+and a command that has a commit word is declared by its own `--commit` / `--yes` argument.
 
 ### Modules
 
@@ -617,7 +632,8 @@ and `sudo apt-get install -y git curl ca-certificates python3-gi` (also for the 
 without them), clones this project's repository (`$UBUNTU_TWEAKS_REPO`, default `alex-mextner/ubuntu-tweaks`) with its submodules into `~/ubuntu-tweaks` (or
 `$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated), then runs
 `bin/ubuntu-tweak init "$@"`. The commit is explicit: with no arguments it is the **preview**; `--yes` is the
-only word that turns it into `init --commit --yes` (apply and install without asking); any other argument
+only word that turns it into `init --commit` (apply and install without asking: `--commit` is the consent);
+any other argument
 (`--commit`, `--no-sudo`) goes to `init` unchanged. It is the one-liner of the README:
 `curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scripts/bootstrap.sh | sh -s -- --yes`
 (once on `main`; with no `curl` at all, `wget -qO- <url> | sh -s -- --yes`, or `sudo apt-get install -y curl` first).
@@ -1923,12 +1939,13 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   empty machine as a golden file (`tests/golden/init_empty_machine.txt`; regenerate with
   `UPDATE_GOLDEN=1` and review the diff); `doctor` reporting `planned`. Everything goes through
   `FakeProcess` and a fake root directory (`StepEnv.root`); nothing touches the real system.
-- Elevation and `fix` (`tests/test_elevation.py`, `tests/test_fix_command.py`; `FakeProcess` and a `Host` value,
-  never the real sudo): already root, NOPASSWD, the terminal path asking once for N root actions and refreshing the
-  ticket, askpass, pkexec, and the typed errors (`no-new-privs`, `no-tool`, `no-prompt`, wrong password) with exit
-  6 and the fix command in the message; `--no-sudo`, previews and plans without root actions never ask; `apply`,
-  `init` and `doctor --yes` acquire before the first root action; `fix` ordering (doctor, apply, status), the
-  confirmation, exit 0 / 3 / 6 and the idempotent second run.
+- Elevation and the repair run (`tests/test_elevation.py`, `tests/test_root_wiring.py`; `FakeProcess` and a `Host`
+  value, never the real sudo): already root, NOPASSWD, the terminal path asking once for N root actions and
+  refreshing the ticket, askpass, pkexec, and the typed errors (`no-new-privs`, `no-tool`, `no-prompt`, wrong
+  password) with exit 6 and the command in the message; `--no-sudo`, previews, `--dry-run` and plans without root
+  actions never ask; `apply` and `init` acquire before the first root action and install the missing packages in
+  the same run without a question (`tests/test_apply_commands.py`); `--dry-run` for every command, with `--commit`
+  a usage error (`tests/test_dry_run.py`).
 - Profile discovery and profile modules (`tests/test_identity.py`, `tests/test_profile_modules.py`,
   `modules/dotfiles/tests/test_install.py`; no PyGObject needed): a fake `gh` (found, none, several, forks and
   archived skipped, logged out, missing, offline, a listing as long as the limit), the cache (one hour, one

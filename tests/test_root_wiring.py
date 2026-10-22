@@ -70,6 +70,9 @@ class WiringScenario(CommandScenario):
         patcher = mock.patch.object(planners, "discover_planners", return_value=[*MY_PLANNERS, planner])
         patcher.start()
         self.addCleanup(patcher.stop)
+        requirements = mock.patch.object(doctor, "requirements", return_value=[])  # no dpkg-query of the dev box
+        requirements.start()
+        self.addCleanup(requirements.stop)
         self.run_apply(commit=True, no_sudo=True)  # converge the scenario's own extension module first
 
     def on_execute(self, argv: tuple[str, ...], input_text: str | None) -> None:
@@ -274,7 +277,7 @@ class CommandRootTests(WiringScenario):
 
     def run_init(self, **flags: bool) -> str:
         real_apply = reconcile.apply
-        args = argparse.Namespace(**{"commit": True, "yes": True, "no_sudo": False, **flags})
+        args = argparse.Namespace(**{"commit": True, "no_sudo": False, **flags})
         out = io.StringIO()
         with (
             mock.patch.object(doctor, "requirements", return_value=self.init_needed),
