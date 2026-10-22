@@ -21,8 +21,12 @@ Public API:
   installed user extension, and the compiled schemas inside each enabled module's source tree.
 - ``build_plan(ctx, backend, extra_actions=()) -> Plan``.
 - ``profile_lines(ctx) -> list[str]``: the ``machine:`` / ``profile:`` header lines.
+- ``header_lines(ctx, title) -> list[str]``, ``engine_version(ctx)``, ``print_warnings(lines)``: the
+  explained (``ui.rich()``) header and warnings block of ``apply`` / ``status``.
 - ``apply(ctx, *, commit, no_sudo, extra_actions=(), backend_factory=open_backend,
-  relogin_hint=False) -> int``: prints the preview, or executes and prints ``N changed``.
+  relogin_hint=False, relocate=None, title="apply", preview_footer="apply.footer") -> int``: prints the
+  preview, or executes and prints ``N changed`` (interactive: numbered progress and a summary, see the
+  spec's *Output*). ``title`` / ``preview_footer`` let ``init`` and ``update`` frame the same preview.
 - ``RELOGIN_HINT``.
 """
 
@@ -30,9 +34,11 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import subprocess
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
@@ -88,18 +94,70 @@ def _before_settings(plan: Plan) -> Plan:
     return Plan(tuple(a for a in plan.actions if a.phase < Phase.SETTINGS_MODULE), plan.satisfied)
 
 
-def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sudo: bool) -> None:
-    print("\n".join(profile_lines(ctx)))
-    print(plan.render(no_sudo=no_sudo))
-    warnings = collect_warnings(ctx, backend)
-    if warnings:
-        print("Warnings:")
-        print("\n".join(f"  {line}" for line in warnings))
-    if _is_staged(plan):
-        print(
-            "Note: this plan installs extension code or schemas. Settings that depend on them are planned "
-            "after those actions ran; `apply --commit` does that in the same invocation."
+def engine_version(ctx: Context) -> str:
+    """``git describe`` of the checkout the engine runs from; ``unknown`` for a tree that is not a git checkout."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ctx.repo_root), "describe", "--tags", "--always", "--dirty"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return done.stdout.strip() if done.returncode == 0 and done.stdout.strip() else "unknown"
+
+
+def header_lines(ctx: Context, title: str) -> list[str]:
+    """The interactive header: the command, then machine / profile / engine as aligned rows. When the profile
+    is missing, the hint lines of ``profile_lines`` (how to get it) follow in yellow."""
+    profile = ctx.profile
+    overlay = (
+        ui.t("header.overlay", path=tilde(profile.overlay_dir)) if profile.has_overlay else ui.t("header.no_overlay")
+    )
+    where = tilde(profile.root) if profile.exists else ui.t("header.no_profile", path=tilde(profile.root))
+    rows = [
+        (ui.t("header.machine"), f"{profile.machine} ({overlay})"),
+        (ui.t("header.profile"), where),
+        (ui.t("header.engine"), f"ubuntu-tweaks {engine_version(ctx)}"),
+    ]
+    lines = [ui.heading(f"ubuntu-tweak {title}")] if title else []
+    lines += ui.kv(rows)
+    lines += [ui.style(line, "yellow") for line in profile_lines(ctx)[2:]]
+    return lines
+
+
+def print_warnings(warnings: list[str]) -> None:
+    if not warnings:
+        return
+    if ui.rich():
+        print()
+        print(ui.section(ui.t("warnings"), len(warnings), "need"))
+        for line in warnings:
+            print("\n".join(ui.wrap(line, first="  ", names=("yellow",))))
+        return
+    print("Warnings:")
+    print("\n".join(f"  {line}" for line in warnings))
+
+
+def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sudo: bool, title: str) -> None:
+    if ui.rich():
+        print("\n".join(header_lines(ctx, title)))
+        print()
+    else:
+        print("\n".join(profile_lines(ctx)))
+    print(plan.render(no_sudo=no_sudo))
+    print_warnings(collect_warnings(ctx, backend))
+    if _is_staged(plan):
+        note = ui.t("apply.staged")
+        if ui.rich():
+            print("\n".join(ui.wrap(note, first=f"{ui.symbol('info')} ", names=("cyan",))))
+        else:
+            print(
+                "Note: this plan installs extension code or schemas. Settings that depend on them are planned "
+                "after those actions ran; `apply --commit` does that in the same invocation."
+            )
 
 
 DOTFILES_MODULE = "dotfiles"
@@ -134,35 +192,57 @@ def apply(
     backend_factory: BackendFactory = open_backend,
     relogin_hint: bool = False,
     relocate: Callable[[], Location] | None = None,
+    title: str = "apply",
+    preview_footer: str = "apply.footer",
 ) -> int:
     extras = tuple(extra_actions)
     backend = backend_factory(ctx)
     plan = build_plan(ctx, backend, extras)
-    _print_preview(ctx, plan, backend, no_sudo=no_sudo)
+    _print_preview(ctx, plan, backend, no_sudo=no_sudo, title=title)
     if not commit:
         if len(plan):
-            print("Preview only, nothing was changed. Run with --commit to apply.")
+            if ui.rich():
+                print()
+                print("\n".join(ui.wrap(ui.t(preview_footer), first=f"{ui.symbol('info')} ", names=("cyan",))))
+            else:
+                print("Preview only, nothing was changed. Run with --commit to apply.")
         return 0
 
     executed: list[str] = []
 
+    def runnable(pending: Plan) -> int:
+        return sum(not (a.needs_root and no_sudo) for a in pending.actions)
+
+    progress = {"number": 0, "total": 0}
+
     def announce(action: Action) -> None:
         executed.append(action.kind)
-        print(f"  -> [{action.kind}] {action.describe()}", flush=True)
+        progress["number"] += 1
+        if ui.rich():
+            print(ui.progress(progress["number"], progress["total"], "run", action.describe()), flush=True)
+        else:
+            print(f"  -> [{action.kind}] {action.describe()}", flush=True)
 
+    def done(_action: Action) -> None:
+        print(ui.progress(progress["number"], progress["total"], "ok", ui.style("done", "green")), flush=True)
+
+    if ui.rich():
+        print()
     changed = 0
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
     acquire = _profile_acquisition(ctx, plan)
     if acquire:
         # the profile decides which modules are on (a profile may switch ssh-server off): clone it first, alone
-        first = Plan(acquire, 0).execute(no_sudo=no_sudo, on_start=announce)
+        progress["total"] = runnable(Plan(acquire, 0))
+        first = Plan(acquire, 0).execute(no_sudo=no_sudo, on_start=announce, on_done=done if ui.rich() else None)
         changed += first.changed
         manual.update({_manual_key(action): (action, message) for action, message in first.manual})
         arrived = _arrived_profile(ctx, relocate)
         if arrived is not None:
             ctx = dataclasses.replace(ctx, profile=arrived)
-            print(f"profile: {tilde(arrived.root)} (cloned by this run)", flush=True)
+            arrived_line = f"profile: {tilde(arrived.root)} (cloned by this run)"
+            print(f"{ui.symbol('ok')} {ui.style(arrived_line, 'green')}" if ui.rich() else arrived_line, flush=True)
         rebuilt = build_plan(ctx, backend_factory(ctx), extras)
         plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
     result = ExecutionResult(0, (), ())
@@ -171,7 +251,8 @@ def apply(
         if staged and number == MAX_PASSES:
             raise ActionFailed(f"the plan still installs extension code after {MAX_PASSES - 1} passes")
         stage = _before_settings(plan) if staged else plan
-        result = stage.execute(no_sudo=no_sudo, on_start=announce)
+        progress["total"] = progress["number"] + runnable(stage)
+        result = stage.execute(no_sudo=no_sudo, on_start=announce, on_done=done if ui.rich() else None)
         changed += result.changed
         manual.update({_manual_key(action): (action, message) for action, message in result.manual})
         if not staged:
@@ -180,12 +261,31 @@ def apply(
         rebuilt = build_plan(ctx, backend_factory(ctx), extras)
         # a manual step reported in an earlier pass is not run again (its installer may have done work)
         plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
-    print(f"{changed} changed")
     final = ExecutionResult(changed, result.skipped, tuple(manual.values()))
+    relogin = relogin_hint or any(kind in CODE_CHANGING for kind in executed)
+    if not ui.rich():
+        print(f"{changed} changed")
+        if final.skipped:
+            print(final.render_skipped())
+        if relogin:
+            print(RELOGIN_HINT)
+        if final.manual:
+            print(final.render_manual())
+        return 0
+    print()
+    print(ui.heading(ui.t("commit.summary")))
+    counts = [f"{ui.symbol('ok')} {ui.style(ui.t('commit.changed', n=changed), 'green')}"]
+    if final.manual:
+        counts.append(f"{ui.symbol('manual')} {ui.style(ui.t('commit.manual', n=len(final.manual)), 'yellow')}")
+    if final.skipped:
+        counts.append(f"{ui.symbol('need')} {ui.style(ui.t('commit.skipped', n=len(final.skipped)), 'yellow')}")
+    print("  " + "   ".join(counts))
     if final.skipped:
         print(final.render_skipped())
-    if relogin_hint or any(kind in CODE_CHANGING for kind in executed):
-        print(RELOGIN_HINT)
+    if relogin:
+        print("\n".join(ui.wrap(RELOGIN_HINT, first=f"{ui.symbol('need')} ", names=("yellow",))))
     if final.manual:
         print(final.render_manual())
+    hint = "commit.rerun_pending" if final.skipped or final.manual else "commit.rerun"
+    print("\n".join(ui.wrap(ui.t(hint), first=f"{ui.symbol('info')} ", names=("cyan",))))
     return 0

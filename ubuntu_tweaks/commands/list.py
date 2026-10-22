@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.manifest import Manifest, SourceKind, module_defaults
 
@@ -29,6 +30,29 @@ def _source_label(manifest: Manifest) -> str:
     return source.path or "(settings only)"
 
 
+def _render_rich(rows: list[tuple[str, str, str, str]]) -> str:
+    enabled = sum(row[2] == "yes" for row in rows)
+    shown = [
+        (
+            ui.style(name, "bold"),
+            ui.style(kind, "dim"),
+            (ui.badge("ok", word=False) + " on") if on == "yes" else ui.style("- off", "dim"),
+            ui.style(source, "dim"),
+        )
+        for name, kind, on, source in rows
+    ]
+    lines = [ui.heading(f"ubuntu-tweak modules ({len(rows)})")]
+    lines += ui.wrap(
+        "A module is one tweak (an extension, a settings preset or a system installer). "
+        "Enabled comes from the module default, overridden by profile.toml, then machine.toml.",
+        indent=2,
+    )
+    lines.append("")
+    lines += ui.table(("MODULE", "KIND", "ENABLED", "SOURCE"), shown)
+    lines += ["", f"  {ui.style(f'{enabled} enabled, {len(rows) - enabled} disabled', 'dim')}"]
+    return "\n".join(lines)
+
+
 def render(ctx: Context) -> str:
     manifests = ctx.manifests()
     ctx.require_modules({manifest.name for manifest in manifests})
@@ -45,6 +69,8 @@ def render(ctx: Context) -> str:
     ]
     if not rows:
         return "No modules."
+    if ui.rich():
+        return _render_rich(rows)
     table = [("MODULE", "KIND", "ENABLED", "SOURCE"), *rows]
     widths = [max(len(row[column]) for row in table) for column in range(3)]
     return "\n".join(

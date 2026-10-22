@@ -1,0 +1,56 @@
+ubuntu-tweak status
+  machine  home (no overlay: shared profile only)
+  profile  ~/.files/ubuntu
+
+✗ 4 missing, 1 modified, 1 extra, 1 need your attention
+  run: ubuntu-tweak apply (preview), then ubuntu-tweak apply --commit
+
+✗ Missing (4)
+  Declared by a module or your profile, but not on this machine yet.
+  Fix: `ubuntu-tweak apply --commit` installs or creates it.
+  base-tools
+    ! [sudo] apt: install zsh, 7zip, xclip [base-tools, zsh]
+      why: apt/snap/flatpak packages that your modules or profile declare;
+      never removes any
+    ! [sudo] apt: install jq [base-tools]
+  hyperdock
+    ! init submodule gnome-extensions/hyperdock
+      why: downloads the extension's code that lives in a git submodule
+  profile and system
+    ! [sudo] timezone: set Europe/Berlin (now UTC)
+      why: timezone, locale or keyboard from system.toml (needs sudo)
+
+✗ Modified (1)
+  Present, but different from what is declared (a changed value, or a link
+  replaced by a real file).
+  Fix: `apply --commit` overwrites it (files are backed up first). To keep your
+  version instead, run `ubuntu-tweak capture` to copy it into the profile.
+  dock
+    ! /org/gnome/desktop/interface/clock-show-weekday = true (now false) <-
+      modules/x.ini
+      why: the live value differs from the one your modules/profile declare
+
++ Extra (1)
+  On this machine but declared nowhere. Reported only: ubuntu-tweak never
+  removes anything and extras never make status fail.
+  Fix: declare it (`ubuntu-tweak capture`) or ignore it.
+    + extension ding@rastersoft.com is enabled but no module declares it
+
+… Manual (1)
+  Things ubuntu-tweak cannot decide or do for you.
+  Fix: do each step yourself; the line says how.
+    … git: name and email not set in profile.toml: git config user.name and
+      user.email stays as it is
+
+Legend
+  ✓ ok       satisfied, nothing to do
+  ! apply    needs action: `apply --commit` does it
+  … manual   only you can finish it; the line says how
+  + extra    present but not declared; reported only
+  ✗ error    failed or blocks the run
+
+Next
+  ubuntu-tweak apply
+      preview what would change (changes nothing)
+  ubuntu-tweak apply --commit
+      make it so

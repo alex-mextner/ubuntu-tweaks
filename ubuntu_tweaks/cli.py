@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
-from ubuntu_tweaks import commands, identity
+from ubuntu_tweaks import commands, identity, ui
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.discovery import discover
 from ubuntu_tweaks.errors import ExitCode, UbuntuTweakError
@@ -72,6 +72,24 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> No
         default=default,
         help="ask gh for the dotfiles repository again instead of using the cached answer",
     )
+    parser.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default=default,
+        help="color and the explained layout: auto = on a terminal unless NO_COLOR/TERM=dumb (default)",
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        default=default,
+        help="plain, byte-stable text without colors or explanations (alias of --color never + compact layout)",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=("en", "ru"),
+        default=default,
+        help="language of the explanations (default: $UBUNTU_TWEAK_LANG, else en)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +125,7 @@ def _resolve_profile(args: argparse.Namespace) -> Profile:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
+        ui.configure(color=args.color or "auto", plain=bool(args.plain), lang=args.lang)
         context = Context(
             repo_root=REPO_ROOT,
             profile=_resolve_profile(args),
@@ -114,15 +133,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         result = args.handler(context, args)
     except UbuntuTweakError as error:
-        print(f"ubuntu-tweak: {error}", file=sys.stderr)
+        print(ui.format_error(str(error), int(error.exit_code), stream=sys.stderr), file=sys.stderr)
         return int(error.exit_code)
     except ModuleNotFoundError as error:
         if error.name != "gi":
             traceback.print_exc()
             return int(ExitCode.INTERNAL)
+        message = (
+            f"PyGObject (Python module `gi`) is not available in {sys.executable}; "
+            "install it with: sudo apt install python3-gi"
+        )
         print(
-            f"ubuntu-tweak: PyGObject (Python module `gi`) is not available in {sys.executable}; "
-            "install it with: sudo apt install python3-gi",
+            ui.format_error(message, int(ExitCode.INTERNAL), fix="sudo apt install python3-gi", stream=sys.stderr),
             file=sys.stderr,
         )
         return int(ExitCode.INTERNAL)
