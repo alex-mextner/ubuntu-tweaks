@@ -38,6 +38,24 @@ as any behavior change.
    подобная концепция, кажется packages называется» — answered by `capture --dry-run` with a
    SUMMARY block, the changed-only rule and the `auto` skip class, reasons as comments, and
    *bundles* (see *Settings bundles*).
+9. «открой мне на ubuntu-pc на ultra по ssh tailscale в наглядном виде все настройки с пояснениями на
+   русском и значений. и доделай все. и настрой чтобы ubuntu-tweaks так же устанавливал и включел ssh
+   сервер при инициализации и док и синхронизацию паролей. и rig опционально и .files, и rig должен все
+   по возможности активировать и настройки rig должне переноситься (я начинал это делать, проверь по
+   веткам и доделай) и риг в том чесле должен настраивать tmux и omp. доделай все.
+   и еще пароли должны подставляться в firefox, а док не должен выскакивать если курсор около границы,
+   только если он на границе 300мс+
+   и файрфокс должен авторизовываться автоматически при инициализации ubuntu-tweaks
+   конечно, перед этим должен быть установлен и настроен passwords-app и из него и будут браться пароли
+   для всех авторизаций автоматически. еще вот это отстой: «! Failed to copy one-time code to clipboard
+   — No clipboard utilities available. Please install xsel, xclip, wl-clipboard…» git, gh -- тоже должны
+   быть установлены и настроены. убунту из коробки вообще тлен какой-то даже curl нету. и brew пусть
+   ставится для линукса и если после будут нужны доп действия тоже пусть делаются. и конечно же zsh должен
+   быть установлен и активирован в самом начале» — the `init` pipeline and the base modules (see *Init
+   pipeline*, *Base modules*).
+10. «еще zip нету. все необходимые тулы должны быть в .files ставиться» — `zip` and the other archivers
+    are in the engine's base list; the rest of a person's tools live in the profile's `packages.toml`
+    (see *Base modules*, *The engine's list and the profile's list*).
 
 ## Requirements
 
@@ -111,7 +129,7 @@ Covered by `tests/test_launcher.py`.
 | `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
 | `status` | Drift both ways (see *Drift*), grouped as Missing / Modified / Extra. Exit 3 when anything declared is Missing or Modified; extras alone exit 0. |
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
-| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
+| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
 | `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, settings bundle and linked file whether it comes from the shared profile or the machine overlay. |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive, SUMMARY block first (see *capture*). `--dry-run` is the explicit no-write mode (excludes `--commit`); `--summary` prints only the summary. |
@@ -209,6 +227,8 @@ that is absolute or contains `..` are invalid config (exit 2).
     real root can verify is listed in `docs/specs/memguard.md`, *Real-root verification*). `apple-hid-battery` checks the running
     kernel: module present, loaded at
     boot, livepatch enabled, or absent on kernels with the upstream fix (>= 7.3).
+    A `system` module may also set `root = false`, `preview`, read `UBUNTU_TWEAK_MODULE_CONFIG` and exit 10
+    from its installer; see *Init pipeline*.
   - `ego`: an extension from extensions.gnome.org by uuid and optional version. The
     manifest schema reserves it and validation rejects it with "not supported yet (#20)"
     until it is implemented. Source kinds are one class each behind one interface
@@ -234,6 +254,175 @@ that is absolute or contains `..` are invalid config (exit 2).
   symlink that does not point into this repo is not touched. A migration is one `migrate`
   action, satisfied when none of the three steps is pending.
 
+### Init pipeline
+
+`ubuntu-tweak init` makes a stock Ubuntu usable in this order (request 9); each step is a module with
+`order = <step> x 10` and `phase = "base"` (steps 1-4) or its own phase, each is an action with
+`check()` / `run()`, previewed by `init` / `apply` and executed only with `--commit`, and each is
+switchable per machine with `[modules.<name>] enabled = false` in `machines/<host>/machine.toml`.
+
+| Step | What | Module (order) |
+|---|---|---|
+| 1 | base tools + `zsh` installed **and** set as the login shell, first | `base-tools` (10), `zsh` (11) |
+| 2 | clipboard tools (`wl-clipboard`, `xclip`, `xsel`) | `clipboard` (20) |
+| 3 | `git` + `gh` installed and configured | `git-gh` (30) |
+| 4 | Homebrew for Linux and its follow-up actions | `brew` (40) |
+| 5 | ssh server | `ssh-server` (50) |
+| 6 | passwords-app: install, enable unit, native host | `passwords-app*` (60) |
+| 7 | Firefox integration: extension, auto-login with passwords-app credentials | `firefox*` (70) |
+| 8 | dock | `hyperdock` (80) |
+| 9 | GNOME settings and profile files | the settings and files phases |
+| 10 | optional, off unless a machine enables them: rig (+ tmux, omp), the `.files` checkout | modules (100+) |
+
+Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
+
+**Ordering.** `Plan.build` sorts by `(phase, order)`, both stable. `Phase.BASE` (5) precedes everything,
+even the submodule init, because later steps need `git`, `curl` and a shell. A module's `module.toml`
+may set:
+
+- `order` (whole number 0-999, default 100): the tie-break inside a phase; every action of the module
+  gets it unless the planner set its own (a `[[post]]` is `order + 0.5`, so it follows its module's
+  install even when another planner creates that install). It is the init step times ten, so a module
+  can be slotted between two steps.
+- `phase` (`"base"`, `"packages"` or `"system"`): moves the module's install-time actions (phases `BASE`,
+  `PACKAGES`, `SYSTEM`) there; submodule, migration, schema, link, toggle, settings and seed actions keep
+  their phases because they depend on each other and on the extension code. `system` modules default to
+  `SYSTEM`; the new tables below default to `PACKAGES`. `order` 100 is "unset": an action that carries
+  another value keeps it.
+
+`planners.build_actions` applies both after all planners ran (`apply_module_ordering`), so any planner's
+actions, the system-module planner's included, follow the manifest.
+
+**Manifest tables** (any source kind; a `system` module has its own installer and takes only `[[post]]`):
+
+```toml
+order = 30
+phase = "base"
+
+[install]                      # distro packages the module is for
+apt = ["git", "gh"]
+[install.provides]             # package -> a command that counts as the package being there
+gh = "gh"                      # a brew-installed gh satisfies `gh`
+
+[[step]]                       # a built-in step by name, extra keys are its arguments
+name = "brew-install"
+url = "https://raw.githubusercontent.com/Homebrew/install/<commit>/install.sh"
+sha256 = "..."
+
+[[post]]                       # follow-up command after the install, with its own check
+name = "formulae"
+description = "brew install the formulae of packages.toml"   # the preview line; default: name + argv
+needs_root = false
+after = "install"              # "install" or an earlier [[post]] name; posts run in declared order
+run = ["/home/linuxbrew/.linuxbrew/bin/brew", "install", "{packages.brew}"]
+check = ["/home/linuxbrew/.linuxbrew/bin/brew", "list", "--formula", "{packages.brew}"]
+```
+
+- **`[install] apt`** of every enabled module of one phase is **one** `package` action (one
+  `apt-get install -y a b c`, names deduplicated), so the base tools and the clipboard utilities are a
+  single `apt` run while each module stays switchable; its preview line ends with the contributing
+  modules. A package counts as installed when `dpkg-query` says `ii` or its `provides` command is on
+  `PATH`. `apt_update = true` of `packages.toml` also applies.
+- **`[[step]]`** names are looked up in `ubuntu_tweaks/steps.py` (`STEPS`); an unknown name is invalid
+  config (exit 2) with the known names. Steps: `login-shell`, `shell-rc`, `git-identity`, `gh-login`,
+  `git-credential-helper`, `brew-prefix`, `brew-install` (arguments in the module docstring of `steps.py`).
+- **`[[post]]`** `run` / `check` are argv lists (no shell); `argv[0]` is a program on `PATH` or an absolute
+  path. A whole argument `{packages.apt|snap|flatpak|brew}` expands to that list of `packages.toml`; a post
+  whose placeholder expands to nothing is not planned. `check` exits 0 = satisfied (a failing or missing
+  check means "not satisfied"). An absolute `argv[0]` that does not exist yet (brew before its install ran,
+  e.g. under `--no-sudo`) makes the post a manual step instead of a crash.
+- **Manual steps.** An action whose `run()` raises `ManualStepRequired` is reported as
+  `needs manual: <what>`, is not counted in `N changed`, does not fail the plan, and stays unsatisfied, so
+  `status` lists it as Missing (exit 3). `apply` never prompts for it. A staged `apply` (it rebuilds the plan
+  after code-installing actions) runs a manual step once and reports it once: a step reported in an earlier
+  pass is dropped from the rebuilt plan (identity is the action's `key`, not its text, which can embed live
+  state). Steps that need a package an unsatisfied step was to install (`login-shell` without zsh,
+  `gh-login` / `git-credential-helper` without `gh`, `brew-install` without its prefix) are manual steps too,
+  so `--no-sudo` never aborts the plan. `run()` raises it before any side effect (the system-module
+  exit-10 case is the one exception, and is covered by that rule).
+
+**`system` modules, additions.** `[source] root = false` (default `true`) runs the installer as the user:
+the action has no `[sudo]` marker, is not skipped by `--no-sudo`, and `install` runs directly (for modules
+that install into `$HOME`, user systemd units or the Secret Service). `[source] preview = "<script> plan"`
+is an optional read-only command (resolved and run like `check`): `apply` prints its stdout indented under
+the action's `run <module>: ...` line so the installer's exact steps are visible before `--commit`; a
+failing preview shows `(preview unavailable: exit N: <first stderr line>)` and never fails the plan. The
+merged `[modules.<name>]` table of `profile.toml` / `machine.toml` without `enabled` is passed to `check`,
+`preview` and `install` as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` (unset when there is none; under sudo as
+`sudo -- env UBUNTU_TWEAK_MODULE_CONFIG=<json> <argv>`, because sudo's `env_reset` drops a plain variable).
+Because that puts the options in `ps` output and in sudo's log, **a module option is never a secret**.
+An installer exit code **10** means "needs a manual step" (its own output says which): reported like a
+`ManualStepRequired`, no post-check, the plan goes on, `status` keeps the module Missing. Any other non-zero
+exit stays a failure.
+
+**`doctor`.** `python3-gi`, `dconf-cli` and `libglib2.0-bin` stay hard requirements (the plan cannot be
+built without them). `git` and a module's `[deps] apt` that an enabled module installs through
+`[install] apt` of a module with `phase = "base"` (the only installs that run before the submodule init that
+needs `git`) are reported `planned` (`init` / `apply` install them), not `MISSING`, so `doctor` does not
+fail on tools the pipeline is about to install. `update` runs `git pull` before `apply` and still needs git.
+
+### Base modules
+
+Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
+
+| Module | Installs / does |
+|---|---|
+| `base-tools` | apt: `curl wget ca-certificates git gnupg openssh-client zsh build-essential procps file zip unzip 7zip xz-utils bzip2 jq libsecret-tools` (verified with `apt-cache policy` on Ubuntu 26.04: all exist; `p7zip-full` does not, `7zip` replaces it). `build-essential procps file curl git` are Homebrew's prerequisites; the archivers answer "zip is missing" on a stock install; `libsecret-tools` (`secret-tool`) is for the Secret Service scripts of the passwords-app and Firefox modules. |
+| `clipboard` | apt: `wl-clipboard xclip xsel`: what `gh` looks for when it copies a one-time code (`! Failed to copy one-time code to clipboard: No clipboard utilities available`). |
+| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`); step `shell-rc`: `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone); the mac-era dotfiles at the root of `.files` are not touched. |
+| `git-gh` | apt `git gh` (`gh` 2.46.0 is in the 26.04 `universe` archive, decided with `apt-cache policy gh`); steps `git-identity`, `gh-login`, `git-credential-helper`. |
+| `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it), `tools` (`brew install uv oven-sh/bun/bun` unless `uv` and `bun` are already on `PATH`: what the passwords-app and Firefox modules run on) and `formulae` (`brew install` of `packages.toml` `brew`). A post with `after` does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
+
+**git and gh.** Identity comes only from the profile, never invented:
+
+```toml
+[git]                          # profile.toml, machine.toml wins
+name = "Ada Lovelace"
+email = "ada@example.org"
+token_ref = "ubuntu-tweaks/gh-token"   # optional keychain item; this is the default
+host = "github.com"                    # optional
+```
+
+`git-identity` runs `git config --global user.name` / `user.email` only for the keys set; without `[git]`
+nothing is planned and the plan prints a warning. `gh-login` takes the token **only** from the keychain
+item `token_ref` (the `keychain` CLI, GNOME Keyring / Secret Service), at run time:
+`keychain exec --no-prompt --caller ubuntu-tweaks --stdin <ref> -- gh auth login --hostname <host>
+--with-token`; the value is never in argv, an environment variable, a file, the profile or this process,
+and its output is masked by `keychain`. Items under `ubuntu-tweaks/` belong to the caller `ubuntu-tweaks`;
+another namespace needs a grant in `~/.config/keychain-cli/policy.toml`. When the keychain is missing, locked,
+denies access or has no item, the action is `needs manual: gh auth login (<reason>; store a token with
+`keychain set <ref>`)` and `status` lists it Missing. `git-credential-helper` runs
+`gh auth setup-git --hostname <host> --force`.
+
+**Homebrew installer pin.** `brew-prefix` creates `/home/linuxbrew/.linuxbrew` owned by the user with
+`sudo install -d` (the only root part; the installer then finds a writable prefix and needs no sudo).
+`brew-install` downloads the installer script from a **commit-pinned** `Homebrew/install` URL, compares its
+SHA-256 with the manifest's `sha256` and refuses (exit 1, nothing executed) on any difference, then runs
+`env NONINTERACTIVE=1 /bin/bash <script>` from a private temporary directory it removes afterwards. Current
+pin: commit `a2fe82ef3a9ec7a5c72a559c09676256d6f354f6`, sha256
+`5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148` (35651 bytes). To bump it: take the
+new `Homebrew/install` commit, `curl -fsSL <raw url> | sha256sum`, read the diff of the installer against
+the old pin, change `url` and `sha256` in `modules/brew/module.toml` and regenerate the `init` golden file.
+
+**The engine's list and the profile's list.** The base modules above are the minimal bootstrap: what the
+pipeline itself needs. Everything else a person wants (`tmux`, `ripgrep`, `htop`, editors, snaps, flatpaks,
+brew formulae) is in the profile's `packages.toml` with `# reason` comments, shared with machine overlays
+that add to it; both lists are unioned and installed by the same `apply`. `capture` proposes the profile
+list from `apt-mark showmanual` and friends (see *capture*). Packages the base modules installed are marked
+manual by apt, so a later `capture` proposes them again (harmless: the lists union); filtering them out by
+module is not implemented.
+
+**Manual verification (root and network paths).** `sudo -n` is unavailable on the development machine, so
+the following are verified with fake-root unit tests and must be checked by hand once on a real
+machine (as for `memguard`): `ubuntu-tweak init --commit` on a fresh VM installs the apt batch; `getent
+passwd $USER` shows `/usr/bin/zsh` afterwards (log out and in); `ls -ld /home/linuxbrew/.linuxbrew` is owned
+by the user and `/home/linuxbrew/.linuxbrew/bin/brew --version` works; a second `init --commit` reports
+`0 changed`; with a token stored by `keychain set ubuntu-tweaks/gh-token`, `gh auth status` is logged in
+and `git config --global --get-all credential.https://github.com.helper` names `gh auth git-credential`;
+without one, `status` lists `gh-login` as Missing and `apply --commit` still exits 0. Not yet observed on a
+real fresh machine: the Homebrew installer running non-interactively against a pre-created prefix
+(derived from reading the pinned script, not executed).
+
 ### Modules at cutover
 
 | Module | Kind | Notes |
@@ -243,7 +432,8 @@ that is absolute or contains `..` are invalid config (exit 2).
 | `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it) |
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 
-No other module is added until it has real content.
+The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
+default and switchable per machine. No other module is added until it has real content.
 
 ### Profile layout
 
@@ -489,6 +679,7 @@ counts as "not satisfied". Timezone, locale and keyboard are three `system` acti
 ```toml
 apt = ["tmux", "ripgrep"]
 snap = ["firefox"]
+brew = ["gh"]                # optional: Homebrew formulae (Linuxbrew), installed by the brew module
 flatpak = ["org.gnome.Extensions"]
 flatpak_remote = "flathub"   # optional: the one remote flatpaks are installed from (default flathub)
 apt_update = false           # optional: run `apt-get update` before the apt batch (default false)
@@ -502,6 +693,13 @@ deliberate installs show up.
 A comment above a name or after it on its line (`"tmux",  # shell tools`) is that name's reason,
 and `capture --commit` keeps all of them: it appends new names to the array and leaves the order
 and the comments alone. `ubuntu-tweak note packages:apt:<name> "reason"` adds or changes one.
+
+`brew = ["ripgrep"]` lists Homebrew formulae: the `brew` module's `formulae` post installs the missing
+ones with `brew install` after the Homebrew install itself (see *Base modules*); the lists union like the
+others and a name starting with `-` is invalid config. There is no `brew` package action: the formulae
+are a `[[post]]` of the module, so a machine without the `brew` module never plans them. `capture` does not
+scan Homebrew yet ([#48](https://github.com/alex-mextner/ubuntu-tweaks/issues/48)); the capture writer keeps
+an existing `brew` array and its comments.
 
 One `package` action per manager that has names, listing what is missing right now. apt and
 snap run as one batch through sudo (`apt-get install -y …`, `snap install …`); flatpak runs
@@ -729,9 +927,10 @@ action has `check()` (already satisfied?) and `run()`; the plan holds only actio
 check fails, so the preview is exactly what `--commit` will do. After an action runs, its
 `check()` must hold; a plan that does not converge fails instead of reporting `changed`.
 
-Order: submodules → migrations → schemas → **packages** → **system (root)** → symlinks
-(extensions) → **files (links)** → enable/disable → settings (module presets, then shared
-bundles, then machine overlay bundles) → seeds.
+Order: **base (init steps 1-4)** → submodules → migrations → schemas → **packages** → **system (root)** →
+symlinks (extensions) → **files (links)** → enable/disable → settings (module presets, then shared
+bundles, then machine overlay bundles) → seeds. Inside a phase actions are ordered by `order` (lower
+first, default 100, stable otherwise); see *Init pipeline*.
 
 | Action (`kind`) | Check | Run |
 |---|---|---|
@@ -739,6 +938,14 @@ bundles, then machine overlay bundles) → seeds.
 | `migrate` | see *Migrations* | copy values, retire old uuid |
 | `compile-schemas` | `gschemas.compiled` newer than every `*.gschema.xml` (satisfied when the extension has no schema) | `glib-compile-schemas` |
 | `package` | apt / snap / flatpak name is installed | install the missing names; never remove |
+| `login-shell` (root) | the passwd entry's shell is named like the wanted one (`getent passwd <user>`) | `chsh -s /usr/bin/<shell> <user>` through sudo |
+| `shell-rc` | the file exists (a dangling symlink counts) | create it with `O_EXCL`, only while absent |
+| `git-config` | `git config --global --get <key>` equals the profile value | `git config --global <key> <value>` |
+| `git-credential` | the global `credential.https://<host>.helper` list names `gh auth git-credential` | `gh auth setup-git --hostname <host> --force` |
+| `gh-login` | `gh auth status --hostname <host>` exits 0 | `keychain exec --stdin <ref> -- gh auth login --with-token`; no token: `needs manual` |
+| `brew-prefix` (root) | the prefix is a directory owned by the user, or `bin/brew` exists | `install -d -o <user> -g <group> <prefix>` through sudo |
+| `brew-install` | `<prefix>/bin/brew` exists | download the pinned installer, refuse it unless its SHA-256 matches, run it with `NONINTERACTIVE=1` |
+| `post` | the `[[post]]` entry's `check` argv exits 0 | its `run` argv (through sudo when `needs_root`) |
 | `system` (root) | `timedatectl`, `localectl` or `/etc/default/keyboard` matches | the same through sudo |
 | `system-module` (root) | a `system` module's checker exits 0 | its installer through sudo |
 | `link` | `~/.local/share/gnome-shell/extensions/<uuid>` (uuid from `metadata.json`) or `~/<path>` is a symlink to the source | `ln -sfnT` |
@@ -850,6 +1057,16 @@ the exact clone command and applies the modules only.
   ([#18](https://github.com/alex-mextner/ubuntu-tweaks/issues/18) for the rest of the
   hardening). Tests that need PyGObject run under the distro interpreter, because
   `python3-gi` is an apt package.
+- Init pipeline and base modules (`tests/test_manifest_pipeline.py`, `tests/test_planner_base.py`,
+  `tests/test_init_pipeline.py`, `tests/test_system_modules.py`, `tests/test_actions.py`; no PyGObject
+  needed except `test_init_pipeline.py`): `order` / `phase` / `[install]` / `[[step]]` / `[[post]]` /
+  `root` / `preview` validation; the one apt batch and its `provides`; login shell, rc files (never
+  overwritten, `O_EXCL`), git identity, `gh` login through the keychain (no token in argv, manual step
+  on every keychain failure), brew prefix and installer (tampered script refused, never run); posts and
+  their placeholders; `(phase, order)` plan ordering; exit 10 as a manual step; the `init` preview on an
+  empty machine as a golden file (`tests/golden/init_empty_machine.txt`; regenerate with
+  `UPDATE_GOLDEN=1` and review the diff); `doctor` reporting `planned`. Everything goes through
+  `FakeProcess` and a fake root directory (`StepEnv.root`); nothing touches the real system.
 
 ## Decisions
 
@@ -890,6 +1107,17 @@ the exact clone command and applies the modules only.
   hyperdock#3; the migration covers the switch.
 - **Dev clone remotes**: in `~/xp/dash2dock-lite`, `origin` is upstream icedman; the
   fork is `fork`. Tickets for hyperdock are filed with `--repo alex-mextner/hyperdock`.
+- **Engine base list vs profile list**: the engine ships only the minimal bootstrap its own pipeline
+  needs (`modules/base-tools`, `clipboard`, `git-gh`, `zsh`, `brew`); a person's other tools are
+  `apt` / `snap` / `flatpak` / `brew` in the profile's `packages.toml`, with `# reason` comments. Both are
+  installed by the same apply and unioned, so the public engine never knows the personal list.
+- **Named steps, not code per module**: what a command line cannot express (a passwd lookup, a file made
+  only while absent, a download checked against a pinned hash) is a built-in step looked up by name from
+  `[[step]]`, like seed providers; everything else is a `[[post]]` command with its own check.
+- **`gh` from the Ubuntu archive**: 26.04 has `gh` 2.46.0 in `universe`; no third-party apt repository or
+  signing key is added just for it. A newer brew `gh` already on `PATH` satisfies the package.
+- **A missing credential is a manual step, not a failure**: `apply` never prompts and never stores a
+  secret; it reports `needs manual: ...` and `status` keeps the action Missing.
 
 ## Cutover checklist
 

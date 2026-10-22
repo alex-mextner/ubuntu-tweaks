@@ -12,6 +12,12 @@ and goes on). A missing *default* profile is not an error: the exact clone comma
 (``cli-link``, ``cli-link-replace``): it is not extension code, so it triggers neither the re-login
 hint nor the staged settings pass; ``--only`` limits ``init`` to the named modules, so it drops the
 CLI link. Re-running is safe (every action is idempotent).
+
+Pipeline order (spec, *Init pipeline*): there is no list of steps in this file. The ``apply`` plan is
+ordered by ``(phase, order)`` and every pipeline step is a module whose ``module.toml`` declares its
+``order`` (base tools + zsh 10-11, clipboard 20, git/gh 30, brew 40, ssh 50, passwords-app 60, Firefox 70,
+dock 80, optional modules 100+) and ``phase``; a tool a module installs itself is reported ``planned`` by
+``doctor``, not ``MISSING``.
 """
 
 from __future__ import annotations
@@ -44,7 +50,7 @@ def _confirm(question: str) -> bool:
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     print("doctor:")
-    needed = doctor.requirements(ctx)
+    needed = doctor.requirements(ctx, honor_planned=not args.no_sudo)  # no sudo: the module's apt batch cannot run
     absent = doctor.report(needed)
     if absent:
         packages = " ".join(sorted({item.apt for item in absent}))

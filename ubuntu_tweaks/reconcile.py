@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from ubuntu_tweaks.actions import Action, ActionFailed, Phase, Plan
+from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
 from ubuntu_tweaks.manifest import discover_modules
@@ -102,6 +102,11 @@ def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sud
         )
 
 
+def _manual_key(action: Action) -> tuple[str, str | None, str]:
+    """Identity of an action across plan rebuilds: its ``key``, else its text (which may embed live state)."""
+    return (action.kind, action.scope, action.key or action.describe())
+
+
 def apply(
     ctx: Context,
     *,
@@ -128,6 +133,7 @@ def apply(
 
     changed = 0
     number = 1
+    manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
     while True:
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:
@@ -135,12 +141,15 @@ def apply(
         stage = _before_settings(plan) if staged else plan
         result = stage.execute(no_sudo=no_sudo, on_start=announce)
         changed += result.changed
+        manual.update({_manual_key(action): (action, message) for action, message in result.manual})
         if not staged:
             break
         number += 1
-        plan = build_plan(ctx, backend_factory(ctx), extras)
+        rebuilt = build_plan(ctx, backend_factory(ctx), extras)
+        # a manual step reported in an earlier pass is not run again (its installer may have done work)
+        plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
     print(f"{changed} changed")
-    skipped = result.render_skipped()
+    skipped = ExecutionResult(changed, result.skipped, tuple(manual.values())).render_skipped()
     if skipped:
         print(skipped)
     if relogin_hint or any(kind in CODE_CHANGING for kind in executed):

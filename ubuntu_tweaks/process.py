@@ -11,7 +11,7 @@ password and ``apt`` can show progress) and raises ``CommandError`` on a non-zer
 Public API:
 
 - ``CommandResult(returncode, stdout, stderr)`` with ``ok``.
-- ``CommandError`` (exit 1).
+- ``CommandError`` (exit 1); ``returncode`` is the failed command's exit status (``None`` when it never ran).
 - ``Process``: ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
   missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
   ``elevate(argv) -> list[str]`` (prefix with ``sudo --`` or ``pkexec``; unchanged when already
@@ -48,7 +48,12 @@ class CommandResult:
 
 
 class CommandError(UbuntuTweakError):
-    """An external command failed or a required helper (sudo, pkexec) is missing."""
+    """An external command failed or a required helper (sudo, pkexec) is missing; ``returncode`` is the
+    command's exit status when it ran and failed."""
+
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 def elevate(argv: Sequence[str]) -> list[str]:
@@ -86,7 +91,7 @@ def run(argv: Sequence[str], *, cwd: Path | None = None, capture: bool = False, 
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or "").strip().splitlines()
         suffix = f": {detail[-1]}" if detail else ""
-        raise CommandError(f"`{line}` failed with exit code {error.returncode}{suffix}") from error
+        raise CommandError(f"`{line}` failed with exit code {error.returncode}{suffix}", error.returncode) from error
     return result.stdout or ""
 
 
@@ -118,7 +123,7 @@ class Process:
         except OSError as error:
             raise CommandError(f"{argv[0]}: cannot run: {error.strerror or error}") from error
         if completed.returncode != 0:
-            raise CommandError(f"{' '.join(argv)}: exited with status {completed.returncode}")
+            raise CommandError(f"{' '.join(argv)}: exited with status {completed.returncode}", completed.returncode)
 
     def elevate(self, argv: Sequence[str]) -> list[str]:
         return elevate(argv)

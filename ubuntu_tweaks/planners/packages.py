@@ -105,7 +105,12 @@ class PackageAction(Action):
 def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> Sequence[Action]:
     runner = process or Process()
     packages = ctx.profile.load_packages()
-    for manager, names in (("apt", packages.apt), ("snap", packages.snap), ("flatpak", packages.flatpak)):
+    for manager, names in (
+        ("apt", packages.apt),
+        ("snap", packages.snap),
+        ("flatpak", packages.flatpak),
+        ("brew", packages.brew),  # installed by the brew module's post, validated here for every machine
+    ):
         for name in names:
             if name.startswith("-") or not name.strip():
                 raise ConfigError(f"packages.toml {manager}: {name!r} is not a package name")
