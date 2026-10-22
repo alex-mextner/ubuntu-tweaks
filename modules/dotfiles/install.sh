@@ -49,7 +49,15 @@ manual() { echo "needs manual: $1" >&2; exit 10; }
 
 # the checkout must be rooted AT $dir: a plain directory inside another work tree (a git-managed $HOME)
 # is not one, and fetching or merging there would act on the enclosing repository
-is_repo() { [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$dir" && pwd -P)" ]; }
+is_repo() {
+  local top here
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  here=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  [ -n "$top" ] && [ "$top" = "$here" ]
+}
+# the stored remote.origin.url (get-url would expand url.<base>.insteadOf rewrites)
+origin_url() { git -C "$dir" config --get remote.origin.url 2>/dev/null || echo none; }
+origin_ok() { [ -z "$repo" ] || [ "$(origin_url)" = "$repo" ]; }
 clean() { [ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; }
 # "ahead behind" against the last-fetched upstream; empty when there is none
 counts() { git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null || true; }
@@ -57,8 +65,8 @@ counts() { git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null
 if [ "$mode" = check ]; then
   [ -e "$dir" ] || { echo "drift: $dir is missing"; exit 3; }
   is_repo || { echo "drift: $dir is not a git checkout"; exit 3; }
-  if [ -n "$repo" ] && [ "$(git -C "$dir" remote get-url origin 2>/dev/null)" != "$repo" ]; then
-    echo "drift: $dir has origin $(git -C "$dir" remote get-url origin 2>/dev/null || echo none), not $repo"
+  if ! origin_ok; then
+    echo "drift: $dir has origin $(origin_url), not $repo (git -C $dir remote set-url origin $repo, or fix the repo option)"
     exit 3
   fi
   read -r ahead behind <<<"$(counts)"
@@ -98,6 +106,7 @@ if [ ! -e "$dir" ]; then
 fi
 
 is_repo || manual "$dir exists and is not a git checkout; move it away or set [modules.dotfiles] dir"
+origin_ok || manual "$dir has origin $(origin_url), not $repo; run git -C $dir remote set-url origin $repo, or fix the repo option"
 git -C "$dir" fetch --quiet origin 2>/dev/null || { echo "$dir: could not fetch (offline?), left as it is"; exit 0; }
 read -r ahead behind <<<"$(counts)"
 if [ -z "${behind:-}" ] || [ "$behind" = 0 ]; then

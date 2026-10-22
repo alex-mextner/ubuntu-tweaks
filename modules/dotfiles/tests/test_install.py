@@ -222,8 +222,27 @@ class DotfilesInstall(unittest.TestCase):
         self.assertIn("could not be fast-forwarded", res.stderr)
         self.assertEqual(read(os.path.join(self.dir, "NEWS")), "mine\n")
 
-    def test_a_relative_dir_option_is_refused(self):
-        self.assertEqual(self.run_install(options={"dir": ".files"}).returncode, 2)
+    def test_a_relative_dir_option_is_refused_and_nothing_is_created(self):
+        res = self.run_install(options={"dir": ".files"})
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("must be absolute", res.stderr)
+        self.assertFalse(os.path.exists(os.path.join(MODULE, ".files")))
+
+    def test_a_regular_file_at_the_checkout_path_is_not_a_checkout(self):
+        with open(self.dir, "w") as f:
+            f.write("x\n")
+        self.assertEqual(self.run_install("--check").returncode, 3)
+        res = self.run_install()
+        self.assertEqual(res.returncode, 10)
+        with open(self.dir) as f:
+            self.assertEqual(f.read(), "x\n")
+
+    def test_install_refuses_a_checkout_whose_origin_is_not_the_configured_repo(self):
+        self.assertEqual(self.run_install().returncode, 0)
+        other = os.path.join(self.tmp, "other.git")
+        res = self.run_install(options={"repo": other})
+        self.assertEqual(res.returncode, 10)
+        self.assertIn("remote set-url origin", res.stderr)
 
     def test_check_is_drift_for_a_directory_that_is_not_a_checkout(self):
         os.makedirs(self.dir)

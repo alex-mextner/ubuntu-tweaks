@@ -548,13 +548,13 @@ profile_url = "https://git.hyperide.ai/<login>/.rig-profile"   # optional; omit 
 enabled = true
 ```
 
-Both installers take `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3) and exit 10 for a
+Both installers take `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3; exit 10 when python3 is missing) and exit 10 for a
 needed manual step; options arrive as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` and are never secrets.
 
 | Module (order) | `install.sh` does | `--check` is satisfied when |
 |---|---|---|
 | `rig` (100) | clones `git.hyperide.ai/ultrabricks/rig-cli` (option `repo`) to `~/dev/rig-cli` (`dir`), fast-forwards a tree without local changes, symlinks `~/.local/bin/rig`, runs `rig profile sync` (or `rig profile init <profile_url>` when none is set up; `profile_sync = false` skips), then `rig activate commit` (`activate = false` skips) | checkout and link are right, the rig profile is in sync (when one exists), `rig activate --json` has no config switch left to write and `rig status` reports no drift |
-| `dotfiles` (110) | `gh repo clone alex-mextner/.files ~/.files` when `gh` is logged in, else `git clone https://github.com/alex-mextner/.files`; an existing checkout is fetched and fast-forwarded only when it has no local changes | `~/.files` is a git checkout that is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
+| `dotfiles` (110) | `gh repo clone alex-mextner/.files ~/.files` when `gh` is logged in, else `git clone https://github.com/alex-mextner/.files`; an existing checkout is fetched and fast-forwarded only when it has no local changes | `~/.files` is a git checkout rooted there, its `origin` is the configured `repo` (when one is set), and it is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
 
 - **rig does the activating.** `rig activate commit` (rig-cli ticket 745, "rig profile carries tmux and omp
   config; rig activate bootstraps a machine") syncs the profile (config, `~/.tmux.conf` user region, omp
