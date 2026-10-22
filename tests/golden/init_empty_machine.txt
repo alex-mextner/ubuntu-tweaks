@@ -4,7 +4,7 @@ doctor:
   planned git [apt: git] (submodules, update) -> `init`/`apply` installs it (module base-tools)
   MISSING glib-compile-schemas [apt: libglib2.0-bin] (extension schemas)
   MISSING python3-yaml [apt: python3-yaml] (module rig)
-init --commit would install: sudo apt-get install -y dconf-cli libglib2.0-bin python3-yaml
+init --commit would first install: sudo apt-get install -y dconf-cli libglib2.0-bin python3-yaml
 apply:
 machine: home (overlay <tmp>/profile/machines/home)
 profile: <tmp>/profile

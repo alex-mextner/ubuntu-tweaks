@@ -30,9 +30,6 @@ Public API:
   ``root`` is the ``elevation.RootSession`` that asks for root once, before the first root action (also again
   after a rebuild that adds root actions); without one ``apply`` makes its own for the call. A preview and
   ``--no-sudo`` never ask.
-- ``apply_detailed(..., confirm=None) -> ApplyOutcome``: the same, returning the exit ``code`` plus ``changed``,
-  ``manual`` steps and ``skipped`` root actions; ``confirm(plan)`` is asked after the preview and before
-  anything runs (``False``: nothing runs, ``declined``, exit 3).
 - ``RELOGIN_HINT``.
 """
 
@@ -48,7 +45,6 @@ from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.elevation import RootSession
-from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
 from ubuntu_tweaks.planners import build_actions, collect_warnings
 from ubuntu_tweaks.identity import Location, locate, missing_lines
@@ -191,18 +187,6 @@ def _manual_key(action: Action) -> tuple[str, str | None, str]:
     return (action.kind, action.scope, action.key or action.describe())
 
 
-@dataclasses.dataclass(frozen=True)
-class ApplyOutcome:
-    """What ``apply_detailed`` did: the exit ``code``, how many actions ``changed``, whether ``confirm`` said no
-    (nothing ran), and the ``manual`` steps (with their messages) and ``skipped`` root actions left over."""
-
-    code: int
-    changed: int = 0
-    declined: bool = False
-    manual: tuple[tuple[Action, str], ...] = ()
-    skipped: tuple[Action, ...] = ()
-
-
 def apply(
     ctx: Context,
     *,
@@ -216,34 +200,6 @@ def apply(
     preview_footer: str = "apply.footer",
     root: RootSession | None = None,
 ) -> int:
-    return apply_detailed(
-        ctx,
-        commit=commit,
-        no_sudo=no_sudo,
-        extra_actions=extra_actions,
-        backend_factory=backend_factory,
-        relogin_hint=relogin_hint,
-        relocate=relocate,
-        title=title,
-        preview_footer=preview_footer,
-        root=root,
-    ).code
-
-
-def apply_detailed(
-    ctx: Context,
-    *,
-    commit: bool,
-    no_sudo: bool,
-    extra_actions: Iterable[Action] = (),
-    backend_factory: BackendFactory = open_backend,
-    relogin_hint: bool = False,
-    relocate: Callable[[], Location] | None = None,
-    title: str = "apply",
-    preview_footer: str = "apply.footer",
-    root: RootSession | None = None,
-    confirm: Callable[[Plan], bool] | None = None,
-) -> ApplyOutcome:
     extras = tuple(extra_actions)
     backend = backend_factory(ctx)
     plan = build_plan(ctx, backend, extras)
@@ -255,9 +211,7 @@ def apply_detailed(
                 print("\n".join(ui.wrap(ui.t(preview_footer), first=f"{ui.symbol('info')} ", names=("cyan",))))
             else:
                 print("Preview only, nothing was changed. Run with --commit to apply.")
-        return ApplyOutcome(0)
-    if confirm is not None and len(plan) and not confirm(plan):
-        return ApplyOutcome(int(ExitCode.DRIFT), declined=True)
+        return 0
     session = root or RootSession(command="ubuntu-tweak apply --commit", skip="ubuntu-tweak apply --commit --no-sudo")
     try:
         return _commit(
@@ -294,7 +248,7 @@ def _commit(
     relogin_hint: bool,
     relocate: Callable[[], Location] | None,
     root: RootSession,
-) -> ApplyOutcome:
+) -> int:
     executed: list[str] = []
 
     def runnable(pending: Plan) -> int:
@@ -363,7 +317,7 @@ def _commit(
             print(RELOGIN_HINT)
         if final.manual:
             print(final.render_manual())
-        return ApplyOutcome(0, changed, manual=final.manual, skipped=final.skipped)
+        return 0
     print()
     print(ui.heading(ui.t("commit.summary")))
     counts = [f"{ui.symbol('ok')} {ui.style(ui.t('commit.changed', n=changed), 'green')}"]
@@ -380,4 +334,4 @@ def _commit(
         print(final.render_manual())
     hint = "commit.rerun_pending" if final.skipped or final.manual else "commit.rerun"
     print("\n".join(ui.wrap(ui.t(hint), first=f"{ui.symbol('info')} ", names=("cyan",))))
-    return ApplyOutcome(0, changed, manual=final.manual, skipped=final.skipped)
+    return 0
