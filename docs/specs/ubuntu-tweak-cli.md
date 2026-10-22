@@ -39,6 +39,13 @@ as any behavior change.
    SUMMARY block, the changed-only rule and the `auto` skip class, reasons as comments, and
    *bundles* (see *Settings bundles*).
 
+9. «открой мне на ubuntu-pc на ultra по ssh tailscale в наглядном виде все настройки с пояснениями на русском и значений. и доделай все. и настрой чтобы ubuntu-tweaks так же устанавливал и включел ssh сервер при инициализации и док и синхронизацию паролей. и rig опционально и .files, и rig должен все по возможности активировать и настройки rig должне переноситься (я начинал это делать, проверь по веткам и доделай) и риг в том чесле должен настраивать tmux и omp. доделай все.
+   и еще пароли должны подставляться в firefox, а док не должен выскакивать если курсор около границы, только если он на границе 300мс+
+   и файрфокс должен авторизовываться автоматически при инициализации ubuntu-tweaks
+   конечно, перед этим должен быть установлен и настроен passwords-app и из него и будут браться пароли для всех авторизаций автоматически. еще вот это отстой: «! Failed to copy one-time code to clipboard — No clipboard utilities available. Please install xsel, xclip, wl-clipboard…» git, gh -- тоже должны быть установлены и настроены. убунту из коробки вообще тлен какой-то даже curl нету. и brew пусть ставится для линукса и если после будут нужны доп действия тоже пусть делаются. и конечно же zsh должен быть установлен и активирован в самом начале» — answered by the `init`
+   pipeline and the modules it names; this slice's part is *Service modules* (ssh server,
+   passwords-app, Firefox).
+
 ## Requirements
 
 ### Engine and profile
@@ -242,6 +249,13 @@ that is absolute or contains `..` are invalid config (exit 2).
 | `english-in-overview` | local `gnome-extensions/english-in-overview@ultra` | symlink, enable |
 | `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it) |
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
+| `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
+| `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
+| `passwords-app-polkit` | `system` (root) | the one root step `install.sh` only prints: the polkit action for unlocking with the login password |
+| `firefox` | `system`, user | build the passwords-app extension and have it signed on AMO (key from the Secret Service) (*Firefox*) |
+| `firefox-policy` | `system` (root) | `/etc/firefox/policies/policies.json` force-installs the signed extension |
+| `firefox-autologin` | `system`, user | start Firefox, wait for the extension, open the sign-in page once so passwords-app fills it |
+| `firefox-passkey-qr` | `system`, user | the `firefox-passkey-qr` installer run with `--yes`; `enabled = false`, a machine enables it |
 
 No other module is added until it has real content.
 
@@ -798,6 +812,316 @@ Missing or Modified.
   submodule checked out at another commit than the umbrella records (dev work: only
   `update` moves it, `apply` never resets it). Extras come from each planner's optional
   `extras()`; `status` prints them only when `--only` is not given.
+
+### Service modules
+
+Request 9 adds modules that install and run services. They are `kind = "system"` modules whose
+installer and checker are **one Python script** in the module directory
+(`ubuntu_tweaks/module_script.py` is the shared scaffolding):
+
+```toml
+[source]
+kind = "system"
+install = "ssh-server install"
+check = "ssh-server check"
+```
+
+| Script command | Contract |
+|---|---|
+| `check` | Read-only, needs no root. Exit 0 = every fact holds, 3 = drift (the unmet facts are printed, one line each), anything else = the checker broke (the checker protocol in *Source kinds*). |
+| `status` | The same facts, all of them, one line each: `ok`, `missing` or `manual` (unmet and not fixable by `install`, e.g. a signing key that does not exist). Exit codes as `check`. Used by hand and by tests; the engine does not call it. |
+| `plan` | Optional, read-only: what `install` is going to do, one line each (`firefox-passkey-qr` prints its installer's `--dry-run` listing). Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
+| `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
+
+Options come from `[modules.<name>]` in `profile.toml` / `machine.toml` (merged as everywhere):
+the engine passes the table minus `enabled` as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` to both
+commands (unset = no options); a script rejects an unknown option or a wrong type with exit 1.
+A root script finds the desktop user through `SUDO_USER` / `PKEXEC_UID`, never `$HOME`.
+
+A module that must act as the desktop user (it writes `$HOME`, talks to the user's systemd or
+Secret Service) sets `root = false` in `[source]`: its action is not `[sudo]` and `install` runs
+unprivileged. What such a module needs from root is a **separate root module** (`passwords-app-polkit`,
+`firefox-policy`), so the preview marks exactly which steps ask for a password.
+
+**What the scripts expect from the engine** (all four are manifest/planner features of `kind = "system"`,
+implemented with the system-module planner, not by the scripts): `[source] root = false`; the
+`UBUNTU_TWEAK_MODULE_CONFIG` environment variable, passed through `sudo` as `sudo -- env VAR=… <cmd>`
+(sudo's `env_reset` drops a plain variable); `[source] preview = "<script> plan"`; and exit 10 of `install`
+treated as a skipped action (its last line `needs manual: <what>` is printed, the post-run convergence check
+does not run, `status` still lists the module as Missing). Until the engine has them, a script still works
+when run by hand (`<script> status|plan|install`); an option the engine cannot deliver is simply unset, and
+exit 10 is reported as a failed action rather than a skipped one. Credentials never go through this
+channel: a script reads them from the desktop user's Secret Service at run time
+(`secret-tool lookup application ubuntu-tweaks purpose <name>`; names in the module's section), keeps them
+in memory and hands them to the one child process that needs them through its environment, never an
+argument, a file of this repository or the output. A missing credential is `needs manual`, never success.
+
+Tests never touch the machine: the scripts take an injectable `Process` (the one runner,
+`ubuntu_tweaks/process.py`) and a filesystem root, and run against a stateful fake machine
+(`modules/*/tests`).
+
+#### SSH server (`ssh-server`, root)
+
+Facts, in the order `status` prints them:
+
+1. the `openssh-server` package is installed (`dpkg-query`);
+2. only when the profile sets `password_auth` (below): `/etc/ssh/sshd_config.d/00-ubuntu-tweaks.conf`
+   has the expected text, `sshd_config` includes `sshd_config.d/*.conf`, and sshd's **effective**
+   value (the first one it reads, `Include` processed inline) is the wanted one: a
+   `PasswordAuthentication` above the `Include` line would win over the drop-in, which is a `manual` fact;
+3. only when sshd listens on tailscale addresses (a `ListenAddress` inside `100.64.0.0/10` or
+   `fd7a:115c:a1e0::/48`) and a `tailscaled.service` unit exists:
+   `/etc/systemd/system/ssh.service.d/10-ubuntu-tweaks-tailscale.conf` has the expected text;
+4. `ssh.socket` is neither enabled nor active: with socket activation (the Ubuntu 24.04+ default)
+   systemd, not sshd, holds the listening socket and ignores `sshd_config`'s `Port`/`ListenAddress`, so
+   the module runs sshd as a plain service (`systemctl disable --now ssh.socket`, the procedure Ubuntu
+   documents for a non-default port);
+5. `ssh.service` is enabled;
+6. ... and active;
+7. systemd has loaded the current unit files (`systemctl show -p NeedDaemonReload` is `no`): a
+   `daemon-reload` that failed after a drop-in was written is drift again, not forgotten;
+8. sshd accepts connections on every `(address, port)` its configuration names: the `Port` lines
+   (default 22) and the `ListenAddress` lines, read from `/etc/ssh/sshd_config` and its `Include`
+   chain (a `Match` block ends a file's global part), compared with `ss -H -ltn`; a wildcard
+   socket covers a named address of its own family (`*` covers both, `0.0.0.0` only IPv4, `::` only IPv6: sshd sets `IPV6_V6ONLY`), a host
+   *name* is matched by port only (`ss -n` shows numbers).
+
+The checker reads the same files sshd does. A file that exists but the desktop user cannot read (a
+`0600` `50-cloud-init.conf`) makes `check` fail with exit 1 and the file's name rather than guess a
+different configuration than the root install sees; make it readable (mode 644).
+
+**The module does not change `Port`, `AllowUsers`, `ListenAddress` or any other sshd setting that is
+already there**: a machine's own `sshd_config.d` is its business (this machine's
+`99-moshi-tailscale.conf` keeps working as it is). The stock Ubuntu `sshd_config` is already a sane
+default (port 22, every address, `Include` of the drop-in directory), so with no configuration the
+module writes none; it installs the package and enables and starts the service.
+
+*The boot failure it fixes.* With `ListenAddress 100.74.26.95` and Port 2223 in a drop-in, sshd
+starts before `tailscaled` has created the address, exits 255 (`Cannot assign requested address`) and
+`ssh.service` stays failed, because the unit says `RestartPreventExitStatus=255`. The fix is a
+systemd drop-in, not a change to sshd:
+
+```ini
+# /etc/systemd/system/ssh.service.d/10-ubuntu-tweaks-tailscale.conf
+[Unit]
+After=tailscaled.service
+Wants=tailscaled.service
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=
+```
+
+`After=`/`Wants=` fix the order; the retry covers the short gap between `tailscaled` being up and the
+address being assigned (at most 10 starts in 2 minutes, so a real configuration error does not
+loop). *Decision*: not `net.ipv4.ip_nonlocal_bind` / `net.ipv6.ip_nonlocal_bind`: they would be
+system-wide for every process, while the problem is one unit's ordering. The drop-in has its own
+file name (`10-ubuntu-tweaks-tailscale.conf`, not `override.conf`) so the user's own overrides are
+never replaced.
+
+*Password policy, only when asked.* `[modules.ssh-server] password_auth = false` writes
+`/etc/ssh/sshd_config.d/00-ubuntu-tweaks.conf` with `PasswordAuthentication no` and
+`KbdInteractiveAuthentication no` (both: PAM keyboard-interactive would otherwise still take
+a password); `true` writes `PasswordAuthentication yes`. `00-` is read first and sshd keeps the first
+value it sees, so the profile wins over other drop-ins. Never locking the user out: `false` is refused
+(exit 10, `needs manual`) while the desktop user has no usable public key in `~/.ssh/authorized_keys`
+(a line with a key type and a base64 body, not a `command=` / `restrict` / `from=` key; `AuthorizedKeysFile` and `AllowUsers` are not consulted; the guard applies only when the file would be written, so repairs of an already converged policy still run), while
+the installer cannot tell which user to protect (a root shell without `sudo`), while `sshd_config` does not
+`Include` the drop-in directory (also when the file is already in place), or while a setting above the
+`Include` line overrides the drop-in (the file just written is removed again). Without the option an
+existing file is left as it is (disabling a module never uninstalls).
+
+*Install order and validation.* As root: `apt-get install -y openssh-server` when missing; write the
+password-policy drop-in (rolled back when `sshd -t` rejects it); `sshd -t` **before** anything is
+restarted or the unit drop-in is written, so a rejected run leaves no file behind and the next run still
+reloads systemd; the unit drop-in, then `systemctl daemon-reload` when systemd says it is needed;
+`disable --now ssh.socket` when socket activation is on; `enable ssh.service`; `reset-failed` + `start`
+when it is not active; otherwise `restart` when the socket was just switched off (the running sshd
+was started by the socket and holds systemd's listener, so it must re-exec to bind `sshd_config`'s
+addresses) or `reload` when only sshd's own config changed. A `reload` that fails removes the policy file
+it just wrote, so `check` never reports a policy that sshd did not take. The unit drop-in needs no
+restart of a healthy sshd; open sessions survive either way (`KillMode=process`).
+`ChallengeResponseAuthentication` is read as its alias `KbdInteractiveAuthentication` when looking for a
+shadowing line.
+
+*memguard's polkit rule.* `docs/specs/memguard.md` makes the polkit rule `50-memguard-swap-drain.rules`
+refuse `systemctl start ssh.service` for the **desktop user** (it grants only `swap-drain.service`; the
+rest falls through to the default policy). That is unchanged and not in the way: the module's mutating
+commands run as **root** through `sudo` (or `pkexec`), and polkit's `manage-units` check does not
+apply to uid 0; `check`/`status` use only read-only `systemctl is-enabled` / `is-active`, which need no
+authorization. The module never asks polkit for anything, and memguard's own guard needs no
+exception. (`sshd` is on memguard's protected list, so it is never frozen or killed either.)
+
+Real-root verification (what fake-root tests cannot prove; run once on a real machine, as root where
+marked):
+
+- In a terminal (the root step asks for a password): `ubuntu-tweak apply --only ssh-server` (preview
+  lists the drop-in and the service start), then `--commit`.
+- `systemctl status ssh.service` is `active (running)`; `systemctl is-enabled ssh.service` is `enabled`.
+- `ss -ltn` shows sshd on every address and port in `sshd_config`.
+- `ubuntu-tweak status --only ssh-server` exits 0; a second `apply --commit` reports `0 changed`.
+- Reboot: `ssh.service` is `active` after boot (`journalctl -b -u ssh.service` has no `Cannot assign
+  requested address`), and `ssh -p 2223 <tailscale-ip>` works from another tailnet host.
+- With `password_auth = false` and a key in `~/.ssh/authorized_keys`: a password login is refused, the
+  key login works; with no key the run stops with `needs manual` and the file does not exist.
+- `systemctl is-enabled ssh.socket` is `disabled` and `systemctl is-active ssh.socket` is `inactive`
+  (sshd runs as a service, so `Port`/`ListenAddress` apply); an unreadable drop-in makes `status` fail with
+  its name.
+- As the desktop user, `systemctl start --no-ask-password ssh.service` is still refused
+  (memguard's rule is intact).
+
+#### Passwords (`passwords-app`, `passwords-app-polkit`)
+
+Request 9: *passwords-app is installed and configured first; every automatic login takes its passwords from
+it.* The app is `alex-mextner/passwords-app` (iCloud Keychain sync into the GNOME Keyring, session-bus API
+`io.github.alex_mextner.Passwords`, native-messaging host for browsers).
+
+`passwords-app` (user level) facts: `git` and `uv` on `PATH` (its installer needs both); the checkout
+(`checkout` option, default `~/dev/passwords-app`, cloned from `repo`, default
+`https://github.com/alex-mextner/passwords-app.git` when missing; an existing checkout is **never pulled or
+reset**, it is the owner's working copy); installed from the checkout's current commit (the installed commit
+is recorded in `~/.local/state/ubuntu-tweaks/passwords-app.rev`, so a moved `HEAD` re-runs the installer);
+the user unit file; the Firefox native-messaging manifest names an executable host and
+`passwords-app@alex-mextner.github.io`; `passwords-appd.service` enabled and active; the bus name is owned
+and `busctl --user introspect` answers (the owner check, `busctl list --acquired`, comes first because
+`introspect` on an absent name would start the daemon: `check` never does); and iCloud **signed in**
+(the `state` field of `GetStatus`, nothing else of the reply is read, the Apple ID is never shown).
+Install: clone when missing, run the repository's own `scripts/install.sh` (which also enables and
+restarts the unit; the module enables and starts it again when that did not happen), record the commit,
+verify the bus. Signing in needs the owner's Apple ID, password and 2FA code, so it is the one `manual`
+fact: the install ends with `needs manual: ... run passwords-app signin`.
+
+`passwords-app-polkit` (root) copies the checkout's `data/polkit/*.policy` to
+`/usr/share/polkit-1/actions/` when it differs (mode 644); this is the `pkexec install ...` line the app's
+installer prints, run through the module's `sudo` so the preview shows it. No checkout is a `needs manual`
+(`enable the passwords-app module first`). Orders: `passwords-app` (manifest `order = 60`) → `passwords-app-polkit` (61) → `firefox` (70).
+
+Recorded on this machine (2026-10-22): the unit is enabled and active and the bus name is owned, so the
+module reports the checkout-commit stamp missing and the polkit action not installed.
+
+Real-root verification: `sudo ubuntu-tweak apply --only passwords-app-polkit --commit`, then
+`pkcheck --action-id io.github.alex_mextner.Passwords.unlock --process $$ -u` asks for the login password;
+as the user, `ubuntu-tweak apply --only passwords-app --commit` converges and `status --only passwords-app`
+is 0 after `passwords-app signin`.
+
+#### Firefox (`firefox`, `firefox-policy`, `firefox-autologin`, `firefox-passkey-qr`)
+
+Request 9: *passwords are filled in Firefox, and Firefox signs in by itself at init.*
+
+**Facts about this machine** (verified 2026-10-22): Firefox is the **snap** (158.0, `mozilla` publisher). The
+snap declares the plug `etc-firefox` (`system-files`, `read: /etc/firefox`) and it is connected, so Firefox
+reads `/etc/firefox/policies/policies.json` (Mozilla's documented Linux location; the Mozilla deb reads it
+without a plug). The extension id is `passwords-app@alex-mextner.github.io`. Release Firefox **refuses
+unsigned add-ons**, `passwords-app` ships no signed build and its snap-era native host reaches the daemon
+through the xdg-desktop-portal (the first start shows *Allow Firefox to start WebExtension backend?*, which
+only the owner can answer).
+
+*Signing* (`firefox`, user level). Facts: the extension sources (`extension/package.json` version) and a
+**Mozilla-signed** `passwords-app.xpi` of the checkout's version (a `META-INF/*.rsa|*.sig` entry) staged in
+`~/.local/state/ubuntu-tweaks/firefox/` as one canonical file plus `passwords-app.version` (the extension
+version it was built from, so a checkout that moves back is rebuilt, never mixed up). Install: take the AMO API credentials from the Secret Service
+(`purpose amo-jwt-issuer` and `amo-jwt-secret`; created once by the owner with `secret-tool store`, the
+message names the exact commands); `bun install --frozen-lockfile`; `bun run build`;
+`web-ext sign --channel=unlisted --source-dir extension/dist/firefox`, with the credentials only in
+`WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET` for that one process; stage the signed file. Without the key it
+stops with **`needs manual: AMO signing key ...`**, builds nothing and the fact stays Missing: the module
+degrades to a clearly reported gap, never a fake success. AMO needs a new `version` per upload, so a
+changed extension without a version bump fails with AMO's own message (exit 1).
+
+*Force-install* (`firefox-policy`, root). `/etc/firefox/extensions/<id>.xpi` (a copy of the staged file,
+mode 644: a sandboxed Firefox cannot read the user's `~/.local`; copied **before** the policy names it) and in
+`/etc/firefox/policies/policies.json`:
+
+```json
+{
+  "policies": {
+    "ExtensionSettings": {
+      "passwords-app@alex-mextner.github.io": {
+        "installation_mode": "force_installed",
+        "install_url": "file:///etc/firefox/extensions/passwords-app@alex-mextner.github.io.xpi"
+      }
+    }
+  }
+}
+```
+
+A root script must not trust the desktop user's tree: the staged file is read only as a regular file owned by
+that user (no final symlink, at most 32 MiB) and only when it is a zip with a Mozilla signature entry; the
+polkit module likewise accepts only `*.policy` files that declare actions in
+`io.github.alex_mextner.Passwords.*`, named `io.github.alex_mextner.Passwords*.policy` and without any `org.freedesktop.policykit.exec` rule (a policy can grant `pkexec` rights), see `read_owned_file`.
+
+The file is **merged**: other policies and other `ExtensionSettings` entries stay; a file that is not a JSON
+object is refused, never overwritten. `ExtensionSettings` is used instead of the older
+`Extensions.Install` because it also keeps the add-on installed and updates it when the file changes. With
+the snap the module also connects `firefox:etc-firefox` when it is not connected. The option
+`[modules.firefox-policy] credentialsd_helper = true` adds the Mozilla-signed `credentialsd-helper` add-on of
+`firefox-passkey-qr` (pinned release URL) so that installer's approval prompt does not appear.
+
+*What "Firefox authorizes automatically" means.* Two readings, both named:
+
+1. **Autofill on any login page**: the extension asks passwords-app for the credentials of the page's site
+   and fills them. This is what the modules deliver once the extension is active.
+2. **A Firefox Account / Sync login with no human**: not possible. It needs the account password and a 2FA
+   code, and storing them anywhere (a file, the profile, this repository) is exactly what this project
+   never does; the only copy is in passwords-app/the keyring, filled by the extension on a page the user
+   (or the module) opened.
+
+`firefox-autologin` (user) implements (1) for init: facts `firefox` on `PATH`; the extension **active** in a
+profile (`extensions.json` of the snap profile `~/snap/firefox/common/.mozilla/firefox/*/` or of the deb
+`~/.mozilla/firefox/*/`); and the marker `~/.local/state/ubuntu-tweaks/firefox-signin-opened` (written once).
+Install: needs a graphical session (`WAYLAND_DISPLAY` / `DISPLAY`), starts Firefox when the extension is not
+active yet, waits up to `wait_seconds` (default 90) for the policy to activate it, then opens
+`https://accounts.firefox.com/signin` (option `url`, https only) and writes the marker. If the extension does
+not become active in time it ends with `needs manual: ...` (apply `firefox-policy`, restart Firefox, answer the
+WebExtension-backend prompt, look at `about:policies`) and writes **no** marker. `status` always prints the
+line that says autofill, not stored credentials. Whether a credential for that site exists in passwords-app is
+not checked: the module never reads one.
+
+Orders (the init pipeline's `order` key, steps 5-7): `ssh-server` 50, `passwords-app` 60, `passwords-app-polkit` 61, `firefox` 70, `firefox-policy` 71, `firefox-autologin` 72, `firefox-passkey-qr` 73. An install only re-runs a third-party installer when something is missing (`passwords-app` skips `install.sh` while its commit stamp matches, so a pending iCloud sign-in does not restart the daemon on every apply). State of all service modules lives under `~/.local/state/ubuntu-tweaks/` whatever `XDG_STATE_HOME` says: a root script never sees the user's variables. The passkey installer's `check` is trusted only for exit 0 or 3 (anything else is a broken checker, exit 1), and the `status` fallback must recognise every required row.
+
+*Phone-QR passkeys* (`firefox-passkey-qr`, user level, **off by default**: it replaces the Firefox snap by
+Mozilla's deb, so a machine opts in with `[modules.firefox-passkey-qr] enabled = true` in its
+`machine.toml`). It runs the installer of <https://github.com/alex-mextner/firefox-passkey-qr> (checkout
+`~/dev/firefox-passkey-qr`, cloned when missing; options `checkout`, `repo`, `ha_url`, `remove_snap`). Read
+from its source: five steps, each asking first: (1) apt build/runtime packages, (2) Mozilla's Firefox deb
+with the apt pin and a copy of the snap profile, optionally removing the snap, (3) the Bluetooth step,
+(4) `credentialsd` and a patched `xdg-desktop-portal` built from source into `/usr/local`, (5) the
+native-messaging link and the Mozilla-signed `credentialsd-helper` add-on. **Step 3 is the installer's own
+logic**: a local adapter (`/sys/class/bluetooth/hci*`) or an existing virtual one → nothing to do; none but a
+reachable Home Assistant (`$HA_URL`, `homeassistant.local`, tailscale peers on :8123) → it installs
+`ha-ble-vhci` as a user service with `/dev/vhci` access; neither → it asks for a USB dongle. The module
+never decides this. Verified by running the real installer's `--dry-run --yes install` here: with the
+machine's `hci0` the step prints `local adapter(s) found: hci0 - nothing to do`; with an empty
+`PASSKEY_QR_BLUETOOTH_DIR` and `HA_URL` set it lists the bridge commands.
+
+- *Preview*: the module's `plan` is the installer's `--dry-run` output (every command, `sudo` marked, the
+  token never printed), indented under the action.
+- *Run*: only through the installer's own bypass: `passkey-qr --yes [--remove-snap] install`. The installer
+  had neither `--yes` nor a check, so they are added upstream
+  (<https://github.com/alex-mextner/firefox-passkey-qr/pull/2>, branch `feat/yes-check-plan`, not merged):
+  `--yes` never prompts, a missing token skips the bridge step, a running Firefox stops the Firefox step,
+  and **the snap is kept unless `--remove-snap`** (profile option `remove_snap`, default false). Until that
+  PR is merged and the checkout updated, the module reports `needs manual: run <installer> install
+  interactively` and the fact stays Missing; it never runs the installer without `--yes` and never fakes
+  success. The feature is detected from the installer's `--help`, not from a version number.
+- *Check*: the installer's `check` (exit 0/3: Firefox deb, a Bluetooth adapter, `credentialsd`, the
+  native-messaging manifest, apt packages); an installer without it is judged from its `status` rows.
+- *Secrets*: Home Assistant's long-lived token comes from the Secret Service (`purpose ha-token`) into the
+  installer's `HA_TOKEN` for that run only; the installer itself stores it in
+  `~/.config/ha-ble-vhci/token` (mode 600), which is outside every repository and profile, and its URL is the
+  non-secret option `ha_url`. The installer asks for `sudo` itself: run `apply --commit` in a terminal.
+- *Order*: after `firefox-autologin`; the snap profile (with the extension and the marker) is copied by the
+  installer, so nothing is opened twice.
+
+Real-root and real-session verification (not possible in tests): after `apply --commit` of the Firefox modules,
+`about:policies` lists the `ExtensionSettings` entry, `about:addons` shows *Passwords* as installed by the
+organization, a login page is filled, `ubuntu-tweak status --only firefox,firefox-policy,firefox-autologin`
+exits 0; the first start shows the WebExtension-backend prompt (answer *Allow*). For the passkey module: on a
+machine without Bluetooth and with Home Assistant, `bluetoothctl list` shows a virtual `hciN` and
+`webauthn.io` offers the phone/QR option.
 
 ### Install
 

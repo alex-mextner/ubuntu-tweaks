@@ -1,0 +1,216 @@
+#!/usr/bin/python3 -B
+"""firefox-policy module: Firefox force-installs the signed passwords-app extension (enterprise policy).
+
+    firefox-policy check     exit 0 satisfied, 3 unsatisfied (read-only, no root)
+    firefox-policy status    the same facts, one line each
+    firefox-policy install   as root (sudo): copy the staged .xpi, merge the policy, connect the snap plug
+
+Firefox reads `/etc/firefox/policies/policies.json` (the Ubuntu snap declares the `etc-firefox`
+system-files plug for exactly that directory; the Mozilla deb reads it natively). The signed `.xpi` staged by
+the `firefox` module is copied to `/etc/firefox/extensions/<id>.xpi` (a sandboxed Firefox cannot read the
+desktop user's `~/.local`) and named in `ExtensionSettings` with `installation_mode = force_installed`.
+Other policies in the file are kept. Spec: docs/specs/ubuntu-tweak-cli.md, *Firefox*.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import sys
+import zipfile
+from collections.abc import Mapping
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Account,
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    invoking_account,
+    main,
+    module_config,
+    read_owned_file,
+    state_dir,
+    write_file,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+EXTENSION_ID = "passwords-app@alex-mextner.github.io"
+POLICIES = "etc/firefox/policies/policies.json"
+EXTENSIONS_DIR = "etc/firefox/extensions"
+SNAP_PLUG = "firefox:etc-firefox"
+HELPER_ID = "credentialsd-helper@iinuwa.xyz"
+HELPER_URL = (
+    "https://github.com/linux-credentials/credentialsd/releases/download/v0.3.1/"
+    "credentialsd-helper@iinuwa.xyz-0.2.0.xpi"
+)
+OPTIONS = {"credentialsd_helper"}
+STAGED_XPI = "passwords-app.xpi"  # written by the firefox module
+MAX_XPI_BYTES = 32 * 1024 * 1024
+
+
+def extension_entry(path: str) -> dict[str, str]:
+    return {"installation_mode": "force_installed", "install_url": f"file:///{path}"}
+
+
+def desired_extensions(*, credentialsd_helper: bool) -> dict[str, dict[str, str]]:
+    wanted = {EXTENSION_ID: extension_entry(f"{EXTENSIONS_DIR}/{EXTENSION_ID}.xpi")}
+    if credentialsd_helper:
+        wanted[HELPER_ID] = {"installation_mode": "force_installed", "install_url": HELPER_URL}
+    return wanted
+
+
+def merged_policies(current: dict[str, object], wanted: Mapping[str, dict[str, str]]) -> dict[str, object]:
+    """``current`` with our ``ExtensionSettings`` entries set and everything else untouched."""
+    policies = current.get("policies", {})
+    if not isinstance(policies, dict):
+        raise ModuleError(f"/{POLICIES}: 'policies' must be an object")
+    settings = policies.get("ExtensionSettings", {})
+    if not isinstance(settings, dict):
+        raise ModuleError(f"/{POLICIES}: 'policies.ExtensionSettings' must be an object")
+    return {**current, "policies": {**policies, "ExtensionSettings": {**settings, **wanted}}}
+
+
+def render(document: Mapping[str, object]) -> str:
+    return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+
+
+class FirefoxPolicy(Module):
+    name = "firefox-policy"
+
+    def __init__(
+        self, process: Process, root: Path, account: Account, options: dict[str, object], *, is_root: bool
+    ) -> None:
+        unknown = sorted(set(options) - OPTIONS)
+        if unknown:
+            raise ModuleError(f"[modules.firefox-policy] unknown option(s): {', '.join(unknown)}")
+        helper = options.get("credentialsd_helper", False)
+        if not isinstance(helper, bool):
+            raise ModuleError(f"[modules.firefox-policy] credentialsd_helper must be true or false, got {helper!r}")
+        self._process = process
+        self._root = root
+        self._is_root = is_root
+        self._helper = helper
+        # not XDG_STATE_HOME: a root script never sees the user's environment
+        self._uid = account.uid
+        self._stage = state_dir(account.home, {}) / "firefox"
+        self._wanted = desired_extensions(credentialsd_helper=helper)
+
+    def _policy_file(self) -> Path:
+        return self._root / POLICIES
+
+    def _current(self) -> dict[str, object]:
+        path = self._policy_file()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except OSError as error:
+            raise ModuleError(f"cannot read /{POLICIES}: {error.strerror}") from error
+        try:
+            document = json.loads(text)
+        except ValueError as error:
+            raise ModuleError(f"/{POLICIES} is not valid JSON ({error}); refusing to overwrite it") from error
+        if not isinstance(document, dict):
+            raise ModuleError(f"/{POLICIES} must hold a JSON object; refusing to overwrite it")
+        return document
+
+    def _staged_xpi(self) -> bytes | None:
+        """The staged build, read as the desktop user's own regular file (never through a symlink) and
+        accepted only when it is a zip that carries a Mozilla signature: this script runs as root."""
+        path = self._stage / STAGED_XPI
+        if not path.exists() and not path.is_symlink():
+            return None
+        data = read_owned_file(path, self._uid, MAX_XPI_BYTES)
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                signed = any(n.startswith("META-INF/") and n.endswith((".rsa", ".sig")) for n in archive.namelist())
+        except zipfile.BadZipFile:
+            signed = False
+        if not signed:
+            raise ModuleError(f"{path} is not a Mozilla-signed add-on; run the firefox module again")
+        return data
+
+    def _installed_xpi(self) -> Path:
+        return self._root / EXTENSIONS_DIR / f"{EXTENSION_ID}.xpi"
+
+    def _snap_plug_problem(self) -> str:
+        """Empty unless Firefox is a snap whose ``etc-firefox`` plug is not connected."""
+        result = self._process.query(["snap", "connections", "firefox"], timeout=20)
+        if result.returncode != 0:
+            return ""  # not a snap (or no snapd): the deb reads /etc/firefox itself
+        for line in (result.stdout or "").splitlines():
+            columns = line.split()
+            if SNAP_PLUG in columns:
+                slot = columns[columns.index(SNAP_PLUG) + 1] if columns.index(SNAP_PLUG) + 1 < len(columns) else "-"
+                return "" if slot != "-" else f"snap plug {SNAP_PLUG} is not connected: Firefox cannot read /etc/firefox"
+        return ""
+
+    def findings(self) -> list[Finding]:
+        current = self._current()
+        policies = current.get("policies", {})
+        settings = policies.get("ExtensionSettings", {}) if isinstance(policies, dict) else {}
+        found = []
+        for extension_id, entry in self._wanted.items():
+            have = settings.get(extension_id) if isinstance(settings, dict) else None
+            found.append(Finding(have == entry, f"/{POLICIES}: ExtensionSettings[{extension_id}] force_installed"))
+        staged = self._staged_xpi()
+        installed = self._installed_xpi()
+        if staged is None:
+            found.append(
+                Finding(False, f"signed extension staged in {self._stage}", "run the firefox module first", manual=True)
+            )
+        else:
+            try:
+                same = installed.read_bytes() == staged
+            except OSError:
+                same = False
+            found.append(Finding(same, f"/{EXTENSIONS_DIR}/{installed.name} equals the staged build"))
+        problem = self._snap_plug_problem()
+        found.append(Finding(not problem, "Firefox can read /etc/firefox", problem))
+        return found
+
+    def apply(self) -> None:
+        if not self._is_root:
+            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+        staged = self._staged_xpi()
+        if staged is None:
+            raise NeedsManual(f"no signed extension in {self._stage}: run the firefox module first (needs the AMO key)")
+        current = self._current()  # refuses an unreadable or malformed file before anything is written
+        document = merged_policies(current, self._wanted)
+        installed = self._installed_xpi()
+        try:
+            unchanged = installed.read_bytes() == staged
+        except OSError:
+            unchanged = False
+        if not unchanged:  # the file first: a policy must never name an add-on that is not there
+            installed.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(installed.parent, 0o755)
+            write_file(installed, staged, 0o644)
+        if render(document) != (render(current) if current else ""):
+            write_file(self._policy_file(), render(document), 0o644)
+        if self._snap_plug_problem():
+            self._process.execute(["snap", "connect", SNAP_PLUG, ":system-files"])
+
+
+def build(env: Mapping[str, str]) -> FirefoxPolicy:
+    account = invoking_account(env)
+    return FirefoxPolicy(Process(), Path("/"), account, module_config(env), is_root=os.geteuid() == 0)
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"firefox-policy: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

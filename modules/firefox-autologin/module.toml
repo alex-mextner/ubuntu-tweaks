@@ -1,0 +1,9 @@
+description = "Firefox opened once on its sign-in page with passwords-app autofill ready (needs the extension active)"
+enabled = true
+order = 72   # init step 7, after firefox-policy installed the extension
+
+[source]
+kind = "system"
+root = false
+install = "firefox-autologin install"
+check = "firefox-autologin check"
