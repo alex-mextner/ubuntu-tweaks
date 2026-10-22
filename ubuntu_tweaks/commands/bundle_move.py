@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.bundle_edit import plan_move, write_edits
 from ubuntu_tweaks.bundles import module_gate
 from ubuntu_tweaks.context import Context
@@ -42,11 +43,17 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     plan = plan_move(ctx.profile, args.bundle, args.keys, module_gate(ctx.modules_dir, ctx.profile))
+    if ui.rich():
+        print(
+            ui.heading("ubuntu-tweak bundle-move")
+            + " "
+            + ui.style("(--commit writes it)" if not args.commit else "", "dim")
+        )
     print("\n".join(plan.lines))
     if not plan.writes:
         return 0
     if not args.commit:
-        print(f"preview: {len(plan.writes)} file(s) would change; --commit writes it")
+        print(ui.say("info", f"preview: {len(plan.writes)} file(s) would change; --commit writes it"))
         return 0
-    print("\n".join(write_edits(plan, ctx.profile)))
+    print("\n".join(ui.say("ok", line) for line in write_edits(plan, ctx.profile)))
     return 0

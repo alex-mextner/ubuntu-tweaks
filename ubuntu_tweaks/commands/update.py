@@ -19,6 +19,7 @@ import argparse
 import subprocess
 import sys
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT
 from ubuntu_tweaks.process import run as run_command
@@ -56,7 +57,12 @@ def _apply_command(ctx: Context, *, no_sudo: bool) -> list[str]:
         command += ["--only", ",".join(sorted(ctx.only))]
     if no_sudo:
         command.append("--no-sudo")
+    command += ui.cli_flags()
     return command
+
+
+def _note(text: str, *, kind: str = "info") -> None:
+    print(ui.say(kind, text))
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
@@ -67,19 +73,32 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         from ubuntu_tweaks import reconcile
 
         if _is_git_checkout(ctx):
-            print(f"Would run in {ctx.repo_root}:\n  {' '.join(PULL)}\n  {' '.join(SUBMODULES)}")
-            print("Plan for the current checkout (computed before the pull):")
+            if ui.rich():
+                print(ui.heading("ubuntu-tweak update") + " " + ui.style("(preview)", "dim"))
+                print(f"  {ui.style('would run in', 'dim')} {ctx.repo_root}:")
+                print(f"    {ui.command(' '.join(PULL))}")
+                print(f"    {ui.command(' '.join(SUBMODULES))}")
+                _note("Plan for the current checkout (computed before the pull; the pull may change it):")
+            else:
+                print(f"Would run in {ctx.repo_root}:\n  {' '.join(PULL)}\n  {' '.join(SUBMODULES)}")
+                print("Plan for the current checkout (computed before the pull):")
         else:
-            print(f"{ctx.repo_root} is not a git checkout: nothing to pull, no submodules to update. Plan:")
-        return reconcile.apply(ctx, commit=False, no_sudo=args.no_sudo)
+            _note(f"{ctx.repo_root} is not a git checkout: nothing to pull, no submodules to update. Plan:")
+        return reconcile.apply(
+            ctx, commit=False, no_sudo=args.no_sudo, title="", preview_footer="update.preview_footer"
+        )
 
     if not _is_git_checkout(ctx):
-        print(f"{ctx.repo_root} is not a git checkout: skipping the pull and the submodule update.")
+        _note(f"{ctx.repo_root} is not a git checkout: skipping the pull and the submodule update.", kind="manual")
         return subprocess.run(_apply_command(ctx, no_sudo=args.no_sudo), check=False).returncode
     before = _code_state(ctx)
+    if ui.rich():
+        _note(f"Step 1/2: {' '.join(PULL)}; {' '.join(SUBMODULES)}")
     run_command(PULL, cwd=ctx.repo_root)
     run_command(SUBMODULES, cwd=ctx.repo_root)
+    if ui.rich():
+        _note("Step 2/2: apply --commit with the updated code")
     code = subprocess.run(_apply_command(ctx, no_sudo=args.no_sudo), check=False).returncode
     if _code_state(ctx) != before:
-        print(RELOGIN_HINT)
+        _note(RELOGIN_HINT, kind="manual")
     return code

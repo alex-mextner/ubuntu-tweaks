@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.bundles import Bundle, BundleSet, load_bundles, module_gate
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError, ExitCode
@@ -41,6 +42,12 @@ def render_list(ctx: Context) -> tuple[str, bool]:
     """``(text, ok)``; ``ok`` is False when two bundles of one layer set the same key to different values."""
     bundles = _load(ctx)
     lines = [f"bundles of {ctx.profile.root} for machine {ctx.profile.machine}:"]
+    if ui.rich():
+        lines += ui.wrap(
+            "A bundle is a named group of GNOME settings that apply together; an overlay bundle "
+            "(this machine only) beats a shared one key by key. `bundles --show NAME` prints the merged result.",
+            indent=2,
+        )
     if not bundles.bundles:
         lines.append("  (none)")
     else:
@@ -113,8 +120,8 @@ def render_show(ctx: Context, name: str) -> str:
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     if args.show:
-        print(render_show(ctx, args.show))
+        print(ui.decorate(render_show(ctx, args.show), "bundle"))
         return int(ExitCode.OK)
     text, ok = render_list(ctx)
-    print(text)
+    print(ui.decorate(text, "bundles"))
     return int(ExitCode.OK if ok else ExitCode.INVALID_CONFIG)

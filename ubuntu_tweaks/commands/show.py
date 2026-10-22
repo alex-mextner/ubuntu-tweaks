@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.process import CommandError
@@ -133,7 +134,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     safe_label = re.sub(r"[^A-Za-z0-9._-]", "-", report.label)  # the label becomes a file name under /tmp
     output = args.output or (f"/tmp/ubuntu-tweak-show-{safe_label}.html" if args.format == "html" else None)
     if output is None:
-        print(text, end="")
+        print(ui.decorate(text, "show") if args.format == "text" else text, end="")
         return 0
     target = Path(output).expanduser()
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW  # never follow a symlink planted at a /tmp path
@@ -145,5 +146,5 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             handle.write(text)
     except OSError as error:
         raise CommandError(f"cannot write the report to {target}: {error.strerror or error}") from error
-    print(f"written {target} ({report.counts['keys']} keys in {len(report.panels)} panels)")
+    print(ui.say("ok", f"written {target} ({report.counts['keys']} keys in {len(report.panels)} panels)"))
     return 0

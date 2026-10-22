@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.manifest import discover_modules, module_defaults
 from ubuntu_tweaks.profile import Config, Layer, Profile, TomlValue
@@ -101,6 +102,14 @@ def _root_lines(profile: Profile) -> list[str]:
     ]
 
 
+_EXPLAIN = {
+    "modules:": "Each module, whether it is on for this machine, and which layer decided: "
+    "module default < shared profile < machine overlay.",
+    "settings bundles:": "Groups of GNOME settings kept in the profile; for this machine an overlay key beats a shared one.",
+    "linked files:": "Profile files that are symlinked into your home directory.",
+}
+
+
 def render(ctx: Context) -> str:
     profile = ctx.profile
     config = profile.load_config(module_defaults(discover_modules(ctx.modules_dir)))
@@ -109,6 +118,13 @@ def render(ctx: Context) -> str:
     lines += _panel_lines(profile)
     lines += _file_lines(profile)
     lines += _root_lines(profile)
+    if ui.rich():
+        explained: list[str] = []
+        for line in lines:
+            explained.append(line)
+            if line in _EXPLAIN:
+                explained += ui.wrap(_EXPLAIN[line], indent=2)
+        return ui.decorate("\n".join(explained), "machine")
     return "\n".join(lines)
 
 
