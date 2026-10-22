@@ -26,6 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.commands import doctor
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
@@ -48,31 +49,53 @@ def _confirm(question: str) -> bool:
     return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
 
 
+def _step(number: int, key: str) -> None:
+    if ui.rich():
+        print(ui.heading(ui.t("init.step", n=number, total=2, text=ui.t(key))))
+    else:
+        print("doctor:" if number == 1 else "apply:")
+
+
+def _say(kind: str, text: str) -> None:
+    print(ui.say(kind, text))
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    print("doctor:")
+    if ui.rich():
+        print(ui.heading("ubuntu-tweak init") + " " + ui.style("(set up this machine)", "dim"))
+    _step(1, "init.step.doctor")
     needed = doctor.requirements(ctx, honor_planned=not args.no_sudo)  # no sudo: the module's apt batch cannot run
     absent = doctor.report(needed)
     if absent:
         packages = " ".join(sorted({item.apt for item in absent}))
         if not args.commit:
-            print(f"init --commit would install: sudo apt-get install -y {packages}")
+            _say("info", f"init --commit would install: sudo apt-get install -y {packages}")
         elif args.no_sudo:
-            print(f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
+            _say("manual", f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
         elif args.yes or _confirm(f"Install {packages} with sudo apt-get?"):
             doctor.install(absent)
             absent = doctor.missing(needed)
             if absent:
-                print("Still missing after install: " + ", ".join(item.label for item in absent))
+                _say("error", "Still missing after install: " + ", ".join(item.label for item in absent))
                 return int(ExitCode.DRIFT)
         else:
-            print(f"Missing packages: {packages}. Re-run with --yes, or run: ubuntu-tweak doctor --yes")
+            _say("error", f"Missing packages: {packages}. Re-run with --yes, or run: ubuntu-tweak doctor --yes")
             return int(ExitCode.DRIFT)
     if doctor.missing([item for item in needed if item.apt == "python3-gi"]):
-        print("apply preview skipped: python3-gi is missing (install it first).")
+        _say("error", "apply preview skipped: python3-gi is missing (install it first).")
         return int(ExitCode.DRIFT)
 
     from ubuntu_tweaks import reconcile
 
     cli_link = SymlinkAction(Path.home() / CLI_LINK, ctx.repo_root / "bin" / "ubuntu-tweak", kind_prefix="cli-")
-    print("apply:")
-    return reconcile.apply(ctx, commit=args.commit, no_sudo=args.no_sudo, extra_actions=[cli_link])
+    if ui.rich():
+        print()
+    _step(2, "init.step.apply")
+    return reconcile.apply(
+        ctx,
+        commit=args.commit,
+        no_sudo=args.no_sudo,
+        extra_actions=[cli_link],
+        title="",
+        preview_footer="init.preview_footer",
+    )

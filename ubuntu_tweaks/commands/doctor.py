@@ -25,8 +25,9 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from ubuntu_tweaks.commands._support import has_gi
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Phase
+from ubuntu_tweaks.commands._support import has_gi
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.manifest import discover_modules, module_defaults
@@ -112,18 +113,34 @@ def install(absent: Sequence[Requirement]) -> None:
     run_command(elevate(["apt-get", "install", "-y", *packages]))
 
 
+def _state(item: Requirement, absent_labels: set[str]) -> str:
+    if item.label in absent_labels:
+        return "MISSING"
+    return "planned" if item.planned_by is not None and not item.present() else "ok"
+
+
+def _report_rich(needed: Sequence[Requirement], absent_labels: set[str]) -> None:
+    kinds = {"MISSING": "error", "planned": "manual", "ok": "ok"}
+    rows = []
+    for item in needed:
+        state = _state(item, absent_labels)
+        note = f"{item.needed_by}; apt package {item.apt}"
+        if state == "planned":
+            note += f"; `init`/`apply` installs it (module {item.planned_by})"
+        rows.append((ui.badge(kinds[state]), item.label, ui.style(note, "dim")))
+    print("\n".join(ui.table(("STATE", "TOOL", "WHY IT IS NEEDED"), rows)))
+
+
 def report(needed: Sequence[Requirement]) -> list[Requirement]:
     absent = missing(needed)
     absent_labels = {item.label for item in absent}
+    if ui.rich():
+        _report_rich(needed, absent_labels)
+        return absent
     for item in needed:
-        if item.label in absent_labels:
-            state = "MISSING"
-        elif item.planned_by is not None and not item.present():
-            state = "planned"
-        else:
-            state = "ok     "
+        state = _state(item, absent_labels)
         note = f" -> `init`/`apply` installs it (module {item.planned_by})" if state == "planned" else ""
-        print(f"  {state} {item.label} [apt: {item.apt}] ({item.needed_by}){note}")
+        print(f"  {state:<7} {item.label} [apt: {item.apt}] ({item.needed_by}){note}")
     return absent
 
 
@@ -135,13 +152,27 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     needed = requirements(ctx)
+    if ui.rich():
+        print(ui.heading("ubuntu-tweak doctor"))
+        print("\n".join(ui.wrap("Checks the tools ubuntu-tweak and your enabled modules need to run.", indent=2)))
+        print()
     absent = report(needed)
     if not absent:
-        print("All requirements are present.")
+        if ui.rich():
+            print(f"\n{ui.symbol('ok')} {ui.style('All requirements are present.', 'green', 'bold')}")
+        else:
+            print("All requirements are present.")
         return int(ExitCode.OK)
     packages = " ".join(sorted({item.apt for item in absent}))
     if not args.yes:
-        print(f"{len(absent)} missing. Install with: ubuntu-tweak doctor --yes   (sudo apt-get install -y {packages})")
+        if ui.rich():
+            print(f"\n{ui.symbol('error')} {ui.style(f'{len(absent)} missing.', 'red', 'bold')}")
+            print("  " + ui.style("Install them with:", "dim") + " " + ui.command("ubuntu-tweak doctor --yes"))
+            print("  " + ui.style(f"(this runs: sudo apt-get install -y {packages})", "dim"))
+        else:
+            print(
+                f"{len(absent)} missing. Install with: ubuntu-tweak doctor --yes   (sudo apt-get install -y {packages})"
+            )
         return int(ExitCode.DRIFT)
     install(absent)
     print("After install:")

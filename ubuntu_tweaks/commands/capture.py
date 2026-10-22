@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 
@@ -101,16 +102,19 @@ def execute(
         dry_run=args.dry_run,
         summary_only=args.summary,
     )
-    print(render_text(document), end="")
+    print(ui.decorate(render_text(document), "capture"), end="")
+    if ui.rich() and not args.summary:
+        print()
+        print("\n".join(ui.capture_class_help()))
     if args.report:
         report = Path(args.report)
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(render_markdown(document), encoding="utf-8")
-        print(f"report written to {report}")
+        print(ui.say("info", f"report written to {report}"))
     if args.commit:
         for line in commit(plan, email_exempt_keys=rules.email_exempt_keys, home=home, now=now, state_home=state_home):
-            print(line)
-        print(f"nothing was committed to git: review `git diff` in {ctx.profile.root}")
+            print(ui.say("ok", line))
+        print(ui.say("info", f"nothing was committed to git: review `git diff` in {ctx.profile.root}"))
     return 0
 
 

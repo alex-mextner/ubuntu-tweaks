@@ -66,6 +66,14 @@ as any behavior change.
 12. «а еще нужно чтобы ставились эти твики для файрфокса: - https://github.com/alex-mextner/firefox-passkey-qr — установщик passkey-qr. Перед каждым шагом он спрашивает
    подтверждение. Если Bluetooth на ПК нет, а HA найден, он сам ставит мост. Если Bluetooth есть, этот шаг пропускается.» — the `firefox-passkey-qr` module (see *Service modules*).
 13. «когда все доделаешь начни применение на ubuntu-pc, попутно доработай все что пойдет не так чтобы когда я буду новые свои машины настривать все прошло как по маслу в одну команду» — `init` is one command on a fresh machine (`scripts/bootstrap.sh`), its manual leftovers are printed at the end (see *Init pipeline*, *Manual steps*); the apply on `ubuntu-pc` follows the integrated release.
+14. «Важно, Ubuntu-tweaks это OSS проект а не мой личный приватный. Он не должен Хардкодить мои ник имя ссылки,
+    .files и тп. Он должен искать через gh .files или dotfiles и сам устанавливать
+
+    А еще все выводы в интерактивном терминале должны быть покрашены и пояснены
+
+    Например status сейчас очень непонятный» — the generic-OSS half (no hardcoded identity, dotfiles repo found
+    through gh, profile-supplied modules) is in *Engine and profile*, *Profile discovery* and *Profile modules*;
+    the output half is in *Output*: every interactive output is colored and explained, `status` first.
 
 ## Requirements
 
@@ -135,9 +143,9 @@ Covered by `tests/test_launcher.py`.
 | Command | What it does |
 |---|---|
 | `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` prints the exact `gh repo clone alex-mextner/.files ~/.files` command and continues with the module-only plan. Re-running is safe. |
-| `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing. |
+| `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing and says so. In a terminal: badges, `[sudo]` marks, a reason per action, numbered progress and a summary (*Output*). |
 | `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
-| `status` | Drift both ways (see *Drift*), grouped as Missing / Modified / Extra. Exit 3 when anything declared is Missing or Modified; extras alone exit 0. |
+| `status [--explain\|-v] [--json]` | Drift both ways (see *Drift*, *Output*), grouped as Missing / Modified / Extra / Manual, with a verdict line, a definition of each group and the next command in a terminal; compact text when piped; `--json` for scripts. Exit 3 when anything declared is Missing or Modified; extras and manual items alone exit 0. |
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
 | `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
@@ -149,7 +157,8 @@ Covered by `tests/test_launcher.py`.
 | `show [--changed\|--all] [--panel ID] [--format text\|md\|html] [--output FILE] [--ssh [USER@]HOST]` | Read-only Russian overview of all settings of this machine (or, with `--ssh`, another one) grouped by Settings panel, with explanations, readable values, defaults and a status (see *show*). |
 
 Global flags, accepted before or after the command: `--profile DIR`, `--machine NAME`,
-`--only <name,…>` (modules for `apply`/`status`, panels for `capture`).
+`--only <name,…>` (modules for `apply`/`status`, panels for `capture`), and the output flags
+`--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*).
 
 Exit codes: 0 ok, 1 internal error, 2 invalid config, 3 drift, 4 unknown module, 5 refused
 (secret finding or unsafe path). The constants live in one place,
@@ -1187,6 +1196,11 @@ first, default 100, stable otherwise); see *Init pipeline*.
 Root actions are marked `[sudo]` in the plan; `--no-sudo` skips them and reports them as
 skipped.
 
+Every action also has `why()`: one sentence on why this kind of action exists (default
+`ui.kind_why(kind)`; an action overrides it when the reason depends on its state). The interactive
+preview and `status` show it; the plain text does not. `Plan.execute` takes optional `on_start` and
+`on_done` callbacks (the progress lines of `apply --commit`).
+
 Writes go through `Gio.Settings` from `python3-gi` (installed on every Ubuntu desktop;
 `doctor` checks it), with the extension's own schema dir via
 `Gio.SettingsSchemaSource.new_from_directory`. The rest is stdlib: `tomllib`, `argparse`,
@@ -1234,6 +1248,66 @@ Missing or Modified.
   submodule checked out at another commit than the umbrella records (dev work: only
   `update` moves it, `apply` never resets it). Extras come from each planner's optional
   `extras()`; `status` prints them only when `--only` is not given.
+- **Manual** (shown by `status`, never an exit-3 reason): the planners' warnings, things `apply` cannot
+  decide or do for you (a missing git identity). The explained layout lists them in their own section
+  (*Output*).
+
+### Output
+
+Request 14. Everything the CLI prints in an interactive terminal is **colored and explained**; the same
+commands piped or with `--plain` print the compact, byte-stable text that scripts and the golden tests
+read. All of it lives in one stdlib-only module, `ubuntu_tweaks/ui.py`: colors, badges, aligned text,
+wrapping and the sentences that status, apply and init share or translate (the wording table `ui._TEXT`,
+the per-kind reasons `ui._KIND_WHY`, the capture class help `ui.CAPTURE_CLASSES`). A command never
+hard-codes an escape sequence; the one-off description of a single command's table (`list`, `machine`,
+`bundles`, `doctor`, `update`) stays next to its renderer, in English, until ticket #58 moves it.
+
+**Gating.** Two questions, asked of the stream being written (stdout, or stderr for errors):
+
+| Question | Yes when |
+|---|---|
+| May ANSI escapes be written? (`ui.color_enabled`) | `--color always`; or `--color auto` (default) on a tty, unless `NO_COLOR` is non-empty ([no-color.org](https://no-color.org)) or `TERM=dumb`; `CLICOLOR_FORCE` (not `0`) turns it on for a pipe, `NO_COLOR` still wins. `--color never` and `--plain` always say no. |
+| Explained layout? (`ui.rich`) | the stream is a tty (so `NO_COLOR` on a terminal still gets the explanation, uncolored) or `--color always`; never with `--plain`, and never because of `CLICOLOR_FORCE` alone (it only colors, so a script with it exported still reads the compact text). |
+
+Global flags (before or after the command): `--color auto|always|never`, `--plain` (compact layout, no
+escapes: the machine-readable text), `--lang en|ru` (or `UBUNTU_TWEAK_LANG`). A child `ubuntu-tweak`
+(`update --commit` runs `apply` in a fresh interpreter) receives the same flags (`ui.cli_flags`).
+
+**Colors have fixed meanings** and are never the only signal: green `✓ ok` = satisfied; yellow `! apply`
+= needs action, `… manual` = only you can finish it; red `✗ error` = failure or blocking drift; cyan
+`+ extra` / `i` / `→` = information, a command to run, an item that is present but not declared; dim =
+explanation; bold = heading. Symbols fall back to ASCII (`v ! x ~ +`) on a stream that cannot encode
+them. Widths come from `shutil.get_terminal_size`, clamped to 40..120 columns; every explanation is
+wrapped with a hanging indent.
+
+**`status`** (the model of the others) prints, in the explained layout: a header (machine, profile, engine
+version = `git describe` of the checkout); a one-line verdict with the next command (`✗ 4 missing, 1
+modified, 5 extra — run: ubuntu-tweak apply (preview), then ubuntu-tweak apply --commit`, or `✓ in
+sync`); then **Missing / Modified / Extra / Manual**, each with a one-sentence definition of what it
+means and what fixes it (an empty section is one line unless `--explain`), items grouped by module as
+`badge + what` plus a dim `why:` line (once per action kind in a group; the reason comment of a key is
+already in the description); a legend; the next-step commands; with `--explain` / `-v` the exit-code
+table. **Manual** holds the planners' warnings (things only the user decides, e.g. a missing git
+identity); it never changes the exit code. The classification and the exit codes (*Drift*) are the same in
+both layouts. `status --json` prints the same facts (`missing`, `modified`, `extra`, `manual`, `in_sync`,
+`exit_code`, per item `kind`/`module`/`description`/`why`/`needs_root`); `extra` is `null` under `--only`
+(not checked, not empty) and `why` is always English. `--explain` forces the explained layout on a pipe
+(`--plain` still wins).
+
+Elsewhere: `apply` preview = *What will change* with a summary line, per action a badge, `[sudo]` (or
+`[sudo, skipped: --no-sudo]`), the description, a dim `why:` (`Action.why()`, default from the kind) and
+the module, a footer saying plainly that nothing changed and which command applies it; `apply --commit`
+prints `[3/21] → <what>` before and `[3/21] ✓ done` after each action, then a *Summary* (changed / need
+you / skipped), the re-login hint, the skipped root actions and the *Manual steps* block with how to
+finish each. `init` numbers its two steps (`Step 1/2: check required tools`, `Step 2/2: apply the plan`)
+and ends with the same Manual steps block; `doctor` is a table of ✓/…/✗ rows with why each tool is
+needed; `update`, `list`, `machine`, `bundles`, `capture` (summary block colored, plus a legend of the
+skip classes), `show --format text`, `note`, `bundle-move` use the same colors and one-sentence
+explanations; errors are a red `✗ error` line with a cyan `fix:` hint where the exit code has a standard
+one. `--lang ru` translates the `status`, `apply` and `init` texts and every per-kind reason (the
+two tables are checked for the same keys by `tests/test_ui.py`); everything else stays English.
+Covered by `tests/test_ui.py` (gating, helper goldens plain and ANSI, wrapping at 60/80/120 columns,
+the `status` layout against `tests/golden/status_explained.txt`, ANSI-stripped equals uncolored).
 
 ### Service modules
 
