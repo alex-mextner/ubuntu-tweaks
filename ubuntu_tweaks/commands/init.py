@@ -39,7 +39,7 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     parser = subparsers.add_parser("init", help="fresh system: doctor, submodules, CLI link, apply (--commit runs it)")
     parser.add_argument("--commit", action="store_true", help="install packages and apply (default: preview only)")
     parser.add_argument("--no-sudo", action="store_true", help="skip actions that need root and say so")
-    parser.set_defaults(handler=run)
+    parser.set_defaults(handler=run, plans_links=True)  # links into the stable checkout (spec *Checkout*)
 
 
 def _step(number: int, key: str) -> None:

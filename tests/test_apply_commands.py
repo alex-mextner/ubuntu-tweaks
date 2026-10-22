@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import dataclasses
 import io
 import types
 import unittest
@@ -400,6 +401,11 @@ class InitCommandTests(CommandScenario):
         self.assertIn("4 changed", out)
         _, out = self.run_init(commit=True)
         self.assertIn("0 changed", out)
+
+    def test_cli_link_targets_the_stable_checkout_not_the_running_worktree(self) -> None:
+        ctx = dataclasses.replace(self.context(), running_root=self.tmp / "temporary-worktree")
+        self.run_init(ctx, commit=True)
+        self.assertEqual((self.home / ".local/bin/ubuntu-tweak").readlink(), self.repo / "bin/ubuntu-tweak")
 
     def test_missing_profile_says_what_was_looked_for_and_continues(self) -> None:
         ctx = Context(self.repo, Profile(self.home / ".files/ubuntu", "home"))

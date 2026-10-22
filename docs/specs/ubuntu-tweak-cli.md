@@ -76,6 +76,9 @@ as any behavior change.
     the output half is in *Output*: every interactive output is colored and explained, `status` first.
 15. «ubuntu-tweaks должен уметь запрашивать sudo и чинить всё что не так» — the engine obtains root itself,
     once and up front (*Elevation*), and repairs every drift in one command (request 18).
+17. Not a quote: the observed problem. The CLI ran from a temporary git worktree through the `~/.local/bin`
+    symlink, and the plan linked the GNOME extensions into that worktree, so the links dangle once the worktree
+    is removed. Persistent links must target a stable checkout (*Checkout*).
 18. «Зачем fix? Разве не init/apply должен быть только? Как в rig» — there is no `fix` command: `apply --commit`
     and `init --commit` ask for sudo once, install the missing apt packages (what `doctor --yes` does) and apply
     the plan in the same run, with no question in between (*Repair in one command*, *Elevation*). Where `rig`
@@ -189,6 +192,43 @@ declares is exit 4.
 
 After any action that adds or changes extension code, the CLI says that a re-login is
 needed: Shell on Wayland loads extension code only at login.
+
+### Checkout
+
+Request 17. The engine has one persistent location, **the stable checkout**: the tree the user keeps and that
+`update` pulls in. Everything persistent points into it (module directories, submodules, extension links and
+the schemas compiled in them, the `~/.local/bin/ubuntu-tweak` link, `engine_version`), never into a temporary
+worktree that may be removed. `ubuntu_tweaks/checkout.py` resolves it, in order:
+
+1. `$UBUNTU_TWEAKS_DIR` when set and non-empty (the name `scripts/bootstrap.sh` already uses for its clone
+   directory; there is no second variable). `~` is expanded; a path that is not a directory is `ConfigError`
+   (exit 2).
+2. The main working tree of the git repository the running code belongs to: the parent of
+   `git rev-parse --git-common-dir`, so a linked worktree (`<main>/.worktrees/...`, `~/.omp/wt/...`) resolves to
+   the tree it was added from. Only when the running directory is that repository's top level and the common
+   directory is a `.git` directory. This needs git 2.31+ (`--path-format=absolute`); with an older git the rule
+   does not apply and rule 3 takes over.
+3. The running checkout itself: not a git checkout, git unavailable, or a layout not understood above.
+
+`Context.repo_root` is the stable checkout (every planner reads and links through it); `Context.running_root`
+is the checkout whose code runs, informational only. When they differ `cli.main` prints one line to stderr
+and the interactive plan header repeats it:
+
+```
+warning: running from <path>, a git worktree; links, submodules and extension code target the stable checkout <stable> (set UBUNTU_TWEAKS_DIR to change)
+```
+
+(`a copy` instead of `a git worktree` when the running directory is not a worktree.) A stable checkout is
+**usable** when it has a `modules/` directory and an `ubuntu_tweaks/` package. A command that plans links,
+submodule init, schema compiles or extension code declares it with `parser.set_defaults(plans_links=True)`
+(`apply`, `init`, `update`; `cli.py` never names them); when the stable checkout is not usable such a command
+ends with exit 2 naming the path, what is missing and `UBUNTU_TWEAKS_DIR=<checkout> ubuntu-tweak <command>`, with
+or without `--commit` (the preview must not describe a plan against the wrong tree). Read-only commands
+(`status`, `list`, `machine`, `show`, `bundles`, `capture`, `note`, `bundle-move`, `doctor`) keep working from the
+running checkout (their `repo_root` is the running tree when the stable one is unusable) and print only the warning.
+Covered by `tests/test_checkout.py`, which builds temporary git repositories with linked worktrees; the suite's
+`tests/__init__.py` sets `UBUNTU_TWEAKS_DIR` to the checkout under test so that `cli.main` tests never resolve to
+a developer's main checkout.
 
 ### Elevation
 
@@ -648,7 +688,8 @@ Request 13. `scripts/bootstrap.sh` (POSIX `sh`, at most 40 lines) takes a stock 
 `git` to a running `init`: when `git`, `curl`, the CA bundle or `python3-gi` is missing it runs `sudo apt-get update`
 and `sudo apt-get install -y git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
 without them), clones this project's repository (`$UBUNTU_TWEAKS_REPO`, default `alex-mextner/ubuntu-tweaks`) with its submodules into `~/ubuntu-tweaks` (or
-`$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated), then runs
+`$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated; that directory is the stable
+checkout of *Checkout*), then runs
 `bin/ubuntu-tweak init "$@"`. The commit is explicit: with no arguments it is the **preview**; `--yes` is the
 only word that turns it into `init --commit` (apply and install without asking: `--commit` is the consent);
 any other argument
