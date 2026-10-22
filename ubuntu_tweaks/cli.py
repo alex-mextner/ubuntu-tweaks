@@ -14,8 +14,9 @@ here, so a command must not define options of those names.
 
 Public API:
 
-- ``main(argv=None) -> int``: parse, build the ``Context``, run the handler and return its exit
-  code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; a missing
+- ``main(argv=None) -> int``: ``_run`` inside the session log (``sessionlog.run_logged``: every run of every
+  command is logged, usage errors and ``--help`` included): parse, build the ``Context``, run the handler and
+  return its exit code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; a missing
   ``gi`` module becomes a one-line "sudo apt install python3-gi" message with exit 1; any other
   exception prints a traceback and returns ``ExitCode.INTERNAL``. ``--dry-run`` (a global flag) turns the
   command into its preview, ends the run with ``dry run: nothing was changed`` on stderr and is a usage error
@@ -31,7 +32,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
-from ubuntu_tweaks import commands, identity, ui
+from ubuntu_tweaks import commands, identity, sessionlog, ui
 from ubuntu_tweaks.checkout import stable_checkout, warning_line
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.discovery import discover
@@ -146,8 +147,14 @@ def _refuse_dry_run_commit(args: argparse.Namespace) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    return sessionlog.run_logged(arguments, lambda: _run(arguments))
+
+
+def _run(argv: Sequence[str]) -> int:
     try:
         args = build_parser().parse_args(argv)
+        sessionlog.set_command(args.command)
         ui.configure(color=args.color or "auto", plain=bool(args.plain), lang=args.lang)
         _refuse_dry_run_commit(args)
         checkout = stable_checkout(REPO_ROOT, os.environ)
@@ -161,12 +168,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             only=_only(args.only),
             running_root=checkout.running,
         )
+        sessionlog.note("profile", str(context.profile.root))
+        sessionlog.note("machine", context.profile.machine)
         result = args.handler(context, args)
     except UbuntuTweakError as error:
         print(ui.format_error(str(error), int(error.exit_code), fix=error.fix, stream=sys.stderr), file=sys.stderr)
         return int(error.exit_code)
     except ModuleNotFoundError as error:
         if error.name != "gi":
+            sessionlog.note("exception", type(error).__name__)
             traceback.print_exc()
             return int(ExitCode.INTERNAL)
         message = (
@@ -178,7 +188,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return int(ExitCode.INTERNAL)
-    except Exception:
+    except Exception as error:
+        sessionlog.note("exception", type(error).__name__)
         traceback.print_exc()
         return int(ExitCode.INTERNAL)
     if args.dry_run:

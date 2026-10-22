@@ -76,6 +76,9 @@ as any behavior change.
     the output half is in *Output*: every interactive output is colored and explained, `status` first.
 15. «ubuntu-tweaks должен уметь запрашивать sudo и чинить всё что не так» — the engine obtains root itself,
     once and up front (*Elevation*), and repairs every drift in one command (request 18).
+16. «Все что видит пользователь в cli писалось в логи, чтобы ты мог анализировать» — every command's complete
+    user-visible session (stdout and stderr, prompts and answers included) is also written to a log file an
+    agent can read afterwards; see *Session log*.
 17. Not a quote: the observed problem. The CLI ran from a temporary git worktree through the `~/.local/bin`
     symlink, and the plan linked the GNOME extensions into that worktree, so the links dangle once the worktree
     is removed. Persistent links must target a stable checkout (*Checkout*).
@@ -1634,6 +1637,89 @@ one. `--lang ru` translates the `status`, `apply` and `init` texts and every per
 two tables are checked for the same keys by `tests/test_ui.py`); everything else stays English.
 Covered by `tests/test_ui.py` (gating, helper goldens plain and ANSI, wrapping at 60/80/120 columns,
 the `status` layout against `tests/golden/status_explained.txt`, ANSI-stripped equals uncolored).
+
+### Session log
+
+Request 16. Every run of `ubuntu-tweak` (every command, `--help` and usage errors, a handled error, an unexpected
+exception, Ctrl-C) writes everything the user saw to one log file, so an agent (or you) can read what happened
+afterwards without asking for a paste. One module, `ubuntu_tweaks/sessionlog.py`, does it as a **tee at the CLI
+entry**: `cli.main` opens the session before it parses anything, replaces `sys.stdout` / `sys.stderr` with tees and
+closes the session after the exit code is known. No command logs anything itself. There is no opt-out: every run
+is logged (the file is private, see below), `--dry-run` and `--plain` runs included; the log directory is the only
+place a dry run may write.
+
+- **Where.** `<state>/ubuntu-tweaks/logs/<UTC timestamp>-<command>.log`, `<state>` = `$XDG_STATE_HOME` else
+  `~/.local/state` (the rule of `backup` and the dotfiles cache). The timestamp is `20261022T183012Z`;
+  `<command>` is the subcommand that was run, `none` when parsing failed before one was known (a usage error,
+  `--help`); the file is created before the arguments are parsed, as `...-none.log`, and renamed once the command
+  is known. A name that exists gets `-2`, `-3`, ... before `.log`. `latest.log` in the same directory is a
+  relative symlink to the newest log (replaced atomically, so a reader never sees it missing). The directory is
+  mode `0700`, the files `0600`.
+- **Content.** A `# session` header (`# argv:` as run, `# started:` UTC, `# host:`, `# cwd:`, `# engine:`,
+  `# python:`), then the session text, then a footer: `# end: <UTC time>, <seconds> s, exit <code>`, one line for how
+  the run did not end normally (`# interrupted (Ctrl-C)` with exit 130, `# terminated (SIGTERM)` with exit 143, best
+  effort, `# exception: <type>` for an unexpected exception: its traceback is in the body, printed to stderr as
+  always), and the facts the run learned (`# profile: <dir>`, `# machine: <name>`). `--help` and usage errors
+  (`SystemExit`) are logged with their exit code and then exit as before. The file is flushed on every complete line, so
+  it can be read while the run is still going; a header without a footer means the process is still running or was
+  killed with SIGKILL.
+- **The session text** is what the user saw, in the order it was written, as plain text: ANSI escape sequences
+  (CSI/SGR and OSC) are removed, a carriage-return redraw (a progress line rewritten in place) is collapsed to its
+  last state, and every **stderr** line is prefixed `! ` (stdout lines carry no prefix), so one stream of text
+  tells which stream said what. Terminal escapes and colors are never in the log, whatever `--color` says.
+- **Child output.** `Process.execute` and `process.run(capture=False)` (apt, git, the module installers, the child
+  `apply --commit` of `update`) used to let the child write to the terminal directly, which no tee can see. They now
+  give the child pipes for stdout and stderr and copy the bytes as they arrive (raw `os.read` chunks, not
+  line-buffered, so a prompt without a newline appears at once) to `sys.stdout` / `sys.stderr`, so the user sees the
+  same text and the tee logs it. stdin stays the terminal: a child may still read an answer. A tool that
+  checks `isatty` prints its plain, progress-less output because its stdout is a pipe now (a child `ubuntu-tweak`
+  is told with `--color always` when the parent shows the explained, colored layout, so `update` keeps it;
+  `ui.cli_flags`); a Python child gets `PYTHONUNBUFFERED=1` so its prompts are not held back. `Process.query`
+  and `run(capture=True)` return their output to the caller and show nothing, so they log nothing. After the child
+  has exited, the copy waits at most two seconds for output still in the pipes: a daemon the child left behind
+  can hold the pipe open and must not hang the run (such a daemon gets `SIGPIPE` on its next write once this
+  process has exited; daemons detach their output). SIGTERM sent to `ubuntu-tweak` ends it with exit 143 without
+  killing a running child (which may die of that `SIGPIPE` on its next write); Ctrl-C reaches the child through the
+  terminal too, and a child that has not exited a quarter of a second later is killed. **Limit:** a child that is
+  not Python and does not flush its stdio buffers shows a prompt that has no newline only when the buffer fills,
+  because its stdout is a pipe; such a prompt is neither shown nor logged until then. debconf's dialog frontends,
+  which want a terminal, fall back to a plainer one. The two streams of a child are read by two threads: their
+  relative order is not guaranteed, the order within each stream is.
+- **Prompts and answers.** `sys.stdin` is wrapped too: what this process reads from the terminal (`input()`,
+  `readline`, iteration, `read`) is logged as `> <typed text>`, the prompt that was the unfinished stdout line in
+  front of it (`> Install foo? [y/N] y`). To make `input()` go through that path the wrapper has no file
+  descriptor (`fileno()` raises `io.UnsupportedOperation`; `isatty()` still answers for the real terminal), which
+  costs `input()` its readline line editing. **Not captured:** the password prompt of `sudo` / `pkexec` (they open
+  `/dev/tty` themselves; the password never passes through this process, so it cannot be logged), and anything you
+  type into a *child's own* prompt (an installer asking `[Y/n]`): that input goes from the terminal straight to the
+  child; only the child's printed question appears in the log.
+- **Masking.** Secrets never reach the log. Every line written to the log (never the terminal) goes through
+  `capture.secrets.mask_secrets`, which reuses the *capture* value patterns for PEM blocks (kept per stream), API
+  tokens, JWTs, URL credentials (only the `user:password@` part is replaced, scheme and host stay) and long base64
+  runs and replaces each match by `***`. E-mail addresses, LAN IP addresses and 40-hex git object ids are **not**
+  masked: they are not credentials, and the log exists to be analyzed (a commit id or a host in an error message
+  is the evidence). In the `argv` header the value after a flag whose name contains `token`, `password` or
+  `secret` (`--token X` and `--token=X`; the value may start with `-`) is `***` too, and so is what is typed at a
+  prompt that, or the line before it, or an unfinished stderr line (where `getpass` writes), contains one of those
+  words (a secret need not look like one). A line is held back until its newline arrives; one of more than 256 KiB
+  is logged in pieces, cut after a space where there is one so a token is not split. A PEM block whose `END` never comes is masked
+  for at most 200 lines.
+- **Never breaks the command.** When the log cannot be created (no writable state directory, no `$HOME`) or a
+  write fails (disk full, permissions), logging is switched off for the rest of the run and one warning line goes
+  to stderr once; the command carries on and keeps its exit code.
+- **Retention.** The newest 50 logs are kept (`sessionlog.KEEP_LOGS`): after the new log exists, older `*.log`
+  files in the directory are deleted (never `latest.log`, never the file it points at, never any other file).
+- **Nested runs.** `update --commit` runs `apply --commit` in a child `ubuntu-tweak`. The outer run exports
+  `UBUNTU_TWEAK_SESSION_LOG=<its log>` for its lifetime; a process that finds it set and its directory writable
+  writes no log of its own (its output already flows through the outer run's pipes into the outer log).
+- **Test seam.** `UBUNTU_TWEAK_LOG_DIR` names the log directory itself (replacing the path above); `tests/__init__.py`
+  points it at a temporary directory so no test writes into the real state directory. It is not an opt-out for
+  users: unset it and every run is logged.
+
+Covered by `tests/test_sessionlog.py` (escape stripping, `\r` collapsing, stream marks, masking, header and
+footer, modes, symlink, retention, the failure / Ctrl-C / usage-error / unexpected-exception logs, the nested-run
+rule, prompts and typed answers, child output through the pipes with unchanged errors, a failing log write) and
+`tests/test_process.py`.
 
 ### Service modules
 

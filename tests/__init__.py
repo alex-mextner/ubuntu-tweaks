@@ -7,9 +7,15 @@ the same bytes as CI. ``UBUNTU_TWEAKS_DIR`` is pinned to the checkout under test
 a git worktree never resolves to the developer's main checkout (``ubuntu_tweaks.checkout``; ``tests/test_checkout.py``
 removes it where resolution is the subject). A test that wants a terminal passes a stream with ``fake_tty = True``
 (``tests.test_ui.Tty``) or selects the layout with ``ui.configure(color="always")``.
+
+Also points the session log of ``cli.main`` at a temporary directory (``UBUNTU_TWEAK_LOG_DIR``): every ``main`` call
+writes a log, and none may land in the developer's real ``~/.local/state``.
 """
 
+import atexit
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import TextIO
 
@@ -24,3 +30,8 @@ ui._is_tty = _only_fake_ttys
 for _name in ("CLICOLOR_FORCE", "NO_COLOR", "UBUNTU_TWEAK_LANG"):
     os.environ.pop(_name, None)
 os.environ["UBUNTU_TWEAKS_DIR"] = str(Path(__file__).resolve().parent.parent)
+
+_LOG_DIR = tempfile.mkdtemp(prefix="ubuntu-tweak-test-logs-")
+os.environ["UBUNTU_TWEAK_LOG_DIR"] = _LOG_DIR
+os.environ.pop("UBUNTU_TWEAK_SESSION_LOG", None)
+atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
