@@ -1,0 +1,10 @@
+description = "Firefox phone-QR passkeys (firefox-passkey-qr installer, --yes); the HA Bluetooth bridge only when the PC has no Bluetooth"
+enabled = false   # replaces the Firefox snap by Mozilla's deb: a machine opts in
+order = 73        # init step 7, after the Firefox extension steps
+
+[source]
+kind = "system"
+root = false
+install = "firefox-passkey-qr install"
+check = "firefox-passkey-qr check"
+preview = "firefox-passkey-qr plan"

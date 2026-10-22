@@ -1,0 +1,8 @@
+description = "passwords-app polkit action (unlock with the login password), installed as root"
+enabled = true
+order = 61   # init step 6, after passwords-app has cloned the checkout
+
+[source]
+kind = "system"
+install = "passwords-app-polkit install"
+check = "passwords-app-polkit check"

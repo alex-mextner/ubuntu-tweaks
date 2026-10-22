@@ -1,0 +1,170 @@
+#!/usr/bin/python3 -B
+"""firefox-autologin module: Firefox is opened once on its sign-in page with passwords-app ready to fill it.
+
+    firefox-autologin check     exit 0 satisfied, 3 unsatisfied (read-only)
+    firefox-autologin status    the same facts and the limits of "automatic", one line each
+    firefox-autologin install   as the desktop user: start Firefox, wait for the extension, open the page
+
+"Firefox signs in automatically" has two readings (spec, *Firefox*). The achievable one is autofill: once
+the passwords-app extension is active, this module opens https://accounts.firefox.com/signin in Firefox one
+time (marker ~/.local/state/ubuntu-tweaks/firefox-signin-opened), so the extension fills the credentials it
+finds in passwords-app. A fully unattended Firefox Account / Sync login is NOT possible: it would need the
+account password and 2FA code stored in a file or typed by the module, which this project never does.
+Spec: docs/specs/ubuntu-tweak-cli.md, *Firefox*.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    invoking_account,
+    main,
+    module_config,
+    state_dir,
+    write_file,
+)
+
+EXTENSION_ID = "passwords-app@alex-mextner.github.io"
+DEFAULT_URL = "https://accounts.firefox.com/signin"
+DEFAULT_WAIT_SECONDS = 90
+MARKER = "firefox-signin-opened"
+PROFILE_ROOTS = ("snap/firefox/common/.mozilla/firefox", ".mozilla/firefox")  # the snap, then the Mozilla deb
+OPTIONS = {"url", "wait_seconds"}
+LIMITS = (
+    "autofill, not stored credentials: the page is filled from passwords-app; a Firefox Account login "
+    "with its password and 2FA code cannot be unattended and is never stored by ubuntu-tweaks"
+)
+
+
+def spawn_detached(argv: Sequence[str]) -> None:
+    """Start a browser window that outlives this script; its output is not ours."""
+    subprocess.Popen(
+        list(argv),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def extension_active(home: Path) -> bool:
+    """Whether some Firefox profile lists the extension as an active add-on (``extensions.json``)."""
+    for relative in PROFILE_ROOTS:
+        for registry in sorted((home / relative).glob("*/extensions.json")):
+            try:
+                addons = json.loads(registry.read_text(encoding="utf-8")).get("addons", [])
+            except (OSError, ValueError, AttributeError):
+                continue
+            for addon in addons if isinstance(addons, list) else []:
+                if isinstance(addon, dict) and addon.get("id") == EXTENSION_ID and addon.get("active") is True:
+                    return True
+    return False
+
+
+class FirefoxAutologin(Module):
+    name = "firefox-autologin"
+
+    def __init__(
+        self,
+        home: Path,
+        env: Mapping[str, str],
+        options: dict[str, object],
+        *,
+        is_root: bool,
+        which: Callable[[str], str | None] = shutil.which,
+        spawn: Callable[[Sequence[str]], None] = spawn_detached,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        policy_file: Path = Path("/etc/firefox/policies/policies.json"),
+    ) -> None:
+        unknown = sorted(set(options) - OPTIONS)
+        if unknown:
+            raise ModuleError(f"[modules.firefox-autologin] unknown option(s): {', '.join(unknown)}")
+        url = options.get("url", DEFAULT_URL)
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise ModuleError(f"[modules.firefox-autologin] url must be an https:// URL, got {url!r}")
+        wait = options.get("wait_seconds", DEFAULT_WAIT_SECONDS)
+        if isinstance(wait, bool) or not isinstance(wait, int) or wait < 1:
+            raise ModuleError(f"[modules.firefox-autologin] wait_seconds must be a positive integer, got {wait!r}")
+        self._home = home
+        self._env = env
+        self._url = url
+        self._wait = wait
+        self._is_root = is_root
+        self._which = which
+        self._spawn = spawn
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._policy_file = policy_file
+        self._marker = state_dir(home, {}) / MARKER
+
+    def findings(self) -> list[Finding]:
+        return [
+            Finding(self._which("firefox") is not None, "firefox on PATH"),
+            Finding(extension_active(self._home), f"extension {EXTENSION_ID} active in a Firefox profile"),
+            Finding(self._marker.is_file(), f"Firefox opened once on {self._url}", f"marker {self._marker}"),
+            Finding(True, "what automatic means here", LIMITS),
+        ]
+
+    def apply(self) -> None:
+        if self._is_root:
+            raise ModuleError("run as the desktop user, not root: Firefox opens in that user's session")
+        firefox = self._which("firefox")
+        if firefox is None:
+            raise NeedsManual("firefox is not installed")
+        if not (self._env.get("WAYLAND_DISPLAY") or self._env.get("DISPLAY")):
+            raise NeedsManual("no graphical session (WAYLAND_DISPLAY / DISPLAY unset): run this from the desktop")
+        if self._marker.is_file() and extension_active(self._home):
+            return
+        if not extension_active(self._home):
+            try:
+                policy_named = EXTENSION_ID in self._policy_file.read_text(encoding="utf-8")
+            except OSError:
+                policy_named = False
+            if not policy_named:  # nothing would install it: do not open a window and wait for nothing
+                raise NeedsManual(f"{self._policy_file} does not name {EXTENSION_ID}: apply the firefox-policy module first")
+            self._spawn([firefox])  # the policy installs the extension while Firefox starts
+            deadline = self._monotonic() + self._wait
+            while not extension_active(self._home):
+                if self._monotonic() >= deadline:
+                    raise NeedsManual(
+                        f"Firefox did not activate {EXTENSION_ID} within {self._wait}s: apply the firefox-policy "
+                        "module, restart Firefox, answer its 'Allow Firefox to start WebExtension backend?' prompt, "
+                        "and check about:policies and about:addons"
+                    )
+                self._sleep(2)
+        self._spawn([firefox, "--new-tab", self._url])
+        write_file(self._marker, json.dumps({"url": self._url, "extension": EXTENSION_ID}) + "\n", 0o644)
+
+
+def build(env: Mapping[str, str]) -> FirefoxAutologin:
+    account = invoking_account(env)
+    return FirefoxAutologin(account.home, env, module_config(env), is_root=os.geteuid() == 0)
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"firefox-autologin: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

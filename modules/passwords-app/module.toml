@@ -1,0 +1,9 @@
+description = "passwords-app (iCloud Keychain): clone, install, enable the user daemon, native-messaging host"
+enabled = true
+order = 60   # init step 6
+
+[source]
+kind = "system"
+root = false
+install = "passwords-app install"
+check = "passwords-app check"

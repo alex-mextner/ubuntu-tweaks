@@ -1,0 +1,9 @@
+description = "passwords-app Firefox extension: built and signed on AMO (key from the Secret Service), staged for the policy"
+enabled = true
+order = 70   # init step 7, after passwords-app (it needs the checkout)
+
+[source]
+kind = "system"
+root = false
+install = "firefox install"
+check = "firefox check"

@@ -1,0 +1,8 @@
+description = "Firefox enterprise policy: force-install the signed passwords-app extension (root, /etc/firefox)"
+enabled = true
+order = 71   # init step 7, after firefox has staged the signed extension
+
+[source]
+kind = "system"
+install = "firefox-policy install"
+check = "firefox-policy check"
