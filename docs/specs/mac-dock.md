@@ -32,6 +32,9 @@ in the same commit as any behavior change.
 14. «почини нормально и включи по умолчанию и на моей машине» (file drops,
     [#13](https://github.com/alex-mextner/ubuntu-tweaks/issues/13))
 15. «и оставшиеся работы тоже доделывай» (the remaining open tickets)
+16. «… а док не должен выскакивать если курсор около границы, только если он на границе
+    300мс+» (dock part of request #9 in `docs/specs/ubuntu-tweak-cli.md`;
+    [hyperdock#16](https://github.com/alex-mextner/hyperdock/issues/16))
 
 ## Requirements
 
@@ -57,6 +60,21 @@ in the same commit as any behavior change.
   restores the window out of it, then the slot closes. The dock's own GPU effect
   (`minimized-window-tiles`, `minimize-to-icon`, `minimize-effect=1`).
 - Clicking the focused app's icon does not minimize it (setting; upstream default kept).
+
+### Auto-hide reveal
+- A hidden dock slides in only when the pointer rests ON the screen edge (the 2 px
+  reactive `DockDwell` strip) continuously for `reveal-delay-ms` (default 300). Moving
+  near the edge, or leaving the strip before the delay, shows nothing; re-entering
+  restarts the full delay. `reveal-delay-ms=0` is the old instant reveal.
+- With `pressure-sense` on, the push threshold must also be reached; whichever comes
+  last reveals, so pressure alone never beats the dwell.
+- Every other reveal stays immediate and also cancels a pending dwell: attention bounce
+  (`urgent-bounce`), file-drag reveals (spring-loading, file drops), the toggle shortcut,
+  turning auto-hide off, and `disable()`. `disable()` leaves no pending timer.
+- The setting is a 0–2000 ms int key (`reveal-delay-ms`) with no prefs widget; it is
+  set through dconf/gsettings, so it is not part of the `dock.ini` preset (the default
+  needs no line). The logic lives in `revealDwell.js` (pure, no Shell imports) and is
+  tested by `tests/reveal_dwell_check.js` under `make check`.
 
 ### Folder stacks
 - Downloads and Screenshots stacks on the right by default, left of Trash.
@@ -130,7 +148,7 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 | 23 | Genie minimize effect | works | `minimize-effect=1` (own GPU effect), into the tile or the app icon |
 | 24 | Minimized windows as tiles before Trash | works | `minimized-window-tiles` (on in the preset, macOS default) |
 | 25 | Magnification | configurable | `animate-icons`, `animation-magnify` |
-| 26 | Size, position, auto-hide | configurable | `icon-size`, `dock-location`, `autohide-dash` |
+| 26 | Size, position, auto-hide | configurable | `icon-size`, `dock-location`, `autohide-dash`, `reveal-delay-ms` (edge dwell, default 300 ms) |
 | 27 | Open-app indicators | configurable | `running-indicator-style` |
 | 28 | Stacks: Fan | works | folder stacks + Downloads |
 | 29 | Stacks: Grid / List, Display as Folder/Stack | works | per-stack `view`/`display`; `downloads-stack-view/-display` |
@@ -155,6 +173,7 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 | 48 | Mounted volumes / Trash | configurable | `mounted-icon`, `trash-icon` |
 | 49 | Hide over fullscreen windows | works | — |
 | 50 | Dock survives an unavailable inotify monitor | works | falls back to polling |
+| 51 | Hidden dock needs the pointer resting on the edge, not near it | implemented in the fork, live check pending the submodule bump | `reveal-delay-ms` (0 = instant) |
 
 ### Evidence
 - Reference images of the Tahoe dock, side-by-side screenshots of candidates, and
@@ -240,3 +259,17 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
   extension dir is a symlink (it is one to this repo's submodule), as installing would
   empty the checkout it points to; `make build-g44` builds into `./build` only
   ([#15](https://github.com/alex-mextner/ubuntu-tweaks/issues/15)).
+- Edge dwell lives in the fork (`alex-mextner/hyperdock`, branch `mac-tahoe` is the
+  source of truth: `dash2dock-lite` was renamed there, the local `~/xp/dash2dock-lite`
+  checkout's `fork` remote points at it). The change ships as
+  [hyperdock#17](https://github.com/alex-mextner/hyperdock/pull/17)
+  (`feat/dock-dwell` → `mac-tahoe`, tracked in
+  [hyperdock#16](https://github.com/alex-mextner/hyperdock/issues/16)); the submodule
+  pointer here moves to the merge commit only after that PR is merged, never on a
+  feature branch. Until then a machine runs the old instant reveal.
+- Manual check after the submodule pointer is moved and the session restarted (Wayland
+  cannot reload the Shell): hidden dock, cursor 20 px above the bottom edge → nothing,
+  however long it rests; cursor flicked onto the very edge and out within 200 ms →
+  nothing; cursor resting on the edge ≥ 300 ms → the dock slides in; `gsettings set
+  org.gnome.shell.extensions.dash2dock-lite reveal-delay-ms 0` → instant again; a window
+  that requests attention (`urgent-bounce`) still reveals the dock at once.
