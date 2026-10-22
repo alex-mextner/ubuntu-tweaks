@@ -19,12 +19,14 @@ backend)``, ``collect_warnings(ctx, backend)``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from types import ModuleType
 
 from ubuntu_tweaks import planners
-from ubuntu_tweaks.actions import Action
+from ubuntu_tweaks.actions import DEFAULT_ORDER, Action, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.discovery import discover
+from ubuntu_tweaks.manifest import Manifest, discover_modules
 from ubuntu_tweaks.settings import SettingsBackend
 
 
@@ -32,8 +34,30 @@ def discover_planners() -> list[ModuleType]:
     return discover(planners, kind="planner", entry="build", signature="build(ctx, backend)")
 
 
+INSTALL_PHASES = frozenset({Phase.BASE, Phase.PACKAGES, Phase.SYSTEM})
+
+
+def apply_module_ordering(actions: Sequence[Action], manifests: Sequence[Manifest]) -> None:
+    """Give a module's actions the ``order`` its ``module.toml`` declares (the init pipeline position;
+    an action whose order is not ``DEFAULT_ORDER``, like a ``[[post]]`` right after its module, keeps it,
+    so ``DEFAULT_ORDER`` itself means "unset") and move its install-time actions (phases ``BASE``,
+    ``PACKAGES``, ``SYSTEM``) to its declared ``phase``. The submodule, migration, schema, link, toggle,
+    settings and seed phases keep theirs: they depend on each other and on the extension code."""
+    by_name = {manifest.name: manifest for manifest in manifests}
+    for action in actions:
+        manifest = by_name.get(action.scope or "")
+        if manifest is None:
+            continue
+        if action.order == DEFAULT_ORDER:
+            action.order = manifest.order
+        if manifest.phase is not None and action.phase in INSTALL_PHASES:
+            action.phase = manifest.phase
+
+
 def build_actions(ctx: Context, backend: SettingsBackend) -> list[Action]:
-    return [action for module in discover_planners() for action in module.build(ctx, backend)]
+    actions = [action for module in discover_planners() for action in module.build(ctx, backend)]
+    apply_module_ordering(actions, discover_modules(ctx.modules_dir))
+    return actions
 
 
 def _collect(attribute: str, ctx: Context, backend: SettingsBackend) -> list[str]:

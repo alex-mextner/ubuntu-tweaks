@@ -165,7 +165,7 @@ class PackagesAndSystemTests(ProfileCase):
 
     def test_unknown_or_mistyped_keys_are_config_errors(self) -> None:
         profile = self.profile()
-        write(profile.packages_toml, 'brew = ["x"]\n')
+        write(profile.packages_toml, 'cargo = ["x"]\n')
         with self.assertRaisesRegex(ConfigError, "unknown key"):
             profile.load_packages()
         write(profile.packages_toml, 'apt = "tmux"\n')
@@ -185,7 +185,7 @@ class PackagesAndSystemTests(ProfileCase):
     def test_an_error_in_the_overlay_names_the_overlay_file(self) -> None:
         profile = self.profile()
         write(profile.packages_toml, 'apt = ["tmux"]\n')
-        write(profile.overlay_packages_toml, 'brew = ["x"]\n')
+        write(profile.overlay_packages_toml, 'cargo = ["x"]\n')
         with self.assertRaisesRegex(ConfigError, r"machines/home/packages.toml: unknown key"):
             profile.load_packages()
 

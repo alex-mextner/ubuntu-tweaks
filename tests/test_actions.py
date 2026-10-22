@@ -2,7 +2,7 @@
 
 import unittest
 
-from ubuntu_tweaks.actions import Action, ActionFailed, Phase, Plan
+from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase, Plan
 
 
 class FakeAction(Action):
@@ -82,6 +82,7 @@ class PlanBuildTests(unittest.TestCase):
         self.assertEqual(
             list(Phase),
             [
+                Phase.BASE,
                 Phase.SUBMODULE,
                 Phase.MIGRATE,
                 Phase.SCHEMAS,
@@ -97,6 +98,22 @@ class PlanBuildTests(unittest.TestCase):
             ],
         )
         self.assertEqual(sorted(Phase), list(Phase))
+
+    def test_order_breaks_ties_inside_a_phase_and_never_crosses_phases(self) -> None:
+        late = FakeAction("late", Phase.BASE)
+        late.order = 40
+        early = FakeAction("early", Phase.BASE)
+        early.order = 10.5
+        unordered = FakeAction("unordered", Phase.BASE)
+        last_in_phase = FakeAction("last-in-phase", Phase.BASE)
+        last_in_phase.order = 999
+        next_phase = FakeAction("next-phase", Phase.SUBMODULE)
+        next_phase.order = 0
+        plan = Plan.build([next_phase, unordered, late, early, last_in_phase])
+        self.assertEqual(
+            [a.describe() for a in plan.actions],
+            ["do early", "do late", "do unordered", "do last-in-phase", "do next-phase"],
+        )
 
     def test_only_filters_by_scope_before_checking(self) -> None:
         checked: list[str] = []
@@ -194,6 +211,24 @@ class ExecuteTests(unittest.TestCase):
 
     def test_nothing_skipped_renders_empty(self) -> None:
         self.assertEqual(Plan.build([]).execute().render_skipped(), "")
+
+    def test_manual_step_is_reported_not_counted_and_the_plan_goes_on(self) -> None:
+        class NeedsYou(FakeAction):
+            def run(self) -> None:
+                raise ManualStepRequired("gh auth login (no token)")
+
+        log: list[str] = []
+        manual = NeedsYou("gh-login", Phase.BASE, log=log)
+        after = FakeAction("later", Phase.LINK, log=log)
+        result = Plan.build([manual, after]).execute()
+
+        self.assertEqual((log, result.changed), (["later"], 1))
+        self.assertEqual(result.manual, ((manual, "gh auth login (no token)"),))
+        self.assertEqual(
+            result.render_skipped(),
+            "1 action(s) need a manual step:\n  [gh-login] needs manual: gh auth login (no token)",
+        )
+        self.assertFalse(manual.check())
 
     def test_action_satisfied_since_build_is_skipped_not_run(self) -> None:
         log: list[str] = []

@@ -1,0 +1,28 @@
+description = "Init step 3: git and gh installed and configured (identity from the profile, gh login from the keychain)"
+enabled = true
+order = 30      # init pipeline step 3 (x10)
+phase = "base"
+
+[source]
+kind = "builtin"
+
+# `gh` is in the Ubuntu 26.04 archive (universe), so no third-party apt repository is added. A gh that
+# is already on PATH (brew's) satisfies the package.
+[install]
+apt = ["git", "gh"]
+
+[install.provides]
+git = "git"
+gh = "gh"
+
+# user.name / user.email come from `[git] name` / `email` in profile.toml or machine.toml: no default is invented.
+[[step]]
+name = "git-identity"
+
+# The token comes only from the keychain item `[git] token_ref` (default ubuntu-tweaks/gh-token), at run time.
+# Without one the plan says `needs manual: gh auth login` and `status` lists it as Missing.
+[[step]]
+name = "gh-login"
+
+[[step]]
+name = "git-credential-helper"

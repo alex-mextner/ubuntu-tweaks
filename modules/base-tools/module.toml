@@ -1,0 +1,35 @@
+description = "Init step 1: the bootstrap tools a stock Ubuntu lacks (curl, git, zsh, build tools, archivers)"
+enabled = true
+order = 10      # init pipeline step 1 (x10); see docs/specs/ubuntu-tweak-cli.md, "Init pipeline"
+phase = "base"
+
+[source]
+kind = "builtin"
+
+# Only what the pipeline itself needs. The rest of a person's tools is `apt` / `brew` in the profile's
+# packages.toml, unioned with this list.
+[install]
+apt = [
+  "curl", "wget", "ca-certificates",   # fetch: the Homebrew installer, release downloads, TLS roots
+  "git", "gnupg", "openssh-client",    # clone over https and ssh, verify signatures
+  "zsh",                               # the login shell; always the apt build, which is in /etc/shells for chsh
+  "build-essential", "procps", "file", # Homebrew on Linux needs them
+  "zip", "unzip", "7zip", "xz-utils", "bzip2",  # archives
+  "jq",                                # JSON in shell scripts
+  "libsecret-tools",                   # secret-tool: the Secret Service from shell scripts (passwords-app, Firefox)
+]
+
+[install.provides]
+curl = "curl"
+wget = "wget"
+git = "git"
+gnupg = "gpg"
+openssh-client = "ssh"
+procps = "pgrep"
+file = "file"
+zip = "zip"
+unzip = "unzip"
+xz-utils = "xz"
+bzip2 = "bzip2"
+jq = "jq"
+libsecret-tools = "secret-tool"

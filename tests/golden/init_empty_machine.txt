@@ -1,0 +1,24 @@
+doctor:
+  ok      python3-gi (PyGObject) [apt: python3-gi] (the CLI)
+  MISSING dconf [apt: dconf-cli] (settings)
+  planned git [apt: git] (submodules, update) -> `init`/`apply` installs it (module base-tools)
+  MISSING glib-compile-schemas [apt: libglib2.0-bin] (extension schemas)
+init --commit would install: sudo apt-get install -y dconf-cli libglib2.0-bin
+apply:
+machine: home (no overlay: shared profile only)
+profile: <tmp>/profile
+Plan: 11 action(s) to run, 0 already satisfied, 3 need root
+  1. [sudo] [package] apt: install curl, wget, ca-certificates, git, gnupg, openssh-client, zsh, build-essential, procps, file, zip, unzip, 7zip, xz-utils, bzip2, jq, libsecret-tools, wl-clipboard, xclip, xsel, gh [base-tools, clipboard, git-gh, zsh]
+  2. [sudo] [login-shell] chsh: set the login shell of ultra to /usr/bin/zsh (now unknown)
+  3. [shell-rc] create ~/.zprofile (brew shellenv, ~/.local/bin on PATH); only because it is absent
+  4. [shell-rc] create ~/.zshrc (brew shellenv, ~/.local/bin on PATH); only because it is absent
+  5. [gh-login] needs manual: gh auth login (the keychain CLI is not installed; store a token with `keychain set ubuntu-tweaks/gh-token`)
+  6. [git-credential] gh auth setup-git --hostname github.com: git asks gh for github.com credentials
+  7. [sudo] [brew-prefix] create /home/linuxbrew/.linuxbrew owned by ultra:ultra (the one step of the Homebrew install that needs root)
+  8. [brew-install] brew: run the Homebrew installer non-interactively into /home/linuxbrew/.linuxbrew (downloaded from https://raw.githubusercontent.com/Homebrew/install/a2fe82ef3a9ec7a5c72a559c09676256d6f354f6/install.sh, refused unless sha256 is 5f333bbe53bc...)
+  9. [post] brew: wire `brew shellenv` into ~/.bashrc (zsh gets it from ~/.zprofile, module zsh)
+ 10. [post] brew: brew install uv and bun (what the passwords-app and Firefox modules run on) unless already on PATH
+ 11. [cli-link] link ~/.local/bin/ubuntu-tweak -> <tmp>/repo/bin/ubuntu-tweak
+Warnings:
+  git: [git] name and email not set in profile.toml / machine.toml: git config user.name and user.email stays as it is
+Preview only, nothing was changed. Run with --commit to apply.

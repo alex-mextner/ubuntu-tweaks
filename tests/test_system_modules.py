@@ -47,7 +47,7 @@ class Recorder(process.Process):
     def execute(self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None) -> None:
         self.calls.append((list(argv), cwd, None, False))
         if self.install_exit:
-            raise process.CommandError(f"{' '.join(argv)}: exited with status {self.install_exit}")
+            raise process.CommandError(f"{' '.join(argv)}: exited with status {self.install_exit}", self.install_exit)
 
     def elevate(self, argv: Sequence[str]) -> list[str]:
         return ["sudo", "--", *argv]
@@ -179,6 +179,101 @@ class SystemModulePlannerTests(TempDirCase):
         with mock.patch.object(process.os, "geteuid", return_value=0):
             (action,) = system_modules.build(ctx, FakeBackend(), process=process.Process())
             self.assertEqual(action.describe(), "run memguard: modules/memguard/install.sh --now")
+
+    def test_root_false_runs_the_installer_directly_without_sudo_marker(self) -> None:
+        write(
+            self.repo / "modules/passwords-app/module.toml",
+            MANIFEST.format(enabled="true").replace('kind = "system"', 'kind = "system"\nroot = false'),
+        )
+
+        class Converging(Recorder):
+            def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+                self.check_exit = 0
+                super().execute(argv, input_text=input_text, cwd=cwd)
+
+        runner = Converging(check_exit=3)
+        plan = Plan.build(self.candidates(runner))
+
+        (action,) = plan.actions
+        self.assertFalse(action.needs_root)
+        self.assertEqual(action.describe(), "run passwords-app: modules/passwords-app/install.sh --now")
+        self.assertNotIn("[sudo]", plan.render())
+        result = plan.execute(no_sudo=True)
+        self.assertEqual(len(result.skipped), 0)
+        directory = self.repo / "modules/passwords-app"
+        self.assertIn(([str(directory / "install.sh"), "--now"], directory, None, False), runner.calls)
+
+    def test_module_options_reach_the_checker_and_the_installer_through_env_even_under_sudo(self) -> None:
+        self.module("ssh-server")
+        write(
+            self.profile.machine_toml,
+            "[modules.ssh-server]\nenabled = true\npassword_auth = false\nports = [22, 2222]\n",
+        )
+        runner = Recorder(check_exit=3)
+        plan = Plan.build(self.candidates(runner))
+        directory = self.repo / "modules/ssh-server"
+        wanted = 'UBUNTU_TWEAK_MODULE_CONFIG={"password_auth":false,"ports":[22,2222]}'
+
+        self.assertEqual(runner.calls[0][0], ["env", wanted, str(directory / "install.sh"), "--check"])
+        plan.actions[0].run()
+        self.assertEqual(runner.calls[-1][0], ["sudo", "--", "env", wanted, str(directory / "install.sh"), "--now"])
+
+    def test_no_options_means_no_env_prefix(self) -> None:
+        self.module("memguard")
+        write(self.profile.machine_toml, "[modules.memguard]\nenabled = true\n")
+        runner = Recorder(check_exit=0)
+        Plan.build(self.candidates(runner))
+        self.assertEqual(runner.calls[0][0][0], str(self.repo / "modules/memguard/install.sh"))
+
+    def test_installer_exit_10_is_a_manual_step_not_a_failure(self) -> None:
+        self.module("firefox")
+        runner = Recorder(check_exit=3, install_exit=10)
+        plan = Plan.build(self.candidates(runner))
+
+        result = plan.execute()
+
+        self.assertEqual(result.changed, 0)
+        ((action, message),) = result.manual
+        self.assertEqual(action.scope, "firefox")
+        self.assertIn("firefox: the installer needs a manual step (exit 10", message)
+        self.assertFalse(action.check())
+
+    def test_preview_command_output_is_shown_under_the_action_and_never_fails_the_plan(self) -> None:
+        write(
+            self.repo / "modules/passkey/module.toml",
+            MANIFEST.format(enabled="true").replace(
+                'check = "install.sh --check"', 'check = "install.sh --check"\npreview = "install.sh plan"'
+            ),
+        )
+
+        class Previewing(Recorder):
+            plan_exit = 0
+
+            def query(self, argv, *, timeout=60.0, cwd=None):  # type: ignore[no-untyped-def]
+                if argv[-1] == "plan":
+                    self.calls.append((list(argv), cwd, timeout, True))
+                    if self.plan_exit:
+                        return process.CommandResult(self.plan_exit, "", "\nno network\nmore\n")
+                    return process.CommandResult(0, "step one\nstep two\n", "")
+                return super().query(argv, timeout=timeout, cwd=cwd)
+
+        runner = Previewing(check_exit=3)
+        plan = Plan.build(self.candidates(runner))
+        self.assertEqual(
+            plan.render().splitlines()[1:],
+            [
+                "  1. [sudo] [system-module] run passkey: sudo -- modules/passkey/install.sh --now",
+                "        step one",
+                "        step two",
+            ],
+        )
+        calls = len(runner.calls)
+        plan.actions[0].describe()
+        self.assertEqual(len(runner.calls), calls, "the preview command runs once per action")
+
+        runner.plan_exit = 2
+        (action,) = Plan.build(self.candidates(runner)).actions
+        self.assertEqual(action.describe().splitlines()[1:], ["        (preview unavailable: exit 2: no network)"])
 
 
 class DefaultRunnerTests(TempDirCase):
