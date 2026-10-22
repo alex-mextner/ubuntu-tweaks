@@ -39,6 +39,26 @@ as any behavior change.
    SUMMARY block, the changed-only rule and the `auto` skip class, reasons as comments, and
    *bundles* (see *Settings bundles*).
 
+9. «открой мне на ubuntu-pc на ultra по ssh tailscale в наглядном виде все настройки с пояснениями на
+   русском и значений. и доделай все. и настрой чтобы ubuntu-tweaks так же устанавливал и включел ssh
+   сервер при инициализации и док и синхронизацию паролей. и rig опционально и .files, и rig должен все
+   по возможности активировать и настройки rig должне переноситься (я начинал это делать, проверь по
+   веткам и доделай) и риг в том чесле должен настраивать tmux и omp. доделай все.
+   и еще пароли должны подставляться в firefox, а док не должен выскакивать если курсор около границы,
+   только если он на границе 300мс+
+   и файрфокс должен авторизовываться автоматически при инициализации ubuntu-tweaks
+   конечно, перед этим должен быть установлен и настроен passwords-app и из него и будут браться пароли
+   для всех авторизаций автоматически. еще вот это отстой: «! Failed to copy one-time code to clipboard
+   — No clipboard utilities available. Please install xsel, xclip, wl-clipboard…» git, gh -- тоже должны
+   быть установлены и настроены. убунту из коробки вообще тлен какой-то даже curl нету. и brew пусть
+   ставится для линукса и если после будут нужны доп действия тоже пусть делаются. и конечно же zsh должен
+   быть установлен и активирован в самом начале» — the `init` pipeline and the base modules (see *Init
+   pipeline*, *Base modules*); the optional steps 10, rig and `.files`, are *Optional modules: rig, dotfiles*.
+11. «надо чтобы ставился ctmux мой, это обертка над cmux с лучшей поддержкой tmux. его должен rig ставить.
+    надо убедиться что будет не только на маке но и на убунте работать эффективно» — `ctmux` is a
+    first-class rig tool (`tools.items.ctmux`), installed by `rig activate` on macOS and Ubuntu; see
+    *Optional modules: rig, dotfiles*.
+
 ## Requirements
 
 ### Engine and profile
@@ -513,6 +533,52 @@ status `ii`, a `snap list` row, a `flatpak list` row. The apt lists are refreshe
 and the plan line says `(after apt-get update)`. A manager that is not on the machine means "not
 installed". A `flatpak_remote` that is empty, starts with `-` or contains whitespace, and a
 non-boolean `apt_update`, are invalid config (exit 2).
+
+### Optional modules: rig, dotfiles
+
+Init step 10 (request 9): both are `kind = "system"` with `root = false` (the installer runs as the user, no
+sudo, see *system modules, additions*), `enabled = false` by default, and switched on per machine in the
+profile: `machines/<host>/machine.toml`
+
+```toml
+[modules.rig]
+enabled = true
+profile_url = "https://git.hyperide.ai/<login>/.rig-profile"   # optional; omit when the profile is already set up
+[modules.dotfiles]
+enabled = true
+```
+
+Both installers take `--plan` (read-only, the `preview`), `--check` (read-only, exit 0 or 3) and exit 10 for a
+needed manual step; options arrive as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` and are never secrets.
+
+| Module (order) | `install.sh` does | `--check` is satisfied when |
+|---|---|---|
+| `rig` (100) | clones `git.hyperide.ai/ultrabricks/rig-cli` (option `repo`) to `~/dev/rig-cli` (`dir`), fast-forwards a tree without local changes, symlinks `~/.local/bin/rig`, runs `rig profile sync` (or `rig profile init <profile_url>` when none is set up; `profile_sync = false` skips), then `rig activate commit` (`activate = false` skips) | checkout and link are right, the rig profile is in sync (when one exists), `rig activate --json` has no config switch left to write and `rig status` reports no drift |
+| `dotfiles` (110) | `gh repo clone alex-mextner/.files ~/.files` when `gh` is logged in, else `git clone https://github.com/alex-mextner/.files`; an existing checkout is fetched and fast-forwarded only when it has no local changes | `~/.files` is a git checkout that is not behind and not diverged (from the last-fetched state; local changes alone are not drift) |
+
+- **rig does the activating.** `rig activate commit` (rig-cli ticket 745, "rig profile carries tmux and omp
+  config; rig activate bootstraps a machine") syncs the profile (config, `~/.tmux.conf` user region, omp
+  `config.yml`, masked `mcp.json`, `sysmon.json`; secrets never travel), probes the machine, writes the missing
+  `enabled` switches (harness, tmux, harness wrappers, the first-class `ctmux` tool) and applies the
+  machine-level plan, listing what the machine cannot support. `ctmux` (github.com/alex-mextner/ctmux-cli) is
+  cloned and installed by rig on macOS and Ubuntu (ctmux's own `install.sh` owns the OS gate and `--check`).
+  `[deps] apt = ["python3-yaml"]` is what rig reads its config with.
+- **Manual steps (exit 10):** a clone that fails (forge credentials: `fj auth login` / `gh auth login`), a
+  directory or file where the checkout or the symlink should go (never replaced), a profile conflict (`rig
+  profile sync --take local|remote`), a `.files` checkout that is behind and has local changes or has diverged.
+  Anything else non-zero is a failure.
+- **`dotfiles` never touches the mac-era files** (zsh, zplug, brew): it writes nothing in `$HOME` but the
+  checkout, links nothing, and fast-forwards only a tree without local changes; tests assert a `.zshrc` in the
+  repository stays byte-identical and `$HOME` holds only `.files`.
+- Needs the Base slice's manifest (`[source] root = false`, `preview`, exit 10, `UBUNTU_TWEAK_MODULE_CONFIG`).
+  Tests: `modules/rig/tests/test_install.py`, `modules/dotfiles/tests/test_install.py` (a local git repo and a
+  stub `rig`; throwaway `HOME`).
+- **Manual real-run checklist** (root and the forge are not available to tests): `ubuntu-tweak apply` shows
+  `run rig: modules/rig/install.sh` with the plan under it; with `[modules.rig] enabled = true`, `apply --commit`
+  clones, links, syncs, activates; `rig activate` afterwards lists no config change; `apply` again reports
+  `0 changed`; `ubuntu-tweak status` shows rig neither Missing nor Modified; `rig profile status` is in sync;
+  with `[modules.dotfiles] enabled = true` on a machine without `~/.files`, `apply --commit` leaves `~/.files`
+  with the `ubuntu/` profile directory and nothing else changed in `$HOME`.
 
 ### Panel coverage
 
