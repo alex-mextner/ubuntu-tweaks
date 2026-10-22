@@ -74,6 +74,8 @@ as any behavior change.
     Например status сейчас очень непонятный» — the generic-OSS half (no hardcoded identity, dotfiles repo found
     through gh, profile-supplied modules) is in *Engine and profile*, *Profile discovery* and *Profile modules*;
     the output half is in *Output*: every interactive output is colored and explained, `status` first.
+15. «ubuntu-tweaks должен уметь запрашивать sudo и чинить всё что не так» — the engine obtains root itself,
+    once and up front (*Elevation*), and `ubuntu-tweak fix` repairs every drift in one command (*Commands*).
 
 ## Requirements
 
@@ -154,10 +156,11 @@ Covered by `tests/test_launcher.py`.
 |---|---|
 | `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
 | `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing and says so. In a terminal: badges, `[sudo]` marks, a reason per action, numbered progress and a summary (*Output*). |
-| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
+| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan holds root actions (and not `--no-sudo`), root is obtained once before the first of them runs (*Elevation*; exit 6 when it cannot be). When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
 | `status [--explain\|-v] [--json]` | Drift both ways (see *Drift*, *Output*), grouped as Missing / Modified / Extra / Manual, with a verdict line, a definition of each group and the next command in a terminal; compact text when piped; `--json` for scripts. Exit 3 when anything declared is Missing or Modified; extras and manual items alone exit 0. |
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
-| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
+| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install` (root is obtained first, *Elevation*). |
+| `fix [--yes]` | Repairs everything that is not right, in one command (*fix*): `doctor`'s missing apt packages, then `apply --commit` of the whole plan (modules, settings, files, packages, system, services), then `status`. Root is asked for once (*Elevation*). It prints the plan, asks one question on a terminal and changes nothing without the answer `y` or `--yes`. Exit 0 only when `status` is clean afterwards, 3 when something is left (each item with its reason), 6 when root cannot be obtained. A second run reports `0 changed`. |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
 | `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, settings bundle and linked file whether it comes from the shared profile or the machine overlay. |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive, SUMMARY block first (see *capture*). `--dry-run` is the explicit no-write mode (excludes `--commit`); `--summary` prints only the summary. |
@@ -171,13 +174,70 @@ Global flags, accepted before or after the command: `--profile DIR`, `--machine 
 `--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*).
 
 Exit codes: 0 ok, 1 internal error, 2 invalid config, 3 drift, 4 unknown module, 5 refused
-(secret finding or unsafe path). The constants live in one place,
+(secret finding or unsafe path), 6 root needed but not obtainable (*Elevation*). The constants live in one place,
 `ubuntu_tweaks/errors.py`, and top-level errors map to them. A command-line usage error
 (unknown command or flag) is argparse's own exit 2. A name in `--only` that no module
 declares is exit 4.
 
 After any action that adds or changes extension code, the CLI says that a re-login is
 needed: Shell on Wayland loads extension code only at login.
+
+### Elevation
+
+Request 15. Root actions (`[sudo]` in the plan, the apt install of `doctor --yes`) used to call `sudo` one at a
+time, so the password prompt could land between two half-applied steps, and a run with no terminal ended in sudo's
+raw message. `ubuntu_tweaks/elevation.py` is the one place that obtains root: `RootSession.require(count, kinds)`
+runs the strategy below once per run (later calls are no-ops) and, for the duration of the run, makes
+`process.elevate()` prefix root commands the way the strategy found to work.
+
+- **When it asks.** `apply --commit`, `init --commit`, `update --commit` (through its `apply --commit` child),
+  `doctor --yes` and `fix`: only when the plan holds an unsatisfied root action (or `doctor` has an apt package to
+  install) and `--no-sudo` is absent; after the preview is printed and before the first action of the plan runs.
+  When a rebuilt plan (a profile that was just cloned, a staged pass) holds root actions the first one did not, the
+  call is repeated and acquires then, still before those actions run. A preview, `status`, `list` and every
+  `--no-sudo` run never ask and never look at sudo.
+- **Strategy**, the first row that applies wins:
+
+  | # | State | What happens |
+  |---|---|---|
+  | 1 | the process is root (euid 0) | nothing to do |
+  | 2 | `NoNewPrivs: 1` in `/proc/self/status` | `RootUnavailable` (`no-new-privs`): setuid helpers are neutered, so sudo and pkexec cannot work from here, NOPASSWD or not (a sandbox, a container, a restricted agent shell) |
+  | 3 | neither `sudo` nor `pkexec` exists | `RootUnavailable` (`no-tool`) |
+  | 4 | `sudo -n true` succeeds (NOPASSWD, or a ticket still valid) | go on, no prompt |
+  | 5 | a controlling terminal (`/dev/tty` opens) and `sudo` | one line says why (how many root actions, which kinds), then `sudo -v` once with its own password prompt; a refresh thread runs `sudo -n -v` every 60 s until the run ends, so the password is asked **once** however long the run is |
+  | 6 | `SUDO_ASKPASS` is set and `sudo` exists | `sudo -A -v` once; root commands run as `sudo -A --` |
+  | 7 | a graphical session (`DISPLAY` or `WAYLAND_DISPLAY`) and `pkexec` | `pkexec true` once to prove it works; root commands run through `pkexec` (polkit keeps no ticket we could refresh, so it may ask again per action) |
+  | 8 | none of the above | `RootUnavailable` (`no-prompt`): nothing here can ask for a password |
+
+  sudo or pkexec rejecting the request (wrong password after sudo's three tries, sudo's own prompt timeout, a user
+  who may not use sudo: sudo answers 1 for all of them) is `RootUnavailable` (`rejected`). There is no retry loop:
+  the run stops before the first action, nothing is half-applied.
+- **The error.** `RootUnavailable` is an `UbuntuTweakError` with exit code **6** (`ExitCode.NO_ROOT`), no
+  traceback. Its message names the cause and ends with the exact command to run from a normal terminal, the
+  command that was run with its `--commit` / `--yes` (e.g. `ubuntu-tweak fix`, `ubuntu-tweak apply --commit`, with
+  `--only` kept), plus the alternative `--no-sudo` (root actions are skipped and listed). In a terminal the
+  `fix:` line repeats the command.
+- **Tests** use a `Host` value (euid, controlling terminal, `SUDO_ASKPASS`, display, `NoNewPrivs`, the tools on
+  `PATH`; `Host.detect()` reads the real ones) and `FakeProcess`, so no test needs real sudo.
+
+### fix
+
+`ubuntu-tweak fix [--yes]` is the "repair everything" entry (request 15). Steps, in order, with one `RootSession`
+for the whole run:
+
+1. `doctor`: the report; when apt packages are missing that no module installs itself, the question "Install … with
+   sudo apt-get?" (`--yes` skips it), then root is obtained and `apt-get install -y` runs. Still missing after
+   that ends the run with exit 3.
+2. `apply --commit` of the whole plan (`--only` narrows it as everywhere): the plan is printed, one question
+   "Apply N action(s) (M need root)?" is asked on a terminal (`--yes` skips it), root is obtained, the plan runs.
+   Without a terminal and without `--yes` nothing is changed: it says so and ends with exit 3 while drift
+   remains (invariant 1: no change without explicit consent).
+3. `status`, printed as the command does; then one closing line. When items are left, each is listed with its
+   reason (the manual step's message, or "still not satisfied after running").
+
+Exit code: 0 only when `status` is clean (extras and warnings alone keep 0), 3 when drift is left or the run was
+not confirmed, 6 when root was needed and could not be obtained (before anything changed). Idempotent: a second
+run reports `0 changed` and exits 0. `fix` has no `--no-sudo`: root is its point; `apply --no-sudo` is the other way.
 
 ### Modules
 
@@ -532,7 +592,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set <your token_ref>` (GNOME keyring; the item `[git] token_ref` names, no default), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
 | git identity | `git-gh` | not planned, only warned | set `[git] name` / `email` in `profile.toml` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
-| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` (or `pkexec`); `--yes` only skips the apt confirmation, never the password |
+| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run); `--yes` only skips the apt confirmation, never the password. Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) the run stops with exit 6 and the command to run from a normal terminal, or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
 | polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
@@ -1858,6 +1918,12 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   empty machine as a golden file (`tests/golden/init_empty_machine.txt`; regenerate with
   `UPDATE_GOLDEN=1` and review the diff); `doctor` reporting `planned`. Everything goes through
   `FakeProcess` and a fake root directory (`StepEnv.root`); nothing touches the real system.
+- Elevation and `fix` (`tests/test_elevation.py`, `tests/test_fix_command.py`; `FakeProcess` and a `Host` value,
+  never the real sudo): already root, NOPASSWD, the terminal path asking once for N root actions and refreshing the
+  ticket, askpass, pkexec, and the typed errors (`no-new-privs`, `no-tool`, `no-prompt`, wrong password) with exit
+  6 and the fix command in the message; `--no-sudo`, previews and plans without root actions never ask; `apply`,
+  `init` and `doctor --yes` acquire before the first root action; `fix` ordering (doctor, apply, status), the
+  confirmation, exit 0 / 3 / 6 and the idempotent second run.
 - Profile discovery and profile modules (`tests/test_identity.py`, `tests/test_profile_modules.py`,
   `modules/dotfiles/tests/test_install.py`; no PyGObject needed): a fake `gh` (found, none, several, forks and
   archived skipped, logged out, missing, offline, a listing as long as the limit), the cache (one hour, one
