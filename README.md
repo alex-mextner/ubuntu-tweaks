@@ -47,6 +47,7 @@ mutating command previews first and changes nothing without `--commit`.
 | `bundles [--show NAME]` | read-only: the settings bundles, where each applies, shadowed / duplicated / conflicting keys |
 | `bundle-move <bundle> <key-or-glob>... [--commit]` | group keys (with their comments) into one bundle; preview by default |
 | `note <bundle>:<key> "reason" [--commit]` | add, change or remove the reason of a setting (also `packages:apt:<name>`, `system:<key>`) |
+| `show [--all] [--panel ID] [--format text\|md\|html] [--ssh [USER@]HOST]` | read-only Russian overview of all settings (explanations, readable values, defaults, status) grouped by Settings panel; `--ssh` shows another machine without installing anything there |
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
 (local extension); `memguard` and `apple-hid-battery` are root-level `system` modules.
@@ -114,6 +115,7 @@ ubuntu-tweak bundles --show dev-keyboard   # the merged result of one bundle
 ubuntu-tweak bundle-move dev-keyboard 'org/gnome/desktop/wm/keybindings/**'   # group keys (preview; --commit writes)
 ubuntu-tweak note dev-keyboard:org/gnome/desktop/wm/keybindings/close "why"   # add a reason (also packages:apt:<name>)
 ubuntu-tweak capture --dry-run         # the explicit no-write preview, SUMMARY block first (--summary: only that)
+ubuntu-tweak show --format html          # Russian overview of every setting by Settings panel -> /tmp/ubuntu-tweak-show-<machine>.html
 ```
 
 Only values you changed are captured (never schema defaults), and keys the system or an app registered

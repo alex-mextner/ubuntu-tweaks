@@ -51,38 +51,21 @@ as any behavior change.
    — No clipboard utilities available. Please install xsel, xclip, wl-clipboard…» git, gh -- тоже должны
    быть установлены и настроены. убунту из коробки вообще тлен какой-то даже curl нету. и brew пусть
    ставится для линукса и если после будут нужны доп действия тоже пусть делаются. и конечно же zsh должен
-   быть установлен и активирован в самом начале» — the `init` pipeline and the base modules (see *Init
-   pipeline*, *Base modules*).
+   быть установлен и активирован в самом начале» — the overview part is answered by `show` (see *show*);
+   the rest by the `init` pipeline and the base modules (see *Init pipeline*, *Base modules*), the service
+   modules (see *Service modules*: ssh server, passwords-app, Firefox) and, for the optional steps 10
+   (rig and `.files`), *Optional modules: rig, dotfiles*; the dock's edge dwell is hyperdock's
+   ([hyperdock#17](https://github.com/alex-mextner/hyperdock/pull/17), `docs/specs/mac-dock.md`).
 10. «еще zip нету. все необходимые тулы должны быть в .files ставиться» — `zip` and the other archivers
     are in the engine's base list; the rest of a person's tools live in the profile's `packages.toml`
     (see *Base modules*, *The engine's list and the profile's list*).
-
-9. «открой мне на ubuntu-pc на ultra по ssh tailscale в наглядном виде все настройки с пояснениями на русском и значений. и доделай все. и настрой чтобы ubuntu-tweaks так же устанавливал и включел ssh сервер при инициализации и док и синхронизацию паролей. и rig опционально и .files, и rig должен все по возможности активировать и настройки rig должне переноситься (я начинал это делать, проверь по веткам и доделай) и риг в том чесле должен настраивать tmux и omp. доделай все.
-   и еще пароли должны подставляться в firefox, а док не должен выскакивать если курсор около границы, только если он на границе 300мс+
-   и файрфокс должен авторизовываться автоматически при инициализации ubuntu-tweaks
-   конечно, перед этим должен быть установлен и настроен passwords-app и из него и будут браться пароли для всех авторизаций автоматически. еще вот это отстой: «! Failed to copy one-time code to clipboard — No clipboard utilities available. Please install xsel, xclip, wl-clipboard…» git, gh -- тоже должны быть установлены и настроены. убунту из коробки вообще тлен какой-то даже curl нету. и brew пусть ставится для линукса и если после будут нужны доп действия тоже пусть делаются. и конечно же zsh должен быть установлен и активирован в самом начале» — answered by the `init`
-   pipeline and the modules it names; this slice's part is *Service modules* (ssh server,
-   passwords-app, Firefox).
-
-9. «открой мне на ubuntu-pc на ultra по ssh tailscale в наглядном виде все настройки с пояснениями на
-   русском и значений. и доделай все. и настрой чтобы ubuntu-tweaks так же устанавливал и включел ssh
-   сервер при инициализации и док и синхронизацию паролей. и rig опционально и .files, и rig должен все
-   по возможности активировать и настройки rig должне переноситься (я начинал это делать, проверь по
-   веткам и доделай) и риг в том чесле должен настраивать tmux и omp. доделай все.
-   и еще пароли должны подставляться в firefox, а док не должен выскакивать если курсор около границы,
-   только если он на границе 300мс+
-   и файрфокс должен авторизовываться автоматически при инициализации ubuntu-tweaks
-   конечно, перед этим должен быть установлен и настроен passwords-app и из него и будут браться пароли
-   для всех авторизаций автоматически. еще вот это отстой: «! Failed to copy one-time code to clipboard
-   — No clipboard utilities available. Please install xsel, xclip, wl-clipboard…» git, gh -- тоже должны
-   быть установлены и настроены. убунту из коробки вообще тлен какой-то даже curl нету. и brew пусть
-   ставится для линукса и если после будут нужны доп действия тоже пусть делаются. и конечно же zsh должен
-   быть установлен и активирован в самом начале» — the `init` pipeline and the base modules (see *Init
-   pipeline*, *Base modules*); the optional steps 10, rig and `.files`, are *Optional modules: rig, dotfiles*.
 11. «надо чтобы ставился ctmux мой, это обертка над cmux с лучшей поддержкой tmux. его должен rig ставить.
     надо убедиться что будет не только на маке но и на убунте работать эффективно» — `ctmux` is a
     first-class rig tool (`tools.items.ctmux`), installed by `rig activate` on macOS and Ubuntu; see
     *Optional modules: rig, dotfiles*.
+12. «а еще нужно чтобы ставились эти твики для файрфокса: - https://github.com/alex-mextner/firefox-passkey-qr — установщик passkey-qr. Перед каждым шагом он спрашивает
+   подтверждение. Если Bluetooth на ПК нет, а HA найден, он сам ставит мост. Если Bluetooth есть, этот шаг пропускается.» — the `firefox-passkey-qr` module (see *Service modules*).
+13. «когда все доделаешь начни применение на ubuntu-pc, попутно доработай все что пойдет не так чтобы когда я буду новые свои машины настривать все прошло как по маслу в одну команду» — `init` is one command on a fresh machine (`scripts/bootstrap.sh`), its manual leftovers are printed at the end (see *Init pipeline*, *Manual steps*); the apply on `ubuntu-pc` follows the integrated release.
 
 ## Requirements
 
@@ -163,6 +146,7 @@ Covered by `tests/test_launcher.py`.
 | `bundles [--show NAME]` | Read-only: the settings bundles with origin, key count, description, whether they apply here, and the shadowed, duplicated and conflicting keys; `--show` prints one bundle's merged result (see *Settings bundles*). |
 | `bundle-move <bundle> <key-or-glob>... [--commit]` | Moves matching keys, with their comments, from whichever bundle holds them into `<bundle>`. Preview by default. |
 | `note <target> "reason" [--origin shared\|overlay] [--commit]` | Adds, changes or removes the reason (comment) of a bundle key, a package or a system value. Preview by default. |
+| `show [--changed\|--all] [--panel ID] [--format text\|md\|html] [--output FILE] [--ssh [USER@]HOST]` | Read-only Russian overview of all settings of this machine (or, with `--ssh`, another one) grouped by Settings panel, with explanations, readable values, defaults and a status (see *show*). |
 
 Global flags, accepted before or after the command: `--profile DIR`, `--machine NAME`,
 `--only <name,…>` (modules for `apply`/`status`, panels for `capture`).
@@ -999,6 +983,73 @@ match), `bundles` (a table, bundle name → list of globs: where new keys go), `
 (`org/gnome/x/**` is `/org/gnome/x/**`); an unknown key is invalid config. A profile cannot weaken
 the built-in `secret`/`identity`/`hardware` exclusions: they are evaluated before anything the
 profile adds, and `include` never lifts them.
+
+### show
+
+`ubuntu-tweak show` answers the first sentence of request 9: a readable Russian overview of **all
+settings of a machine** with explanations and current values. It is read-only (the only file it
+ever writes is `--output`) and has no `--commit`.
+
+```
+ubuntu-tweak show [--changed | --all] [--panel ID] [--format text|md|html] [--output FILE]
+                  [--ssh [USER@]HOST [--ssh-option KEY=VALUE ...]]
+```
+
+- **Grouping.** By GNOME Settings panel, in `panels.toml` order, with the Russian panel titles of
+  `ubuntu_tweaks/show/descriptions_ru.toml`. Panel membership is the capture rules'
+  (`capture.rules.Rules.panel_rule`): `show` has no table of its own. Keys no rule claims go to the
+  last section, `other` (Прочее). Panels with nothing to show are listed in one line, not as sections.
+- **Per key**: the dconf path, a Russian explanation, the current effective value in a readable form,
+  the default, and a status: `изменено вами` (user value differs from the default, or the key has no
+  schema to compare with), `задано файлом-переопределением` (no user value, but
+  `~/.config/glib-2.0/settings/keyfile` sets it; the override then *is* the default shown) or
+  `по умолчанию` (shown only with `--all`, also for a user value equal to the default).
+  `--changed` (default) lists changed and overridden keys; `--all` adds every key of every
+  fixed-path schema (instances of relocatable schemas only when they have a user value).
+  `--panel ID` limits to one panel id (or `other`); an unknown id is invalid config (exit 2).
+- **Explanation.** The hand-written text of `descriptions_ru.toml` (`[keys."<schema>"]`, `[[rule]]`
+  families such as window sizes, per-application notification settings, the retired dash2dock-lite).
+  A key without a hand-written text falls back to the schema's own `<summary>` marked
+  `(описание из схемы, без перевода)`, and a key with no schema on the machine says so. The file
+  is validated at load (a wrong type is exit 2) and a test requires Cyrillic text in every entry.
+- **Readable values** (`show/values.py`, golden-tested): booleans `Вкл`/`Выкл`; durations as
+  `5 мин`, `1 ч 5 мин` (a key's `unit` is `seconds|minutes|ms|percent|pixels|size|unix|bytes`, `zero`
+  names the value 0: `никогда`); lists as one bullet per item; enum values as `nick — meaning`
+  (`[enums."<schema>"."<key>"]`); colours `#rrggbb` (also `#rrggbbaa`, GDK 12-digit and `rgb()`) with a
+  swatch in HTML; keybindings as `Super + ←`, `Ctrl + Alt + T`, `не назначено`, `отключено`; window
+  sizes `1200 × 800 пикс.`; Unix timestamps as UTC.
+- **Masking.** A key is shown as `скрыто` (nothing of its value is kept in the report, not even the
+  raw text) when the capture rules class it secret/identity/hardware (`Rules.hard_exclude`, or a
+  `skip` panel rule of those classes: gsconnect pairing, RDP key/cert, Wi-Fi identities, accounts)
+  or when the capture secret scanner (`scan_value`) finds a token, key block, e-mail or LAN address
+  in the value. A hidden key shows only its key name (`…/tls-key`), because its directory can carry
+  an identity (a device id, a connection uuid). Four or more instances of one relocatable key fold
+  into one row of `instance: value` lines (hidden instances: `скрыто`); the counts in the summary
+  are of the rows shown, after folding.
+- **Outside dconf**, as extra sections: *Файлы настроек* (default applications from
+  `mimeapps.list`, monitors from `monitors.xml` without serial numbers, autostart entries by name
+  and enabled/disabled state, never their commands), *Время, язык и клавиатура*
+  (`timedatectl show`, `localectl status`), *Пакеты* (counts only: apt total, apt manual, snap) and
+  *Модули ubuntu-tweaks* (`list` data; local runs only). A missing tool or file is `нет данных`.
+- **Formats.** `text` (default) and `md` go to stdout unless `--output` is given; `html` is one
+  self-contained file written to `--output`, default `/tmp/ubuntu-tweak-show-<machine>.html`
+  (mode 0600): inline CSS only, no JavaScript, no external request, a table of contents of
+  anchor links, one `<details>` per panel and extra section, light and dark through
+  `prefers-color-scheme`, all text HTML-escaped.
+- **`--ssh [USER@]HOST`** shows another machine without installing or copying anything to it. The
+  probes run there through `ssh -o BatchMode=yes` (keys and agent, never a password prompt;
+  `--ssh-option KEY=VALUE` adds `-o KEY=VALUE`, repeatable): `dconf dump /` (which reads the user's
+  database without a session bus), `cat` of the override keyfile, `mimeapps.list`, `monitors.xml`,
+  `timedatectl show`, `localectl status`, `apt-mark showmanual`, `dpkg-query -W`, `snap list`. Schemas,
+  descriptions and masking rules are the *local* machine's, so a key whose schema only exists on
+  the remote shows as raw GVariant text; the module section is omitted. The report label is the
+  `--machine` name when given, else the ssh host. A target that starts with `-` or contains
+  whitespace is invalid config.
+- **Code**: `ubuntu_tweaks/commands/show.py` (wiring), `ubuntu_tweaks/show/` (`collect`, `values`,
+  `descriptions` + `descriptions_ru.toml`, `catalog`, `system`, `ssh`, `model`, `render`,
+  `html_page`). Tests: `tests/test_show.py` (value formats, descriptions file, a `FakeBackend`
+  scenario with masking, folding and overrides, the three renderers, the extras with a fake
+  runner, the ssh argv) plus a manual live read-only run on the machine.
 
 ### Plan and actions
 
