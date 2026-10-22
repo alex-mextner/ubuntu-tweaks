@@ -29,7 +29,7 @@ from ubuntu_tweaks.actions import Action, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ExitCode
 
-MODIFIED_KINDS = frozenset({"set-key", "link-replace"})
+MODIFIED_KINDS = frozenset({"set-key", "link-replace", "dotfiles-link-replace"})
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

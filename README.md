@@ -88,11 +88,19 @@ error (exit 2).
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
 (local extension); `memguard` and `apple-hid-battery` are root-level `system` modules. The `init` pipeline is a
-module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `brew` 40, `ssh-server` 50,
+module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `dotfiles` 35, `shell-rc` 36,
+`brew` 40, `ssh-server` 50,
 `passwords-app` 60 / `passwords-app-polkit` 61, `firefox` 70 / `firefox-policy` 71 / `firefox-autologin` 72 /
 `firefox-passkey-qr` 73 (off by default), `hyperdock` 80, then your settings and `files/`, then the opt-in `rig`
-100 (+ tmux, omp, ctmux) and `dotfiles` 110 (spec: *Init pipeline*; switch one off with
+100 (+ tmux, omp, ctmux) (spec: *Init pipeline*; switch one off with
 `[modules.<name>] enabled = false` in `machine.toml`).
+
+**Your dotfiles repository comes first.** `dotfiles` clones it right after `git` and `gh`, and the plan links its
+shell rc files (`.zprofile`, `.zshrc`, `.profile` at the repository root) into `$HOME`; a real file already there is
+backed up first, and a name your profile's `files/` links wins. `shell-rc` only creates a minimal `~/.zprofile` /
+`~/.zshrc` for what neither has. The git identity is taken from `[git]` in the profile, else what `git config --global`
+already has, else the repository's `.gitconfig`, else `gh api user`; only when nothing knows it, the plan warns
+(not an error). Settings that wait for extension code the same run installs are listed as *staged*, not skipped.
 
 `passwords-app`, `passwords-app-polkit`, `firefox`, `firefox-policy`, `firefox-autologin`, `firefox-passkey-qr`
 and `rig` integrate tools published by the project author (passwords-app, firefox-passkey-qr, rig, ctmux). Each

@@ -35,6 +35,7 @@ PIPELINE_MODULES = (
     "zsh",
     "clipboard",
     "git-gh",
+    "shell-rc",
     "brew",
     "ssh-server",
     "passwords-app",
@@ -98,7 +99,9 @@ class EmptyMachine(TempDirCase):
                 *toggle.build(ctx, backend),
             ]
 
-        shim = types.SimpleNamespace(build=build, warnings=base.warnings)
+        shim = types.SimpleNamespace(
+            build=build, warnings=lambda ctx, backend: base.warnings(ctx, backend, process=self.runner)
+        )
         for patcher in (
             mock.patch.object(planners, "discover_planners", return_value=[shim]),
             # `apply` binds its default backend factory at definition time: patch the default, not the module name
@@ -140,10 +143,11 @@ class InitPreviewTests(EmptyMachine):
         order = [
             "apt: install",
             "chsh: set the login shell",
-            "create <tmp>/home/.zprofile",
-            "create <tmp>/home/.zshrc",
             "needs manual: gh auth login",
             "gh auth setup-git",
+            "run dotfiles:",
+            "create <tmp>/home/.zprofile",
+            "create <tmp>/home/.zshrc",
             "create /home/linuxbrew/.linuxbrew owned by",
             "brew: run the Homebrew installer",
         ]

@@ -12,6 +12,7 @@ from tests.util import TempDirCase, write
 from ubuntu_tweaks.actions import ActionFailed, ManualStepRequired, Phase, Plan
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.identity import Location
 from ubuntu_tweaks.planners import base
 from ubuntu_tweaks.planners import packages as packages_planner
 from ubuntu_tweaks.process import CommandError, CommandResult, FakeProcess
@@ -260,6 +261,33 @@ class RcFileTests(BaseCase):
         only = frozenset({"zsh"})
         self.assertEqual(len(self.plan(FakeProcess(), only)), 2)
 
+    def with_dotfiles(self, *names: str) -> Path:
+        dotfiles = self.tmp / "dotfiles"
+        dotfiles.mkdir()
+        for name in names:
+            write(dotfiles / name, "# the repository's own\n")
+        self.profile = Profile(self.profile.root, "home", location=Location(self.profile.root, dotfiles))
+        return dotfiles
+
+    def test_a_file_the_dotfiles_repository_provides_is_not_created_either(self) -> None:
+        self.module("zsh", self.MODULE)
+        self.with_dotfiles(".zprofile")
+        self.assertEqual(
+            [a.describe() for a in self.plan(FakeProcess()).actions],
+            ["create ~/.zshrc (brew shellenv, ~/.local/bin on PATH); only because it is absent"],
+        )
+
+    def test_the_generic_files_are_only_the_fallback_for_what_neither_provides(self) -> None:
+        self.module("zsh", self.MODULE)
+        self.with_dotfiles(".zprofile", ".zshrc", ".profile")
+        self.assertEqual(self.plan(FakeProcess()).actions, ())
+
+    def test_a_disabled_dotfiles_module_provides_nothing(self) -> None:
+        self.module("zsh", self.MODULE)
+        self.with_dotfiles(".zprofile", ".zshrc")
+        write(self.profile.profile_toml, "[modules.dotfiles]\nenabled = false\n")
+        self.assertEqual(len(self.plan(FakeProcess())), 2)
+
 
 class GitTests(BaseCase):
     MODULE = (
@@ -321,17 +349,77 @@ class GitTests(BaseCase):
         action.run()
         self.assertEqual(executed, [("git", "config", "--global", "user.email", "ada@example.org")])
 
-    def test_no_identity_in_the_profile_is_never_invented_and_warns(self) -> None:
+    def test_nothing_that_knows_the_identity_is_never_invented_and_warns_with_what_to_do(self) -> None:
         write(self.profile.profile_toml, "")
         kinds = [a.kind for a in self.plan(FakeProcess()).actions]
         self.assertNotIn("git-config", kinds)
         ctx = Context(self.repo, self.profile)
+        (warning,) = base.warnings(ctx, FakeBackend(), process=FakeProcess())
+        self.assertIn("user.name and user.email not set and nothing knows it", warning)
+        self.assertIn("not an error", warning)
+        self.assertIn("`[git] name` / `email` in profile.toml", warning)
+
+    def identity_runner(self, **responses: CommandResult) -> FakeProcess:
+        no = CommandResult(1)
+        gitconfig = str(self.dotfiles / ".gitconfig")
+        return FakeProcess(
+            {
+                ("git", "config", "--global", "--get", "user.name"): responses.get("global_name", no),
+                ("git", "config", "--global", "--get", "user.email"): responses.get("global_email", no),
+                ("git", "config", "-f", gitconfig, "--get", "user.name"): responses.get("file_name", no),
+                ("git", "config", "-f", gitconfig, "--get", "user.email"): responses.get("file_email", no),
+                ("gh", "api", "user"): responses.get("gh", no),
+            }
+        )
+
+    def with_dotfiles(self, *, gitconfig: bool = True) -> None:
+        self.dotfiles = self.tmp / "dotfiles"
+        self.dotfiles.mkdir()
+        if gitconfig:
+            write(self.dotfiles / ".gitconfig", "[user]\n\tname = X\n")
+        self.profile = Profile(self.profile.root, "home", location=Location(self.profile.root, self.dotfiles))
+        write(self.profile.profile_toml, "")
+
+    def test_a_global_identity_that_git_already_has_is_left_alone_without_a_warning(self) -> None:
+        self.with_dotfiles()
+        runner = self.identity_runner(global_name=ok("Bob\n"), global_email=ok("bob@example.org\n"))
+        self.assertEqual([a for a in self.plan(runner).actions if a.kind == "git-config"], [])
+        self.assertEqual(base.warnings(Context(self.repo, self.profile), FakeBackend(), process=runner), [])
+
+    def test_an_unset_identity_is_read_from_the_dotfiles_gitconfig(self) -> None:
+        self.with_dotfiles()
+        runner = self.identity_runner(file_name=ok("Ada\n"), file_email=ok("ada@example.org\n"))
+        actions = [a for a in self.plan(runner).actions if a.kind == "git-config"]
+        shown = f"~/{self.dotfiles.name}/.gitconfig"
         self.assertEqual(
-            base.warnings(ctx, FakeBackend()),
+            [a.describe().replace(str(self.dotfiles / ".gitconfig"), shown) for a in actions],
             [
-                "git: [git] name and email not set in profile.toml / machine.toml: git config user.name and user.email stays as it is"
+                f"git config --global user.name Ada (now unset; from {shown})",
+                f"git config --global user.email ada@example.org (now unset; from {shown})",
             ],
         )
+        self.assertEqual(base.warnings(Context(self.repo, self.profile), FakeBackend(), process=runner), [])
+
+    def test_gh_fills_what_the_dotfiles_do_not_know_with_the_noreply_address(self) -> None:
+        self.with_dotfiles(gitconfig=False)
+        runner = self.identity_runner(gh=ok('{"login": "ada", "id": 42, "name": null, "email": null}'))
+        actions = [a for a in self.plan(runner).actions if a.kind == "git-config"]
+        self.assertEqual(
+            [a.describe() for a in actions],
+            [
+                "git config --global user.name ada (now unset; from gh api user)",
+                "git config --global user.email 42+ada@users.noreply.github.com "
+                "(now unset; from gh api user (GitHub noreply address))",
+            ],
+        )
+
+    def test_the_profile_wins_over_every_other_source_per_key(self) -> None:
+        self.with_dotfiles()
+        write(self.profile.profile_toml, '[git]\nname = "Grace"\n')
+        runner = self.identity_runner(file_name=ok("Ada\n"), file_email=ok("ada@example.org\n"))
+        actions = [a.describe() for a in self.plan(runner).actions if a.kind == "git-config"]
+        self.assertTrue(actions[0].startswith("git config --global user.name Grace (now unset)"))
+        self.assertTrue(actions[1].startswith("git config --global user.email ada@example.org"))
 
     def test_unknown_git_key_is_invalid_config(self) -> None:
         write(self.profile.profile_toml, '[git]\nsigningkey = "x"\n')

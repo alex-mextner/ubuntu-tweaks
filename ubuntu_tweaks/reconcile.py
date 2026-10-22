@@ -55,6 +55,7 @@ from ubuntu_tweaks.settings import (
     default_extension_roots,
     extension_schema_dirs,
 )
+from ubuntu_tweaks.setkey import STAGED
 
 type BackendFactory = Callable[[Context], SettingsBackend]
 
@@ -133,16 +134,27 @@ def header_lines(ctx: Context, title: str) -> list[str]:
 
 
 def print_warnings(warnings: list[str]) -> None:
-    if not warnings:
-        return
+    """Warnings first; lines that wait for extension code this very run installs (``staged``) get their own block
+    that says they are not errors."""
+    real = [line for line in warnings if not line.startswith(f"{STAGED} ")]
+    staged = [line for line in warnings if line.startswith(f"{STAGED} ")]
     if ui.rich():
-        print()
-        print(ui.section(ui.t("warnings"), len(warnings), "need"))
-        for line in warnings:
-            print("\n".join(ui.wrap(line, first="  ", names=("yellow",))))
+        for title, lines, kind, color in (
+            (ui.t("warnings"), real, "need", "yellow"),
+            (ui.t("staged"), staged, "info", "cyan"),
+        ):
+            if lines:
+                print()
+                print(ui.section(title, len(lines), kind))
+                for line in lines:
+                    print("\n".join(ui.wrap(line, first="  ", names=(color,))))
         return
-    print("Warnings:")
-    print("\n".join(f"  {line}" for line in warnings))
+    if real:
+        print("Warnings:")
+        print("\n".join(f"  {line}" for line in real))
+    if staged:
+        print("Staged (not an error: the same `apply --commit` applies them once the extension code is installed):")
+        print("\n".join(f"  {line}" for line in staged))
 
 
 def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sudo: bool, title: str) -> None:
@@ -168,12 +180,18 @@ DOTFILES_MODULE = "dotfiles"
 
 
 def _profile_acquisition(ctx: Context, plan: Plan) -> tuple[Action, ...]:
-    """What to run first when the profile is missing and this plan would clone it: the BASE-phase tool installs
-    (``git`` and ``gh`` come from there), then the dotfiles module's action, and nothing else."""
+    """What to run first when the profile is missing and this plan would clone it: the BASE-phase actions that
+    sort before the dotfiles module (``git`` and ``gh`` come from there), then the module's action, and nothing
+    else. The shell and brew steps sort after it, so the repository's rc files are in place before they run."""
     if ctx.profile.exists:
         return ()
     clone = tuple(a for a in plan.actions if a.kind == "system-module" and a.scope == DOTFILES_MODULE)
-    return (*(a for a in plan.actions if a.phase == Phase.BASE), *clone) if clone else ()
+    if not clone:
+        return ()
+    before = tuple(
+        a for a in plan.actions if a.phase == Phase.BASE and (a.phase, a.order) < (clone[0].phase, clone[0].order)
+    )
+    return (*before, *clone)
 
 
 def _arrived_profile(ctx: Context, relocate: Callable[[], Location] | None) -> Profile | None:

@@ -348,6 +348,8 @@ _KIND_WHY: dict[str, dict[str, str]] = {
         "link-replace": "something else is in the way: it is backed up first, then replaced by the link",
         "cli-link": "puts `ubuntu-tweak` on your PATH through ~/.local/bin",
         "cli-link-replace": "something else is at ~/.local/bin/ubuntu-tweak: backed up, then replaced",
+        "dotfiles-link": "a link from $HOME to a file of your dotfiles repository (its .zprofile, .zshrc, .profile)",
+        "dotfiles-link-replace": "another file is in $HOME: it is backed up, then replaced by a link to the dotfiles repository's file",
         "enable": "turns the extension on in GNOME Shell (loads after the next login)",
         "disable": "turns off a conflicting or retired extension",
         "set-key": "the live value differs from the one your modules/profile declare",
@@ -372,6 +374,8 @@ _KIND_WHY: dict[str, dict[str, str]] = {
         "link-replace": "место занято чем-то другим: сначала бэкап, затем замена ссылкой",
         "cli-link": "кладёт `ubuntu-tweak` в PATH через ~/.local/bin",
         "cli-link-replace": "по пути ~/.local/bin/ubuntu-tweak лежит другое: бэкап и замена",
+        "dotfiles-link": "ссылка из $HOME на файл вашего dotfiles-репозитория (его .zprofile, .zshrc, .profile)",
+        "dotfiles-link-replace": "в $HOME лежит другой файл: бэкап, затем замена ссылкой на файл dotfiles-репозитория",
         "enable": "включает расширение в GNOME Shell (загрузится после перелогина)",
         "disable": "выключает конфликтующее или устаревшее расширение",
         "set-key": "текущее значение отличается от заданного в модулях/профиле",
@@ -446,6 +450,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "init.preview_footer": "Nothing changed. This was a preview; run `ubuntu-tweak init --commit` to set this machine up.",
         "update.preview_footer": "Nothing changed. This was a preview; run `ubuntu-tweak update --commit` to pull and apply.",
         "warnings": "Warnings",
+        "staged": "Staged until the extension code is installed (not an error, nothing to do: the same `apply --commit` applies them)",
     },
     "ru": {
         "header.machine": "машина",
@@ -513,6 +518,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "init.preview_footer": "Ничего не изменено. Это предпросмотр; `ubuntu-tweak init --commit` настроит эту машину.",
         "update.preview_footer": "Ничего не изменено. Это предпросмотр; `ubuntu-tweak update --commit` обновит код и применит план.",
         "warnings": "Предупреждения",
+        "staged": "Отложено до установки кода расширения (не ошибка, ничего делать не нужно: тот же `apply --commit` применит)",
     },
 }
 

@@ -1,6 +1,7 @@
 """apply / init / doctor / update ask for root once, up front, and only when they are going to use it."""
 
 import argparse
+import shlex
 import contextlib
 import io
 from collections.abc import Callable
@@ -15,7 +16,9 @@ try:
     from tests.test_apply_commands import MY_PLANNERS, CloneProfile, CommandScenario
     from ubuntu_tweaks import planners, reconcile
     from ubuntu_tweaks.actions import Action
+    from ubuntu_tweaks.cli import build_parser
     from ubuntu_tweaks.commands import apply, doctor, init, update
+    from ubuntu_tweaks.commands._support import rerun_command
     from ubuntu_tweaks.context import Context
     from ubuntu_tweaks.elevation import (
         EARLIER_STEPS_RAN,
@@ -301,6 +304,34 @@ class CommandRootTests(WiringScenario):
         self.assertEqual(self.events, ["sudo", "install", "run:timezone"])  # one prompt for both root steps
         self.assertEqual(self.fake_process.executed, [(SUDO_ASK, None)])
 
+    def test_apply_commit_asks_once_then_installs_the_packages_then_runs_the_plan(self) -> None:
+        present = {"tmux": False}
+        needed = [doctor.Requirement("tmux", "tmux", "module x", lambda: present["tmux"])]
+        self.wanted = [RootStep(self.events)]
+        args = argparse.Namespace(commit=True, no_sudo=False)
+
+        def run_apply() -> int:
+            with (
+                mock.patch.object(doctor, "requirements", return_value=needed),
+                mock.patch.object(
+                    doctor,
+                    "install",
+                    side_effect=lambda absent: (self.events.append("install"), present.update(tmux=True)),
+                ),
+                mock.patch.object(apply, "root_session", side_effect=lambda *a, **k: self.root()),
+                mock.patch.dict(reconcile.apply.__kwdefaults__, {"backend_factory": self.factory}),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                return apply.run(self.context(), args)
+
+        self.assertEqual(run_apply(), 0)
+        self.assertEqual(self.events, ["sudo", "install", "run:timezone"])  # one prompt for both root steps
+        self.assertEqual(self.fake_process.executed, [(SUDO_ASK, None)])
+
+        self.assertEqual(run_apply(), 0)  # the second run changes nothing and asks nothing
+        self.assertEqual(self.events, ["sudo", "install", "run:timezone"])
+        self.assertEqual(self.fake_process.executed, [(SUDO_ASK, None)])
+
     def test_init_where_root_is_impossible_names_init_commit(self) -> None:
         self.wanted = [RootStep(self.events)]
         with self.no_new_privs(), self.assertRaises(RootUnavailable) as caught:
@@ -334,6 +365,21 @@ class UpdateRootTests(WiringScenario):
         (command,) = spawn.call_args.args
         self.assertEqual((command[2:4], "--no-sudo" in command), (["apply", "--commit"], False))
         self.assertEqual(code, 6)  # the child's exit 6 (root not obtainable) is update's own
+
+
+class RerunCommandTests(unittest.TestCase):
+    def test_the_command_is_the_subcommand_plus_the_global_flags_given(self) -> None:
+        self.assertEqual(rerun_command(argparse.Namespace(), "apply --commit"), "ubuntu-tweak apply --commit")
+        args = argparse.Namespace(profile="/my profile", machine=None, only="b,a", dotfiles_repo="me/.files")
+
+        command = rerun_command(args, "apply --commit")
+
+        self.assertEqual(
+            command, "ubuntu-tweak apply --commit --profile '/my profile' --only b,a --dotfiles-repo me/.files"
+        )
+        parsed = build_parser().parse_args(shlex.split(command)[1:])  # what we print must be accepted
+        self.assertEqual((parsed.profile, parsed.only, parsed.dotfiles_repo), ("/my profile", "b,a", "me/.files"))
+        self.assertTrue(parsed.commit)
 
 
 if __name__ == "__main__":

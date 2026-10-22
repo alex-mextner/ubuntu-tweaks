@@ -82,6 +82,10 @@ class ResolvedKey:
 @dataclass(frozen=True)
 class Unresolved:
     reason: str
+    staged: bool = False  # not skipped for good: it waits for code the same ``apply --commit`` installs
+
+
+STAGED = "staged"
 
 
 class SchemaIndex:
@@ -127,6 +131,7 @@ class SchemaFacts:
     directory: str | None  # fixed dconf directory when known
     relocatable: bool
     keys: Mapping[str, str | None] | None  # key name -> type string (None: enum/flags) from schema XML
+    staged: bool = False  # not installed because the module's code is not checked out yet; this plan installs it
 
 
 def extension_dir(ctx: Context, manifest: Manifest) -> Path | None:
@@ -175,7 +180,11 @@ def module_schema_facts(ctx: Context, manifest: Manifest, index: SchemaIndex, sc
     directory = extension_dir(ctx, manifest)
     found = _read_schema_xml(directory / "schemas", schema_id) if directory is not None else None
     if found is None:
-        return SchemaFacts(schema_id, False, None, False, None)
+        # a submodule that is not checked out yet: the plan's own `submodule` action brings the code and the schema
+        staged = manifest.source.kind is SourceKind.SUBMODULE and (
+            directory is None or not (directory / "metadata.json").exists()
+        )
+        return SchemaFacts(schema_id, False, None, False, None, staged)
     path, keys = found
     return SchemaFacts(schema_id, False, path, path is None, keys)
 
@@ -185,6 +194,12 @@ def module_target(facts: SchemaFacts, backend: SettingsBackend, key: str) -> Res
     if facts.relocatable:
         return Unresolved(f"{facts.schema} is relocatable, a module preset needs a schema with a fixed path")
     if facts.directory is None:
+        if facts.staged:
+            return Unresolved(
+                f"schema {facts.schema} arrives with the extension code this plan installs: applied by the same "
+                "`apply --commit` once it is there",
+                staged=True,
+            )
         return Unresolved(f"schema {facts.schema} is not installed and its schemas/*.gschema.xml was not found")
     if facts.installed:
         if not backend.has_key(facts.schema, key):
@@ -224,18 +239,19 @@ def collapse(entries: Iterable[Entry]) -> list[Entry]:
 
 
 class Skips:
-    """Keys that were left out, grouped per file and section so the preview stays readable."""
+    """Keys that were left out, grouped per file and section so the preview stays readable. A ``staged`` group
+    is not left out for good: it waits for extension code the same ``apply --commit`` installs."""
 
     def __init__(self) -> None:
-        self._groups: dict[tuple[str, str, str], list[str]] = {}
+        self._groups: dict[tuple[str, str, str, bool], list[str]] = {}
 
-    def add(self, source: str, section: str, key: str, reason: str) -> None:
-        self._groups.setdefault((source, section, reason), []).append(key)
+    def add(self, source: str, section: str, key: str, reason: str, *, staged: bool = False) -> None:
+        self._groups.setdefault((source, section, reason, staged), []).append(key)
 
     def lines(self) -> list[str]:
         return [
-            f"skipped {source}{f' [{section}]' if section else ''} {', '.join(keys)}: {reason}"
-            for (source, section, reason), keys in self._groups.items()
+            f"{STAGED if staged else 'skipped'} {source}{f' [{section}]' if section else ''} {', '.join(keys)}: {reason}"
+            for (source, section, reason, staged), keys in self._groups.items()
         ]
 
 

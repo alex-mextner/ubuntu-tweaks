@@ -66,7 +66,7 @@ def _resolve(
                 continue
             target = module_target(module_schema_facts(ctx, manifest, index, schema_id), backend, seed.key)
             if isinstance(target, Unresolved):
-                skips.add(source, manifest.name, seed.key, target.reason)
+                skips.add(source, manifest.name, seed.key, target.reason, staged=target.staged)
                 continue
             value = provider(seed_context)
             validate_text(backend, target, value.text, source)

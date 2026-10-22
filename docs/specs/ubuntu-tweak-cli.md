@@ -81,6 +81,10 @@ as any behavior change.
     the plan in the same run, with no question in between (*Repair in one command*, *Elevation*). Where `rig`
     differs and no decision of the user is recorded, the difference is listed under *Decisions*.
 19. «И --dry-run добавь везде» — every command accepts `--dry-run` (*Dry run*).
+20. «Почему zprofile не из .files» — the dotfiles repository's own shell rc files (`.zprofile`, `.zshrc`,
+    `.profile`) are what the machine gets; the generic `shell-rc` step only fills in what neither the profile nor
+    the repository has, and the git identity is taken from the profile, the machine, the repository's `.gitconfig`
+    or `gh` instead of being left unset (*rc files from the repository*, *git and gh*).
 
 ## Requirements
 
@@ -107,7 +111,7 @@ no default. `tests/test_no_identity.py` fails on a new occurrence of the author'
 `tests/identity_allowlist.txt` lists each allowed path and why (the project's own repository URL, the upstream
 URL of a bundled extension, the tool references of the author-published modules). The private profile never
 contains engine code.
-Whatever else a dotfiles repository holds (zsh, zplug, brew) is not touched by this system; `ubuntu/` is
+The shell rc files at the root of a dotfiles repository (`.zprofile`, `.zshrc`, `.profile`) are linked into `$HOME` by the plan (*rc files from the repository*); whatever else it holds (zplug, brew, aliases) is not touched by this system; `ubuntu/` is
 self-contained. Profile location: `--profile DIR` > `$UBUNTU_TWEAK_PROFILE` > the profile found by
 *Profile discovery*. An explicit location that does not exist is invalid config (exit 2); no discovered
 profile means "no profile" and only module defaults apply, with the header saying what was looked for.
@@ -378,13 +382,14 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 1 | base tools + `zsh` installed **and** set as the login shell, first | `base-tools` (10), `zsh` (11) |
 | 2 | clipboard tools (`wl-clipboard`, `xclip`, `xsel`) | `clipboard` (20) |
 | 3 | `git` + `gh` installed and configured | `git-gh` (30) |
+| 3b | your dotfiles repository (found through gh) cloned with the profile in it, its shell rc files linked (`dotfiles` is on by default and a no-op when there is none), then the generic rc files only for what neither has | `dotfiles` (35), `shell-rc` (36) |
 | 4 | Homebrew for Linux and its follow-up actions | `brew` (40) |
 | 5 | ssh server | `ssh-server` (50) |
 | 6 | passwords-app: install, enable unit, native host, polkit action | `passwords-app` (60), `passwords-app-polkit` (61) |
 | 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
-| 10 | rig (opt-in: + tmux, omp, `ctmux`) and your dotfiles repository (found through gh) cloned, with the profile in it; `dotfiles` is on by default and a no-op when there is none | `rig` (100), `dotfiles` (110) |
+| 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
 `ctmux` is not a module: it is a first-class rig tool (`tools.items.ctmux`), installed by `rig activate`
 inside step 10.
@@ -402,6 +407,8 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `zsh` | 11 | `base` | on |
 | `clipboard` | 20 | `base` | on |
 | `git-gh` | 30 | `base` | on |
+| `dotfiles` | 35 | `base` (so the profile arrives before the shell and brew steps; it was 110) | on |
+| `shell-rc` | 36 | `base` | on |
 | `brew` | 40 | `base` | on |
 | `ssh-server` | 50 | `system` | on |
 | `passwords-app` | 60 | `system` | on |
@@ -412,7 +419,6 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
 | `rig` | 100 | `system` | off |
-| `dotfiles` | 110 | `system` | on |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
 
@@ -526,7 +532,8 @@ Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
 |---|---|
 | `base-tools` | apt: `curl wget ca-certificates git gnupg openssh-client zsh build-essential procps file zip unzip 7zip xz-utils bzip2 jq libsecret-tools` (verified with `apt-cache policy` on Ubuntu 26.04: all exist; `p7zip-full` does not, `7zip` replaces it). `build-essential procps file curl git` are Homebrew's prerequisites; the archivers answer "zip is missing" on a stock install; `libsecret-tools` (`secret-tool`) is for the Secret Service scripts of the passwords-app and Firefox modules. |
 | `clipboard` | apt: `wl-clipboard xclip xsel`: what `gh` looks for when it copies a one-time code (`! Failed to copy one-time code to clipboard: No clipboard utilities available`). |
-| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`); step `shell-rc`: `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone) **and not linked by the profile** (see *rc files* below); the mac-era dotfiles at the root of `.files` are not touched. |
+| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`). |
+| `shell-rc` | step `shell-rc` (own module since request 20, order 36, right after `dotfiles`): `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone) **and not provided** by the profile's `files/` or by the dotfiles repository (see *rc files* below, *rc files from the repository*): it is the pure fallback. |
 | `git-gh` | apt `git gh` (`gh` 2.46.0 is in the 26.04 `universe` archive, decided with `apt-cache policy gh`); steps `git-identity`, `gh-login`, `git-credential-helper`. |
 | `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it, or the profile links one of them), `tools` (`brew install uv oven-sh/bun/bun` unless `uv` and `bun` are already on `PATH`: what the passwords-app and Firefox modules run on) and `formulae` (`brew install` of `packages.toml` `brew`). A post waits for the module's install (`after` defaults to `install`) and does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
 
@@ -540,8 +547,18 @@ token_ref = "example/gh-token"         # optional: the keychain item that holds 
 host = "github.com"                    # optional
 ```
 
-`git-identity` runs `git config --global user.name` / `user.email` only for the keys set; without `[git]`
-nothing is planned and the plan prints a warning. `gh-login` takes the token **only** from the keychain
+`git-identity` sets `git config --global user.name` / `user.email`. Per key, the first source that knows it wins
+(request 20: an identity that is knowable is never left unset, and nothing is hardcoded in the engine):
+
+1. `[git] name` / `email` of the profile (enforced: drift when the global value differs);
+2. the value `git config --global` already holds: left as it is, nothing planned, no warning;
+3. `user.name` / `user.email` of `<dotfiles checkout>/.gitconfig` (read with `git config -f`; the file is not linked);
+4. `gh api user` when `gh` is logged in: the name (else the login) and the public e-mail (else
+   `<id>+<login>@users.noreply.github.com`).
+
+A planned value says where it came from (`from ~/.files/.gitconfig`, `from gh api user`). Only when no source
+knows a key does the plan warn, and the warning says what to do: it is not an error, git works until the first
+commit. `gh-login` takes the token **only** from the keychain
 item that `[git] token_ref` names (no default; the `keychain` CLI, GNOME Keyring / Secret Service), at run time:
 `keychain exec --no-prompt --caller ubuntu-tweaks --stdin <ref> -- gh auth login --hostname <host>
 --with-token`; the value is never in argv, an environment variable, a file, the profile or this process,
@@ -587,8 +604,9 @@ real fresh machine: the Homebrew installer running non-interactively against a p
 **rc files and the profile's `files/`.** The BASE phase runs before the FILES phase, so a file the profile links
 would be created or appended to by BASE and then replaced (with a backup) by the link. The rule, one for all:
 **BASE never creates or appends to an rc file that the profile's `files/` links** (shared or machine overlay).
-`shell-rc` leaves out `~/.zprofile` / `~/.zshrc` when the profile links that file, and the brew `shellenv` post
-(`unless_linked = [".bashrc", ".profile", ".bash_profile"]`) is not planned when the profile links any of them.
+`shell-rc` leaves out `~/.zprofile` / `~/.zshrc` when the profile links that file or the dotfiles repository
+provides it (*rc files from the repository*), and the brew `shellenv` post
+(`unless_linked = [".bashrc", ".profile", ".bash_profile"]`) is not planned when either links any of them.
 The profile's own file is then the one that puts brew's `shellenv` and `~/.local/bin` on `PATH`. The preview
 shows what remains, and `tests/test_planner_base.py` covers both. With `--only` the links of `files/` are not in
 the plan (they carry no module scope), so BASE keeps creating the rc files then.
@@ -610,9 +628,9 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | Step | Module | Why only you | How you complete it |
 |---|---|---|---|
 | `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set <your token_ref>` (GNOME keyring; the item `[git] token_ref` names, no default), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
-| git identity | `git-gh` | not planned, only warned | set `[git] name` / `email` in `profile.toml` |
+| git identity | `git-gh` | planned from the first source that knows it; only when none does: warned, not an error | set `[git] name` / `email` in `profile.toml`, or `git config --global user.name ...` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
-| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run); `--yes` only skips the apt confirmation, never the password. Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) the run stops with exit 6 and the command to run from a normal terminal, or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
+| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) the run stops with exit 6 and the command to run from a normal terminal, or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
 | polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
@@ -1086,7 +1104,9 @@ when python3 is missing) and exit 10 for a needed manual step; options arrive as
 
 ### The `dotfiles` module
 
-Init step 10 (request 9, generalized by request 14). `kind = "system"` with `root = false` (the installer runs as
+Init step 3b (request 9, generalized by request 14, moved before the shell and brew steps by request 20, `order` 35
+and `phase = "base"` instead of 110 and `system`; `apply --commit` therefore clones the profile right after the
+tools it needs and before `shell-rc` and `brew`). `kind = "system"` with `root = false` (the installer runs as
 the user, no sudo, see *Service modules*), **enabled by default** and a machine opts out with `[modules.dotfiles]
 enabled = false` in its `machine.toml`. It is a no-op with a clear message when there is nothing to find. Options
 (`[modules.dotfiles]` in `profile.toml` / `machine.toml`, JSON in `UBUNTU_TWEAK_MODULE_CONFIG`, never secrets):
@@ -1104,6 +1124,17 @@ missing) and exit 10 for a needed manual step. It asks `ubuntu_tweaks/identity.p
 ubuntu_tweaks.identity resolve`, *Profile discovery*) which repository to use and where, so the engine and the
 module always agree.
 
+**rc files from the repository (request 20).** The installer above links nothing; the *plan* does, through
+`ubuntu_tweaks/dotfiles_rc.py`. When the dotfiles checkout carries a shell rc file at its root, one of
+`.zprofile`, `.zshrc`, `.profile`, and the profile's `files/` does not link that name, the plan links
+`~/<name>` to the checkout's file (kinds `dotfiles-link` / `dotfiles-link-replace`, scope `dotfiles`; the
+repository's own `installer.sh` installs them the same way, by symlinks from `$HOME`). A real file already
+there is copied to `backup/<UTC timestamp>/` first (invariant 5). The profile wins (a name its `files/` links is
+never taken from the repository), `--only` drops the links, and `[modules.dotfiles] enabled = false` switches
+them off. This is what makes `shell-rc` a pure fallback (*Base modules*). Other files of the repository
+(`.gitconfig`, `.tmux.conf`, `.vimrc`, `aliases.zsh`, ...) are not linked: they are the author's and may not suit
+this machine (a mac `gpg.program`); only the git identity is read from `.gitconfig` (*git and gh*).
+
 | Situation | `install.sh` | `--check` |
 |---|---|---|
 | a repository is known and its checkout is absent | `gh repo clone <owner/name> <dir>` when `gh` is logged in, else `git clone https://github.com/<owner/name>` (a public repository); a URL or a path is `git clone`d as given; the checkout is recorded for the next command | drift: the checkout is missing |
@@ -1112,14 +1143,14 @@ module always agree.
 | gh is missing, logged out or unreachable and no checkout is on disk | exit 10: `needs manual: not logged in to GitHub: run `gh auth login``; never a prompt | drift (exit 3) with the same text |
 | the checkout is another repository (`origin`), a regular file, a directory that is not a checkout, behind with local changes, diverged | exit 10, nothing is changed | drift |
 
-- **It never touches non-profile files.** It writes nothing in `$HOME` but the checkout and the one state file
-  `~/.local/state/ubuntu-tweaks/dotfiles.json` (*Profile discovery*), links nothing, and fast-forwards only a
-  tree without local changes; tests assert a `.zshrc` in the repository stays byte-identical and `$HOME` holds
-  only the checkout.
-- **The profile arrives in the same run, before any other module runs.** The plan of `init`/`apply` is built
+- **It never touches non-profile files itself.** The installer writes nothing in `$HOME` but the checkout and the
+  one state file `~/.local/state/ubuntu-tweaks/dotfiles.json` (*Profile discovery*), links nothing, and
+  fast-forwards only a tree without local changes; tests assert a `.zshrc` in the repository stays byte-identical
+  and `$HOME` holds only the checkout. The shell rc files are linked by the plan (below), not by the installer.
+- **The profile arrives in the same run, before the shell and brew steps.** The plan of `init`/`apply` is built
   before the clone, so it holds the modules only and its header says the repository is not cloned yet. When the
-  profile was missing, `apply --commit` clones it **first**: the BASE-phase tool installs (`git`, `gh`) run, then the `dotfiles`
-  module's action, and no other action runs before it. Then it looks for the profile again (`identity.locate`), re-resolves the
+  profile was missing, `apply --commit` clones it **first**: the BASE-phase actions that sort before the `dotfiles`
+  module (the tool installs: `git`, `gh`), then the module's action, and no other action runs before it. Then it looks for the profile again (`identity.locate`), re-resolves the
   configuration, prints `profile: <dir> (cloned by this run)` and rebuilds the plan with it, so a profile that
   disables a module is honoured before that module runs, and one `init --commit` on a fresh machine applies the
   settings too. No other system module triggers it. If the clone failed, the run ends as before, with the
@@ -1202,7 +1233,7 @@ Scan, Logs) belong to `apps`, so `unmapped` only lists schemas no rule knows (ti
 
 `ubuntu-tweak capture` is the read-only inventory of the live system, printed as the exact
 diff the profile would receive. `--dry-run` is the explicit no-write mode: the same as the
-default preview, and it excludes `--commit` (exit 2, "not allowed with argument"). `--summary`
+default preview, and it excludes `--commit` (exit 2, *Dry run*); it also refuses `--report FILE`, which writes a file (exit 2). `--summary`
 prints only the SUMMARY block and the totals line and cannot be combined with `--commit` (exit 2):
 nothing is written that was not shown in full. With `--commit` it writes into the profile working tree and
 does not run `git commit`: the user reviews `git diff` in `.files` (the second preview) and
@@ -1428,7 +1459,7 @@ first, default 100, stable otherwise); see *Init pipeline*.
 | `compile-schemas` | `gschemas.compiled` newer than every `*.gschema.xml` (satisfied when the extension has no schema) | `glib-compile-schemas` |
 | `package` | apt / snap / flatpak name is installed | install the missing names; never remove |
 | `login-shell` (root) | the passwd entry's shell is named like the wanted one (`getent passwd <user>`) | `chsh -s /usr/bin/<shell> <user>` through sudo |
-| `shell-rc` | the file exists (a dangling symlink counts) | create it with `O_EXCL`, only while absent |
+| `shell-rc` | the file exists (a dangling symlink counts), or the profile or the dotfiles checkout provides it | create it with `O_EXCL`, only while absent; planned only when neither the profile's `files/` nor the dotfiles checkout carries that file |
 | `git-config` | `git config --global --get <key>` equals the profile value | `git config --global <key> <value>` |
 | `git-credential` | the global `credential.https://<host>.helper` list names `gh auth git-credential` | `gh auth setup-git --hostname <host> --force` |
 | `gh-login` | `gh auth status --hostname <host>` exits 0 | `keychain exec --stdin <ref> -- gh auth login --with-token`; no token: `needs manual` |
@@ -1946,6 +1977,14 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   actions never ask; `apply` and `init` acquire before the first root action and install the missing packages in
   the same run without a question (`tests/test_apply_commands.py`); `--dry-run` for every command, with `--commit`
   a usage error (`tests/test_dry_run.py`).
+- Dotfiles rc files, git identity and staged settings (`tests/test_dotfiles_links.py`, `tests/test_planner_base.py`
+  `RcFileTests` / `GitTests`, `tests/test_planner_settings.py` `PendingExtensionSchemaTests`): the repository's
+  `.zprofile` / `.zshrc` / `.profile` become `dotfiles-link` actions (a real file is `dotfiles-link-replace` with a
+  backup), the profile's `files/` wins, `--only` and a disabled module drop them, `shell-rc` plans only what neither
+  provides; the identity comes from the profile, git's own value, the dotfiles `.gitconfig` or `gh api user` in that
+  order and warns, with what to do, only when nothing knows it; settings of a submodule that is not checked out are
+  `staged`, a checked-out extension without the schema is still `skipped`; the `init` golden file shows the new
+  order (`dotfiles` before `shell-rc` before `brew`).
 - Profile discovery and profile modules (`tests/test_identity.py`, `tests/test_profile_modules.py`,
   `modules/dotfiles/tests/test_install.py`; no PyGObject needed): a fake `gh` (found, none, several, forks and
   archived skipped, logged out, missing, offline, a listing as long as the limit), the cache (one hour, one
@@ -1961,6 +2000,19 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
 
 ## Decisions
 
+- **`rig` as the model for the command surface (request 18); what stays different.** `rig`'s `init` / `apply` /
+  `doctor` / `--dry-run` were read (`~/dev/rig-cli`, `riglib/cli.py`, README). Aligned: `init` and `apply` are the
+  only commands that set a machine up, `apply` previews by default and one run converges (idempotent, `0 changed`),
+  `doctor --yes` installs dependencies, `--only`, exit 0 ok / 1 internal / 2 invalid config / 3 drift / 4 unknown
+  item. Kept different, because a decision of the user is recorded (preview-by-default with an explicit
+  `--commit`, requests 7 and 8, invariant 1) or the project has its own meaning: (1) the commit word is `--commit`
+  on `apply`, `init`, `update`, `capture`, `note`, `bundle-move` (rig: the positional `apply commit`, and `--commit`
+  only on `config set`); (2) `--dry-run` together with `--commit` is a usage error, exit 2 (rig: `--dry-run`
+  silently wins over `commit`), as ordered in request 19; (3) rig's `apply --yes` means "commit"; here `--yes` is
+  only `doctor`'s commit word, and `init` / `apply` need no `--yes` at all (`--commit` is the consent and the apt
+  install is part of it); (4) rig's `init` only scaffolds and its `apply` never installs dependencies: here
+  `init --commit` / `apply --commit` install the missing apt packages too (request 18); (5) exit codes 5 and 6 differ
+  (rig: missing target / not a repo; here: refused / no root); (6) no `--plan` / `--notes` / `-v` on `apply` yet.
 - **Python, stdlib plus `python3-gi`**, not bash: the plan/preview and the typed dconf
   diff are the core of the tool, and bash cannot compare GVariants. Not a plugin of a personal dev
   tool: this repo is public, and its users have no reason to install one.

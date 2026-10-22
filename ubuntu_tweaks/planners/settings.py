@@ -85,7 +85,7 @@ class _Resolution:
     ) -> None:
         """The one path every wanted value takes: skip it with a reason, or validate and keep it."""
         if isinstance(target, Unresolved):
-            self.skips.add(source, section, key, target.reason)
+            self.skips.add(source, section, key, target.reason, staged=target.staged)
             return
         if target.full in MODULE_OWNED_KEYS:
             self.skips.add(source, section, key, "owned by the extension toggles (modules), not by settings files")
