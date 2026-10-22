@@ -115,6 +115,14 @@ Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf and HOME is `scr
 (module preset, two settings bundles with reasons, machine overlay, linked files, `capture` preview; it never
 touches your dconf).
 
+### Session log
+
+Every run writes everything it printed (stdout, stderr marked with `! `, the questions it asked and your answers,
+colors removed, secrets masked) to `~/.local/state/ubuntu-tweaks/logs/<UTC timestamp>-<command>.log`
+(`$XDG_STATE_HOME` honoured; mode `0600`). **`~/.local/state/ubuntu-tweaks/logs/latest.log`** is the newest one: point an
+agent at it ("read latest.log and tell me what went wrong"). The newest 50 are kept. Not logged: the sudo password
+prompt and anything you type into a child tool's own prompt. Details: spec, *Session log*.
+
 ### Settings workflow: preview → commit → review → PR
 
 What you configure in GNOME Settings (and the config files you keep under `~/.config`) lives in the

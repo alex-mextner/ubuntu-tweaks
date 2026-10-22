@@ -683,7 +683,7 @@ class UpdateTests(CommandScenario):
         with (
             mock.patch.object(update, "run_command", side_effect=fake_run),
             mock.patch.object(update, "_code_state", side_effect=lambda ctx: next(states)),
-            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=0)) as spawn,
+            mock.patch.object(update, "run_streamed", return_value=0) as spawn,
         ):
             code, out = self.run_update(commit=True, no_sudo=True)
         self.assertEqual(code, 0)
@@ -705,7 +705,7 @@ class UpdateTests(CommandScenario):
             mock.patch.object(_support, "has_gi", return_value=False),
             mock.patch.object(update, "run_command", return_value="") as run_command,
             mock.patch.object(update, "_code_state", return_value="same"),
-            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=0)) as spawn,
+            mock.patch.object(update, "run_streamed", return_value=0) as spawn,
         ):
             code, _ = self.run_update(commit=True)
         self.assertEqual(code, 0)
@@ -716,7 +716,7 @@ class UpdateTests(CommandScenario):
         with (
             mock.patch.object(update, "run_command", return_value=""),
             mock.patch.object(update, "_code_state", return_value="same"),
-            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=3)),
+            mock.patch.object(update, "run_streamed", return_value=3),
         ):
             code, out = self.run_update(commit=True)
         self.assertEqual(code, 3)
@@ -726,7 +726,7 @@ class UpdateTests(CommandScenario):
         (Path(self.repo) / ".git").rmdir()
         with (
             mock.patch.object(update, "run_command") as run_command,
-            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=0)) as spawn,
+            mock.patch.object(update, "run_streamed", return_value=0) as spawn,
         ):
             code, out = self.run_update(commit=True)
         self.assertEqual(code, 0)

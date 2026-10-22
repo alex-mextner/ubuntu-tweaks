@@ -358,7 +358,7 @@ class UpdateRootTests(WiringScenario):
             mock.patch.object(Host, "detect", side_effect=AssertionError("the parent must not look at sudo")),
             mock.patch.object(update, "run_command", return_value=""),
             mock.patch.object(update, "_code_state", return_value="same"),
-            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=6)) as spawn,
+            mock.patch.object(update, "run_streamed", return_value=6) as spawn,
         ):
             code = update.run(self.context(), argparse.Namespace(commit=True, no_sudo=False))
 

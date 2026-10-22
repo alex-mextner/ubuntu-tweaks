@@ -57,8 +57,17 @@ def configure(*, color: str = "auto", plain: bool = False, lang: str | None = No
 
 
 def cli_flags() -> list[str]:
-    """The global flags that reproduce this configuration, for a child ``ubuntu-tweak`` process."""
-    flags = ["--color", _config.color] if _config.color != "auto" else []
+    """The global flags that reproduce this configuration, for a child ``ubuntu-tweak`` process.
+
+    A child's stdout is a pipe (``process.run_streamed`` copies it to ours), so ``auto`` would make it print the
+    compact plain text; when this process shows the explained, colored layout the child is told ``--color always``.
+    """
+    if _config.color != "auto":
+        flags = ["--color", _config.color]
+    elif rich() and color_enabled():
+        flags = ["--color", "always"]
+    else:
+        flags = []
     if _config.plain:
         flags.append("--plain")
     if _config.lang:
