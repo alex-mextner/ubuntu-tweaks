@@ -17,7 +17,9 @@ Public API:
 - ``main(argv=None) -> int``: parse, build the ``Context``, run the handler and return its exit
   code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; a missing
   ``gi`` module becomes a one-line "sudo apt install python3-gi" message with exit 1; any other
-  exception prints a traceback and returns ``ExitCode.INTERNAL``.
+  exception prints a traceback and returns ``ExitCode.INTERNAL``. ``--dry-run`` (a global flag) turns the
+  command into its preview, ends the run with ``dry run: nothing was changed`` on stderr and is a usage error
+  (exit 2) together with ``--commit`` / ``--yes``.
 - ``build_parser() -> argparse.ArgumentParser`` and ``discover_commands() -> list[ModuleType]``.
 """
 
@@ -32,9 +34,11 @@ from types import ModuleType
 from ubuntu_tweaks import commands, identity, ui
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.discovery import discover
-from ubuntu_tweaks.errors import ExitCode, UbuntuTweakError
+from ubuntu_tweaks.errors import ConfigError, ExitCode, UbuntuTweakError
 from ubuntu_tweaks.identity import REPO_ENV
 from ubuntu_tweaks.profile import PROFILE_ENV, Profile
+
+DRY_RUN_NOTE = "dry run: nothing was changed"
 
 
 def discover_commands() -> list[ModuleType]:
@@ -65,6 +69,12 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> No
         metavar="OWNER/NAME",
         default=default,
         help=f"your dotfiles repository (default: ${REPO_ENV}, else found through gh: .files, dotfiles, .dotfiles, dot-files)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=default,
+        help="preview only, exactly like the run without --commit: change nothing, ask for no sudo (excludes --commit)",
     )
     parser.add_argument(
         "--refresh",
@@ -118,14 +128,27 @@ def _resolve_profile(args: argparse.Namespace) -> Profile:
     return Profile.resolve(
         args.profile,
         args.machine,
-        locate=lambda: identity.locate(home=Path.home(), env=os.environ, refresh=refresh, repo_override=flag),
+        locate=lambda: identity.locate(
+            home=Path.home(), env=os.environ, refresh=refresh, repo_override=flag, persist=not args.dry_run
+        ),
     )
+
+
+def _refuse_dry_run_commit(args: argparse.Namespace) -> None:
+    """``--dry-run`` is the explicit preview, so it cannot be combined with the word that commits (``--commit``,
+    ``doctor``'s ``--yes``): that is a usage error, not a silent pick of one of them."""
+    if not args.dry_run:
+        return
+    for word in ("commit", "yes"):
+        if getattr(args, word, False):
+            raise ConfigError(f"--dry-run and --{word} exclude each other: a dry run never changes anything")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
         ui.configure(color=args.color or "auto", plain=bool(args.plain), lang=args.lang)
+        _refuse_dry_run_commit(args)
         context = Context(
             repo_root=REPO_ROOT,
             profile=_resolve_profile(args),
@@ -151,4 +174,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return int(ExitCode.INTERNAL)
+    if args.dry_run:
+        print(DRY_RUN_NOTE, file=sys.stderr)
     return int(result or ExitCode.OK)

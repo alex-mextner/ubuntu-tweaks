@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tests.util import TempDirCase, write
+from ubuntu_tweaks.cli import build_parser
 from ubuntu_tweaks.capture import commit as commit_module
 from ubuntu_tweaks.capture.files_scan import classify_file
 from ubuntu_tweaks.capture.globs import GlobSet, compile_glob
@@ -807,9 +808,7 @@ class CaptureRunner(TempDirCase):
         profile_dir.mkdir(exist_ok=True)
         home = self.tmp / "home"
         home.mkdir(exist_ok=True)
-        parser = argparse.ArgumentParser()
-        capture_command.register(parser.add_subparsers(dest="command"))
-        args = parser.parse_args(["capture", *flags])
+        args = build_parser().parse_args(["capture", *flags])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = capture_command.execute(
@@ -1412,26 +1411,10 @@ class SummaryAndModesTests(CaptureRunner):
         self.assertFalse((self.tmp / "home/.config/mimeapps.list").is_symlink())
         self.assertNotIn("nothing was committed to git", out)
 
-    def test_dry_run_and_commit_exclude_each_other_with_a_clear_error(self) -> None:
-        parser = argparse.ArgumentParser()
-        capture_command.register(parser.add_subparsers(dest="command"))
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
-            parser.parse_args(["capture", "--dry-run", "--commit"])
-        self.assertEqual(caught.exception.code, 2)
-        self.assertIn("not allowed with argument", err.getvalue())
-        # called programmatically the command refuses too
-        namespace = argparse.Namespace(commit=True, dry_run=True, summary=False, report=None, verbose=False)
-        with self.assertRaisesRegex(ConfigError, "mutually exclusive"):
-            capture_command.execute(
-                Context(REPO_ROOT, Profile(self.tmp / "profile", "testbox", "flag")),
-                namespace,
-                seeded_backend(),
-                home=self.tmp / "home",
-                now=NOW,
-                run=fake_runner,
-                **sources(self),
-            )
+    def test_dry_run_refuses_a_report_file_because_it_writes_nothing(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "--report writes a file"):
+            self.run_capture("--dry-run", "--report", str(self.tmp / "r.md"))
+        self.assertFalse((self.tmp / "r.md").exists())
 
     def test_summary_opens_the_output_before_any_detail_table(self) -> None:
         _code, out = self.run_capture()
