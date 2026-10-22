@@ -23,8 +23,9 @@ Steps (``[[step]] name = ...``, arguments as extra keys of the entry):
   satisfied when the passwd entry's shell is named ``<shell>`` (a brew-installed zsh counts).
 - ``shell-rc`` (``shell``, default ``zsh``): creates ``~/.zprofile`` and ``~/.zshrc`` that put brew
   and ``~/.local/bin`` on ``PATH``, **only while absent**: an existing file is never read or changed.
-- ``git-identity``: ``git config --global user.name`` / ``user.email`` from ``[git] name`` / ``email``
-  of ``profile.toml`` / ``machine.toml``; a value that is not set there is not touched (no default).
+- ``git-identity``: ``git config --global user.name`` / ``user.email``. Per key: ``[git] name`` / ``email`` of
+  ``profile.toml`` / ``machine.toml`` (enforced); else the value git already has (left alone); else the value of
+  the dotfiles ``.gitconfig`` or ``gh api user`` (``git_identity``); a key nothing knows is not touched (no default).
 - ``gh-login`` (``host``, ``token_ref``): ``gh auth login --with-token`` with the token of the keychain
   item named by ``[git] token_ref``. There is no default item: without ``token_ref`` the step is
   ``needs manual: gh auth login`` and ``check()`` stays ``gh auth status``.
@@ -52,8 +53,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ubuntu_tweaks import git_identity
 from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
 from ubuntu_tweaks.errors import ConfigError
+from ubuntu_tweaks.git_identity import KEYS
 from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.profile import Config, TomlValue
 
@@ -68,7 +71,7 @@ GH_STATUS_TIMEOUT_SECONDS = 30
 GIT_SECTION_KEYS = ("name", "email", "token_ref", "host")
 
 ZPROFILE = """\
-# Created by ubuntu-tweak (module zsh) because this file did not exist. It is yours: ubuntu-tweak
+# Created by ubuntu-tweak (module shell-rc) because this file did not exist. It is yours: ubuntu-tweak
 # never rewrites a file that is already there.
 typeset -U path PATH
 [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
@@ -77,7 +80,7 @@ export PATH
 """
 
 ZSHRC = """\
-# Created by ubuntu-tweak (module zsh) because this file did not exist. It is yours: ubuntu-tweak
+# Created by ubuntu-tweak (module shell-rc) because this file did not exist. It is yours: ubuntu-tweak
 # never rewrites a file that is already there.
 typeset -U path PATH
 [[ -z "$HOMEBREW_PREFIX" && -x /home/linuxbrew/.linuxbrew/bin/brew ]] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
@@ -123,7 +126,8 @@ class StepEnv:
     uid: int = field(default_factory=os.getuid)
     fetch: Callable[[str], bytes] = default_fetch
     which: Callable[[str], str | None] = shutil.which
-    linked: frozenset[str] = frozenset()  # $HOME-relative paths the profile's files/ links (FILES phase)
+    linked: frozenset[str] = frozenset()  # $HOME-relative paths the profile's files/ or the dotfiles repository links
+    dotfiles: Path | None = None  # the dotfiles checkout on disk, when there is one
 
     def system_path(self, absolute: str) -> Path:
         return self.root / absolute.lstrip("/")
@@ -227,17 +231,19 @@ class GitConfigAction(Action):
     phase = Phase.BASE
     kind = "git-config"
 
-    def __init__(self, env: StepEnv, key: str, value: str) -> None:
+    def __init__(self, env: StepEnv, key: str, value: str, source: str | None = None) -> None:
         self._env = env
         self._key = key
         self._value = value
+        self._source = source
 
     def _current(self) -> str | None:
         result = self._env.process.query(["git", "config", "--global", "--get", self._key])
         return result.stdout.strip() if result.ok else None
 
     def describe(self) -> str:
-        return f"git config --global {self._key} {self._value} (now {self._current() or 'unset'})"
+        origin = f"; {self._source}" if self._source else ""
+        return f"git config --global {self._key} {self._value} (now {self._current() or 'unset'}{origin})"
 
     def check(self) -> bool:
         return self._current() == self._value
@@ -439,7 +445,14 @@ def _shell_rc(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[
 def _git_identity(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:
     _only_args(args, f"module {module} step git-identity")
     section = git_section(env.config)
-    return [GitConfigAction(env, f"user.{key}", section[key]) for key in ("name", "email") if key in section]
+    actions: list[Action] = [GitConfigAction(env, f"user.{key}", section[key]) for key in KEYS if key in section]
+    # the keys the profile does not set: left as they are when git has them, else read from the person's own data
+    unset = [key for key in KEYS if key not in section and git_identity.current(env.process, key) is None]
+    known = git_identity.discover(env.process, env.dotfiles, unset) if unset else {}
+    actions += [
+        GitConfigAction(env, f"user.{key}", known[key].value, known[key].source) for key in unset if key in known
+    ]
+    return actions
 
 
 def _gh_login(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:

@@ -396,6 +396,30 @@ class PendingExtensionSchemaTests(SettingsPlannerCase):
         with self.assertRaisesRegex(ConfigError, "ext.ini.*size"):
             planner.build(self.context(), FakeBackend(SCHEMAS))
 
+    def submodule_module(self, *, checked_out: bool) -> None:
+        write(
+            self.repo / "modules/ext/module.toml",
+            'description = "x"\n[source]\nkind = "submodule"\npath = "gnome-extensions/ext@x"\n'
+            '[[settings]]\nfile = "ext.ini"\nschema = "org.example.ext"\n',
+        )
+        write(self.repo / "modules/ext/ext.ini", "[/]\nsize=0.5\n")
+        (self.repo / "gnome-extensions/ext@x").mkdir(parents=True)
+        if checked_out:
+            write(self.repo / "gnome-extensions/ext@x/metadata.json", '{"uuid": "ext@x"}')
+
+    def test_settings_of_a_submodule_that_is_not_checked_out_are_staged_not_skipped(self) -> None:
+        self.submodule_module(checked_out=False)
+        (line,) = planner.warnings(self.context(), FakeBackend(SCHEMAS))
+        self.assertTrue(line.startswith("staged modules/ext/ext.ini [/] size:"), line)
+        self.assertIn("arrives with the extension code this plan installs", line)
+        self.assertIn("applied by the same `apply --commit`", line)
+        self.assertNotIn("skipped", line)
+
+    def test_a_checked_out_extension_without_the_schema_is_still_a_skip(self) -> None:
+        self.submodule_module(checked_out=True)
+        (line,) = planner.warnings(self.context(), FakeBackend(SCHEMAS))
+        self.assertTrue(line.startswith("skipped modules/ext/ext.ini"), line)
+
     def test_panel_key_of_a_schema_that_is_not_installed_yet_waits_for_the_next_pass(self) -> None:
         self.extension_module()
         write(self.profile_root / "settings/appearance.ini", "[org/example/ext]\nsize=0.9\n")

@@ -1,10 +1,11 @@
-description = "Init step 10: your dotfiles repository (found through gh: .files, dotfiles, .dotfiles, dot-files) cloned, with the ubuntu profile inside it; nothing to do when there is none"
+description = "Init step 3b: your dotfiles repository (found through gh: .files, dotfiles, .dotfiles, dot-files) cloned, with the ubuntu profile inside it, and its shell rc files (.zprofile, .zshrc, .profile) linked; nothing to do when there is none"
 enabled = true           # a machine can opt out: [modules.dotfiles] enabled = false in machines/<host>/machine.toml
-order = 110
+order = 35       # after git-gh (30: git and gh), before shell-rc (36) and brew (40): the repository provides the rc files
+phase = "base"   # the profile must arrive before the shell and brew steps
 manual = "run `gh auth login`, or set [modules.dotfiles] repo / pass --dotfiles-repo OWNER/NAME; a checkout that is behind with local changes, or diverged, is yours to resolve in it"
 
-# User level: it only clones into $HOME and fast-forwards that checkout; it never writes a file of the
-# repository, links nothing and never touches the rest of the repository (zsh, brew, ...).
+# User level: the installer only clones into $HOME and fast-forwards that checkout; it never writes a file of the
+# repository and links nothing. The plan links the repository's shell rc files (ubuntu_tweaks/dotfiles_rc.py).
 # Options: `[modules.dotfiles]` keys repo, dir, path (see install.sh and the spec, *Profile discovery*).
 [source]
 kind = "system"

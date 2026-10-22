@@ -1,4 +1,4 @@
-description = "Init step 1: zsh installed and set as the login shell; minimal ~/.zprofile and ~/.zshrc only when absent"
+description = "Init step 1: zsh installed and set as the login shell"
 enabled = true
 order = 11      # right after base-tools (init step 1)
 phase = "base"
@@ -12,8 +12,4 @@ apt = ["zsh"]
 
 [[step]]
 name = "login-shell"
-shell = "zsh"
-
-[[step]]
-name = "shell-rc"
 shell = "zsh"

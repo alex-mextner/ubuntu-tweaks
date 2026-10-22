@@ -32,8 +32,10 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from ubuntu_tweaks import dotfiles_rc, git_identity
 from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.git_identity import KEYS
 from ubuntu_tweaks.manifest import (
     PACKAGE_PLACEHOLDER,
     POST_AFTER_INSTALL,
@@ -237,9 +239,14 @@ def build(
         return []
     runner = process or Process()
     packages = ctx.profile.load_packages()
-    # `--only` drops the links of `files/` (they have no module scope), so nothing is left to do the rc file's job
-    linked = frozenset() if ctx.only else frozenset(str(file.rel) for file in ctx.profile.files())
-    env = StepEnv(config, runner, linked=linked)
+    # `--only` drops the links of `files/` and of the dotfiles repository (they carry no module scope of the
+    # module asking), so nothing is left to do the rc file's job
+    linked = (
+        frozenset()
+        if ctx.only
+        else frozenset(str(file.rel) for file in ctx.profile.files()) | frozenset(dotfiles_rc.provided(ctx))
+    )
+    env = StepEnv(config, runner, linked=linked, dotfiles=dotfiles_rc.checkout(ctx))
     if env_overrides is not None:
         env = env_overrides(env)
 
@@ -309,7 +316,7 @@ def build(
     return actions
 
 
-def warnings(ctx: Context, backend: SettingsBackend) -> list[str]:
+def warnings(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> list[str]:
     manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     asks_identity = any(
@@ -317,11 +324,18 @@ def warnings(ctx: Context, backend: SettingsBackend) -> list[str]:
     )
     if not asks_identity:
         return []
+    runner = process or Process()
     section = git_section(config)
-    missing = [key for key in ("name", "email") if key not in section]
-    if not missing:
+    unset = [key for key in KEYS if key not in section and git_identity.current(runner, key) is None]
+    if not unset:
         return []
+    known = git_identity.discover(runner, dotfiles_rc.checkout(ctx), unset)
+    unknown = [key for key in unset if key not in known]
+    if not unknown:
+        return []
+    keys = " and ".join(f"user.{key}" for key in unknown)
     return [
-        f"git: [git] {' and '.join(missing)} not set in profile.toml / machine.toml: "
-        f"git config user.{' and user.'.join(missing)} stays as it is"
+        f"git: {keys} not set and nothing knows it (profile.toml [git], the dotfiles .gitconfig, gh): not an error, "
+        "git only asks for it at your first commit. To fix it, set `[git] name` / `email` in profile.toml, or run "
+        "`git config --global user.name ...` (`gh auth login` lets ubuntu-tweak take both from your GitHub account)"
     ]

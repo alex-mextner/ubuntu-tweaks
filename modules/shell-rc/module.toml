@@ -1,0 +1,11 @@
+description = "Init step 3c: minimal ~/.zprofile and ~/.zshrc, only for what neither your profile nor your dotfiles repository provides, and only while absent"
+enabled = true
+order = 36      # right after dotfiles (35): the repository's own rc files win, this is the fallback
+phase = "base"
+
+[source]
+kind = "builtin"
+
+[[step]]
+name = "shell-rc"
+shell = "zsh"
