@@ -43,6 +43,7 @@ from pathlib import Path
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
+from ubuntu_tweaks.checkout import warning_line
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.elevation import RootSession
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
@@ -130,6 +131,8 @@ def header_lines(ctx: Context, title: str) -> list[str]:
     lines = [ui.heading(f"ubuntu-tweak {title}")] if title else []
     lines += ui.kv(rows)
     lines += [ui.style(line, "yellow") for line in profile_lines(ctx)[2:]]
+    if ctx.running_root is not None and ctx.running_root != ctx.repo_root:
+        lines.append(ui.style(warning_line(ctx.repo_root, ctx.running_root), "yellow"))
     return lines
 
 

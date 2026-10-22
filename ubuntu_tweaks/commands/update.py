@@ -35,7 +35,7 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     )
     parser.add_argument("--commit", action="store_true", help="pull and apply (default: preview only)")
     parser.add_argument("--no-sudo", action="store_true", help="skip actions that need root and say so")
-    parser.set_defaults(handler=run)
+    parser.set_defaults(handler=run, plans_links=True)  # links into the stable checkout (spec *Checkout*)
 
 
 def _is_git_checkout(ctx: Context) -> bool:

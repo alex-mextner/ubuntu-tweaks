@@ -32,6 +32,7 @@ from pathlib import Path
 from types import ModuleType
 
 from ubuntu_tweaks import commands, identity, ui
+from ubuntu_tweaks.checkout import stable_checkout, warning_line
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.discovery import discover
 from ubuntu_tweaks.errors import ConfigError, ExitCode, UbuntuTweakError
@@ -149,10 +150,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = build_parser().parse_args(argv)
         ui.configure(color=args.color or "auto", plain=bool(args.plain), lang=args.lang)
         _refuse_dry_run_commit(args)
+        checkout = stable_checkout(REPO_ROOT, os.environ)
+        if not checkout.is_stable:
+            print(warning_line(checkout.root, checkout.running), file=sys.stderr)
+        if getattr(args, "plans_links", False):
+            checkout.require_usable(args.command)
         context = Context(
-            repo_root=REPO_ROOT,
+            repo_root=checkout.root if checkout.usable else checkout.running,
             profile=_resolve_profile(args),
             only=_only(args.only),
+            running_root=checkout.running,
         )
         result = args.handler(context, args)
     except UbuntuTweakError as error:

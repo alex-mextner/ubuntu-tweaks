@@ -7,6 +7,9 @@ My personal Ubuntu (GNOME, Wayland) tweaks.
 One command on a stock Ubuntu: the script installs `git curl ca-certificates python3-gi` with `sudo`, clones this
 repo with its submodules to `~/ubuntu-tweaks` (override with `UBUNTU_TWEAKS_DIR`) and runs `ubuntu-tweak init`.
 
+The CLI keeps its links (extensions, `~/.local/bin/ubuntu-tweak`) in one stable checkout: `$UBUNTU_TWEAKS_DIR`, else the main
+working tree of the repo it runs from, so running from a temporary git worktree never leaves dangling links (spec: *Checkout*).
+
 First, your settings profile lives in a repo of your own GitHub account:
 
 ```sh
