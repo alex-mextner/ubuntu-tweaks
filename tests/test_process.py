@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from ubuntu_tweaks.process import CommandError, CommandResult, FakeProcess, Process
+from ubuntu_tweaks.process import CommandError, CommandResult, FakeProcess, Process, root_prefix, use_root_prefix
 
 
 class QueryTests(unittest.TestCase):
@@ -66,6 +66,16 @@ class ElevateTests(unittest.TestCase):
     def test_neither_is_an_error(self) -> None:
         with self.assertRaisesRegex(CommandError, "neither sudo nor pkexec"):
             self.elevate(euid=1000, tools=set())
+
+    def test_an_open_session_prefix_wins_and_root_still_runs_as_is(self) -> None:
+        self.addCleanup(use_root_prefix, None)
+        use_root_prefix(["sudo", "-A", "--"])
+
+        self.assertEqual(root_prefix(), ("sudo", "-A", "--"))
+        self.assertEqual(self.elevate(euid=1000, tools={"sudo", "pkexec"}), ["sudo", "-A", "--", "apt-get", "install"])
+        self.assertEqual(self.elevate(euid=0, tools=set()), ["apt-get", "install"])
+        use_root_prefix(None)
+        self.assertEqual(self.elevate(euid=1000, tools={"sudo"}), ["sudo", "--", "apt-get", "install"])
 
 
 class FakeProcessTests(unittest.TestCase):

@@ -39,16 +39,22 @@ def register(subparsers):
 """
 
 FAILING_COMMANDS = """
+from ubuntu_tweaks.elevation import Cause, RootUnavailable
 from ubuntu_tweaks.errors import RefusedError
 
 
 def register(subparsers):
     subparsers.add_parser("refuse").set_defaults(handler=refuse)
+    subparsers.add_parser("no-root").set_defaults(handler=no_root)
     subparsers.add_parser("crash").set_defaults(handler=crash)
 
 
 def refuse(ctx, args):
     raise RefusedError("secret finding")
+
+
+def no_root(ctx, args):
+    raise RootUnavailable(Cause.NO_NEW_PRIVS, "root is not available: NoNewPrivs", "ubuntu-tweak fix")
 
 
 def crash(ctx, args):
@@ -67,7 +73,15 @@ class ExitCodeTests(unittest.TestCase):
     def test_exit_code_values_are_stable(self) -> None:
         self.assertEqual(
             [(code.name, int(code)) for code in ExitCode],
-            [("OK", 0), ("INTERNAL", 1), ("INVALID_CONFIG", 2), ("DRIFT", 3), ("UNKNOWN_MODULE", 4), ("REFUSED", 5)],
+            [
+                ("OK", 0),
+                ("INTERNAL", 1),
+                ("INVALID_CONFIG", 2),
+                ("DRIFT", 3),
+                ("UNKNOWN_MODULE", 4),
+                ("REFUSED", 5),
+                ("NO_ROOT", 6),
+            ],
         )
         self.assertEqual(ConfigError.exit_code, ExitCode.INVALID_CONFIG)
         self.assertEqual(UnknownModuleError.exit_code, ExitCode.UNKNOWN_MODULE)
@@ -129,6 +143,11 @@ class DispatchTests(TempDirCase):
         self.drop_commands(failing=FAILING_COMMANDS)
         code, _, err = run_main("refuse")
         self.assertEqual((code, err), (5, "ubuntu-tweak: secret finding\n"))
+
+    def test_root_unavailable_is_exit_6_without_a_traceback(self) -> None:
+        self.drop_commands(failing=FAILING_COMMANDS)
+        code, out, err = run_main("no-root")
+        self.assertEqual((code, out, err), (6, "", "ubuntu-tweak: root is not available: NoNewPrivs\n"))
 
     def test_unexpected_errors_are_internal_and_show_a_traceback(self) -> None:
         self.drop_commands(failing=FAILING_COMMANDS)
