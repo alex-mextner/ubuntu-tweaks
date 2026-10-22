@@ -4,7 +4,17 @@ My personal Ubuntu (GNOME, Wayland) tweaks.
 
 ## Install
 
-Fresh machine:
+One command on a stock Ubuntu: the script installs `git curl ca-certificates python3-gi` with `sudo`, clones this
+repo with its submodules to `~/xp/ubuntu-tweaks` and runs `ubuntu-tweak init`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scripts/bootstrap.sh | sh -s -- --yes
+```
+
+Without `--yes` it only previews (`init` without `--commit`); `--yes` is the explicit consent that turns it into
+`init --commit --yes`. No `curl` yet: `wget -qO- <same url> | sh -s -- --yes` or `sudo apt-get install -y curl`
+first. `init` ends with a **Manual steps** block (gh token, AMO key, iCloud sign-in, ...): what only you can
+finish, each with how, all in the spec's *Manual steps* table. The same by hand:
 
 ```sh
 gh repo clone alex-mextner/.files ~/.files        # your private profile (optional)
@@ -50,7 +60,12 @@ mutating command previews first and changes nothing without `--commit`.
 | `show [--all] [--panel ID] [--format text\|md\|html] [--ssh [USER@]HOST]` | read-only Russian overview of all settings (explanations, readable values, defaults, status) grouped by Settings panel; `--ssh` shows another machine without installing anything there |
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
-(local extension); `memguard` and `apple-hid-battery` are root-level `system` modules.
+(local extension); `memguard` and `apple-hid-battery` are root-level `system` modules. The `init` pipeline is a
+module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `brew` 40, `ssh-server` 50,
+`passwords-app` 60 / `passwords-app-polkit` 61, `firefox` 70 / `firefox-policy` 71 / `firefox-autologin` 72 /
+`firefox-passkey-qr` 73 (off by default), `hyperdock` 80, then your settings and `files/`, then the opt-in `rig`
+100 (+ tmux, omp, ctmux) and `dotfiles` 110 (spec: *Init pipeline*; switch one off with
+`[modules.<name>] enabled = false` in `machine.toml`).
 Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf and HOME is `scripts/integration.sh`
 (module preset, two settings bundles with reasons, machine overlay, linked files, `capture` preview; it never
 touches your dconf).

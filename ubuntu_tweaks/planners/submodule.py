@@ -4,7 +4,8 @@ Accessed via: planner discovery (``planners/__init__.py``).
 
 Assumptions: a submodule is initialized when ``<path>/.git`` exists. A submodule checked out at
 another commit than the umbrella records (dev work) is satisfied, never reset, and is reported
-by ``extras()``; only ``update`` moves it.
+by ``extras()``; only ``update`` moves it. In a tree without ``.git`` (an unpacked archive) nothing can
+be initialized: a non-empty ``<path>`` counts as present, an empty one is a manual step.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from ubuntu_tweaks.actions import Action, Phase
+from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import extension_modules
 from ubuntu_tweaks.manifest import SourceKind
@@ -32,10 +33,24 @@ class SubmoduleInit(Action):
     def describe(self) -> str:
         return f"init submodule {self.path} (git submodule update --init --recursive)"
 
+    def _is_git_checkout(self) -> bool:
+        return (self.repo_root / ".git").exists()
+
     def check(self) -> bool:
-        return (self.repo_root / self.path / ".git").exists()
+        if (self.repo_root / self.path / ".git").exists():
+            return True
+        if self._is_git_checkout():
+            return False
+        # an unpacked archive has no git to ask: the sources are either shipped in the tree or not
+        directory = self.repo_root / self.path
+        return directory.is_dir() and any(directory.iterdir())
 
     def run(self) -> None:
+        if not self._is_git_checkout():
+            raise ManualStepRequired(
+                f"{self.path} is empty and {self.repo_root} is not a git checkout: use a release that ships it, "
+                "or clone with `git clone --recurse-submodules`"
+            )
         run(["git", "-C", str(self.repo_root), "submodule", "update", "--init", "--recursive", "--", self.path])
 
 

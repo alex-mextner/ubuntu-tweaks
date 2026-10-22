@@ -28,6 +28,7 @@ Public API: ``build(ctx, backend, *, process=None, env_overrides=None)``, ``warn
 from __future__ import annotations
 
 import shlex
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from ubuntu_tweaks.manifest import (
     module_defaults,
 )
 from ubuntu_tweaks.planners.packages import PackageAction, installed_apt
+from ubuntu_tweaks.planners.system_modules import SystemModuleAction, module_config_json
 from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.profile import Config, Packages
 from ubuntu_tweaks.settings import SettingsBackend
@@ -51,6 +53,18 @@ from ubuntu_tweaks.steps import StepEnv, get_step, git_section
 POST_ORDER_OFFSET = 0.5
 POST_CHECK_TIMEOUT_SECONDS = 120
 DEFAULT_MODULE_PHASE = Phase.PACKAGES
+APT_LISTS = "/var/lib/apt/lists"
+APT_LISTS_MAX_AGE_SECONDS = 2 * 24 * 3600
+APT_UPDATE = ("apt-get", "update")
+
+
+def apt_lists_stale(lists: Path, *, now: float | None = None) -> bool:
+    """No package index at all (a fresh image) or none refreshed within two days: an install would 404."""
+    try:
+        stamps = [entry.stat().st_mtime for entry in lists.iterdir() if "_Packages" in entry.name]
+    except OSError:
+        return True
+    return not stamps or (time.time() if now is None else now) - max(stamps) > APT_LISTS_MAX_AGE_SECONDS
 
 
 def module_phase(manifest: Manifest) -> Phase:
@@ -93,7 +107,7 @@ class ModuleAptAction(PackageAction):
         phase: Phase,
         scope: str,
         order: float,
-        update_first: bool,
+        update_first: Callable[[], bool],
     ) -> None:
         def lister(runner: Process, wanted: Sequence[str]) -> set[str]:
             present = installed_apt(runner, wanted)
@@ -106,9 +120,10 @@ class ModuleAptAction(PackageAction):
             lister,
             lambda missing: ["apt-get", "install", "-y", *missing],
             needs_root=True,
-            before=["apt-get", "update"] if update_first else None,
+            before=None,
         )
         self._modules = tuple(modules)
+        self._update_first = update_first
         self.phase = phase
         self.scope = scope
         self.order = order
@@ -117,6 +132,9 @@ class ModuleAptAction(PackageAction):
     @property
     def modules(self) -> tuple[str, ...]:
         return self._modules
+
+    def _update_command(self) -> Sequence[str] | None:
+        return APT_UPDATE if self._update_first() else None
 
     def describe(self) -> str:
         return f"{super().describe()} [{', '.join(self._modules)}]"
@@ -185,16 +203,18 @@ class SystemInstalled(Action):
     kind = "system-module"
     phase = Phase.SYSTEM
 
-    def __init__(self, manifest: Manifest, process: Process) -> None:
-        self._manifest = manifest
-        self._process = process
+    def __init__(self, action: SystemModuleAction) -> None:
+        self._action = action
+        self.scope = action.scope
 
     def describe(self) -> str:
-        return f"{self._manifest.name} installed"
+        return f"{self.scope} installed"
 
     def check(self) -> bool:
-        argv = [str(self._manifest.directory / self._manifest.source.check[0]), *self._manifest.source.check[1:]]
-        return self._process.query(argv, cwd=self._manifest.directory).returncode == 0
+        try:
+            return self._action.check()
+        except ActionFailed:
+            return False  # a broken checker is the system-module action's failure to report, not this probe's
 
     def run(self) -> None:
         raise ActionFailed("SystemInstalled is a probe, never planned")
@@ -218,7 +238,9 @@ def build(
         return []
     runner = process or Process()
     packages = ctx.profile.load_packages()
-    env = StepEnv(config, runner)
+    # `--only` drops the links of `files/` (they have no module scope), so nothing is left to do the rc file's job
+    linked = frozenset() if ctx.only else frozenset(str(file.rel) for file in ctx.profile.files())
+    env = StepEnv(config, runner, linked=linked)
     if env_overrides is not None:
         env = env_overrides(env)
 
@@ -241,7 +263,7 @@ def build(
             phase=phase,
             scope=first.name,
             order=first.order,
-            update_first=packages.apt_update,
+            update_first=lambda: packages.apt_update or apt_lists_stale(env.system_path(APT_LISTS)),
         )
         batches.append(batch)
         actions.append(batch)
@@ -259,14 +281,24 @@ def build(
                 installs.append(action)
         planned: dict[str, list[Action]] = {}  # post name -> what it waits for, plus itself when it is planned
         if manifest.source.kind is SourceKind.SYSTEM:
-            installs.append(SystemInstalled(manifest, runner))
+            installs.append(
+                SystemInstalled(
+                    SystemModuleAction(
+                        manifest,
+                        ctx.repo_root,
+                        process=runner,
+                        module_config=module_config_json(config, manifest.name),
+                    )
+                )
+            )
         for post in manifest.post:
-            if post.after is None:
-                waits_for: list[Action] = []
-            elif post.after == POST_AFTER_INSTALL:
+            if post.after in (None, POST_AFTER_INSTALL):
                 waits_for = installs
             else:
                 waits_for = planned.get(post.after, [])
+            if any(name in linked for name in post.unless_linked):
+                planned[post.name] = waits_for  # the profile's own file does this job
+                continue
             run_argv = expand_placeholders(post.run, packages)
             check_argv = expand_placeholders(post.check, packages)
             if run_argv is None or check_argv is None:

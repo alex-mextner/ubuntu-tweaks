@@ -224,9 +224,11 @@ class ExecuteTests(unittest.TestCase):
 
         self.assertEqual((log, result.changed), (["later"], 1))
         self.assertEqual(result.manual, ((manual, "gh auth login (no token)"),))
+        self.assertEqual(result.render_skipped(), "")
         self.assertEqual(
-            result.render_skipped(),
-            "1 action(s) need a manual step:\n  [gh-login] needs manual: gh auth login (no token)",
+            result.render_manual(),
+            "Manual steps (1): what is left for you, see docs/specs/ubuntu-tweak-cli.md, Manual steps\n"
+            "  1. [gh-login] gh auth login (no token)",
         )
         self.assertFalse(manual.check())
 

@@ -46,7 +46,8 @@ Public API:
   satisfied since ``build`` (an earlier action or another process did its work), verifies
   ``check()`` after each ``run()`` and raises ``ActionFailed`` (exit 1) when it still fails.
   ``on_start`` is called with each action before it runs.
-- ``ExecutionResult(changed, skipped, manual)`` and ``ExecutionResult.render_skipped() -> str``.
+- ``ExecutionResult(changed, skipped, manual)``, ``ExecutionResult.render_skipped() -> str`` (the
+  ``--no-sudo`` skips) and ``ExecutionResult.render_manual() -> str`` (the closing ``Manual steps`` block).
 """
 
 from __future__ import annotations
@@ -116,13 +117,20 @@ class ExecutionResult:
     manual: tuple[tuple[Action, str], ...] = ()
 
     def render_skipped(self) -> str:
-        lines: list[str] = []
-        if self.skipped:
-            lines.append(f"Skipped {len(self.skipped)} root action(s) because of --no-sudo:")
-            lines += [f"  [{action.kind}] {action.describe()}" for action in self.skipped]
-        if self.manual:
-            lines.append(f"{len(self.manual)} action(s) need a manual step:")
-            lines += [f"  [{action.kind}] needs manual: {message}" for action, message in self.manual]
+        if not self.skipped:
+            return ""
+        lines = [f"Skipped {len(self.skipped)} root action(s) because of --no-sudo:"]
+        lines += [f"  [{action.kind}] {action.describe()}" for action in self.skipped]
+        return "\n".join(lines)
+
+    def render_manual(self) -> str:
+        """The closing ``Manual steps`` block: what only the user can finish (spec, *Manual steps*)."""
+        if not self.manual:
+            return ""
+        lines = [
+            f"Manual steps ({len(self.manual)}): what is left for you, see docs/specs/ubuntu-tweak-cli.md, Manual steps"
+        ]
+        lines += [f"  {number}. [{action.kind}] {message}" for number, (action, message) in enumerate(self.manual, 1)]
         return "\n".join(lines)
 
 

@@ -15,7 +15,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from ubuntu_tweaks.actions import Action, Phase
+from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules, tilde, user_extensions_dir
 from ubuntu_tweaks.settings import SettingsBackend
@@ -54,7 +54,9 @@ class ExtensionLink(Action):
         return dest is not None and is_linked(dest, self.module.source_dir)
 
     def run(self) -> None:
-        metadata = self.module.require_metadata()
+        metadata = self.module.metadata()
+        if metadata is None:
+            raise ManualStepRequired(f"{self.module.name}: its sources are missing (see the submodule step)")
         replace_with_symlink(self.extensions_dir / metadata.uuid, self.module.source_dir, now=self._now)
 
 

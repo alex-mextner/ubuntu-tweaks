@@ -8,9 +8,11 @@ import os
 import shutil
 import types
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
+from tests.actions_scenario import SHELL_SCHEMA
 from tests.util import TempDirCase, write
 
 try:
@@ -19,8 +21,8 @@ try:
     from ubuntu_tweaks.commands import doctor, init
     from ubuntu_tweaks.context import REPO_ROOT, Context
     from ubuntu_tweaks.manifest import parse_manifest
-    from ubuntu_tweaks.planners import base
-    from ubuntu_tweaks.process import FakeProcess
+    from ubuntu_tweaks.planners import base, extension_links, files, schemas, submodule, system_modules, toggle
+    from ubuntu_tweaks.process import CommandResult, FakeProcess
     from ubuntu_tweaks.profile import Profile
     from ubuntu_tweaks.settings import FakeBackend
     from ubuntu_tweaks.steps import StepEnv
@@ -28,11 +30,39 @@ except ImportError as error:  # pragma: no cover - PyGObject is a distro package
     raise unittest.SkipTest(f"PyGObject unavailable: {error}") from error
 
 GOLDEN = Path(__file__).parent / "golden" / "init_empty_machine.txt"
-PIPELINE_MODULES = ("base-tools", "zsh", "clipboard", "git-gh", "brew")
+PIPELINE_MODULES = (
+    "base-tools",
+    "zsh",
+    "clipboard",
+    "git-gh",
+    "brew",
+    "ssh-server",
+    "passwords-app",
+    "passwords-app-polkit",
+    "firefox",
+    "firefox-policy",
+    "firefox-autologin",
+    "firefox-passkey-qr",
+    "hyperdock",
+    "rig",
+    "dotfiles",
+)
+OPTIONAL_MODULES = ("firefox-passkey-qr", "rig", "dotfiles")  # off by default, a machine opts in
+
+
+class ScriptedProcess(FakeProcess):
+    """Module installers on an empty machine: every ``check`` reports drift (3), every ``preview`` one line."""
+
+    def query(self, argv: Sequence[str], *, timeout: float = 60.0, cwd: Path | None = None) -> CommandResult:
+        if "/repo/modules/" not in argv[0]:
+            return super().query(argv, timeout=timeout, cwd=cwd)
+        if argv[-1] in ("check", "--check"):
+            return CommandResult(3, "", "")
+        return CommandResult(0, f"would install {Path(argv[0]).parent.name}\n", "")
 
 
 class EmptyMachine(TempDirCase):
-    """A repo with the real base modules, an empty profile, and a machine where nothing is installed."""
+    """A repo with every init-pipeline module, a profile with one linked file, and a machine where nothing is installed."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -46,20 +76,33 @@ class EmptyMachine(TempDirCase):
         self.root.mkdir()
         self.profile = Profile(self.tmp / "profile", "home")
         self.profile.root.mkdir()
-        self.runner = FakeProcess()
+        write(self.profile.files_dir / ".config/ubuntu-tweaks-demo/config.toml", "demo = true\n")
+        write(self.profile.machine_toml, "".join(f"[modules.{name}]\nenabled = true\n" for name in OPTIONAL_MODULES))
+        self.runner = ScriptedProcess()
 
         def overrides(env: StepEnv) -> StepEnv:
             return dataclasses.replace(
                 env, root=self.root, home=self.home, user="ultra", group="ultra", uid=os.getuid(), which=lambda _: None
             )
 
-        shim = types.SimpleNamespace(
-            build=lambda ctx, backend: base.build(ctx, backend, process=self.runner, env_overrides=overrides),
-            warnings=base.warnings,
-        )
+        def build(ctx: Context, backend: FakeBackend) -> list[Action]:
+            return [
+                *base.build(ctx, backend, process=self.runner, env_overrides=overrides),
+                *system_modules.build(ctx, backend, process=self.runner),
+                *files.build(ctx, backend, home=self.home),
+                *submodule.build(ctx, backend),
+                *extension_links.build(ctx, backend),
+                *schemas.build(ctx, backend),
+                *toggle.build(ctx, backend),
+            ]
+
+        shim = types.SimpleNamespace(build=build, warnings=base.warnings)
         for patcher in (
             mock.patch.object(planners, "discover_planners", return_value=[shim]),
-            mock.patch.object(reconcile, "open_backend", return_value=FakeBackend()),
+            # `apply` binds its default backend factory at definition time: patch the default, not the module name
+            mock.patch.dict(
+                reconcile.apply.__kwdefaults__, {"backend_factory": lambda _ctx: FakeBackend([SHELL_SCHEMA])}
+            ),
             mock.patch.object(Path, "home", return_value=self.home),
             mock.patch.object(doctor.shutil, "which", return_value=None),
             mock.patch.object(doctor, "has_gi", return_value=True),
@@ -197,8 +240,11 @@ class ManualStepsAcrossPassesTests(TempDirCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(manual.runs, 1)
-        self.assertEqual(out.getvalue().count("needs manual: gh auth login (no token)"), 1)
-        self.assertIn("1 changed", out.getvalue())
+        text = out.getvalue()
+        self.assertEqual(text.count("[gh-login] gh auth login (no token)"), 1)
+        self.assertIn("1 changed", text)
+        self.assertTrue(text.rstrip().splitlines()[-1].startswith("  1. [gh-login] gh auth login (no token)"))
+        self.assertIn("Manual steps (1)", text)
 
 
 class ModuleOrderingTests(unittest.TestCase):

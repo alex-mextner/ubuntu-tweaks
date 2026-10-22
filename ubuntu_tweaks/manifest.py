@@ -21,13 +21,14 @@ Public API:
 - ``ExtensionSpec(conflicts, retire)``, ``SettingsFile(file, schema, mode)``,
   ``Seed(key, provider)``, ``Migration(from_uuid, from_path)``, ``Deps(apt)``.
 - ``Install(apt, provides)``, ``Step(name, args)`` and ``Post(name, run, check, needs_root, after,
-  description)``: the init-pipeline tables ``[install]``, ``[[step]]`` and ``[[post]]`` (spec, *Init
+  description, unless_linked)``: the init-pipeline tables ``[install]``, ``[[step]]`` and ``[[post]]`` (spec, *Init
   pipeline*); ``PACKAGE_PLACEHOLDER`` matches the ``{packages.<manager>}`` argv placeholder.
 - ``Manifest(name, directory, description, enabled, source, extension, settings, seeds,
-  migrations, deps, order, phase, install, steps, post)``; ``enabled`` is the module default that
+  migrations, deps, order, phase, install, steps, post, manual)``; ``enabled`` is the module default that
   ``profile.toml`` / ``machine.toml`` can override; ``order`` (0-999, default ``DEFAULT_ORDER``) and
   ``phase`` (``base`` / ``packages`` / ``system`` as a ``Phase``, or ``None``) place the module's
-  install-time actions in the plan.
+  install-time actions in the plan; ``manual`` is the optional hint printed in the closing ``Manual
+  steps`` block when the module's installer exits 10 (how the user finishes it).
 - ``parse_manifest(name, text, directory) -> Manifest``.
 - ``load_manifest(directory) -> Manifest`` (module name = directory name).
 - ``discover_modules(modules_dir) -> tuple[Manifest, ...]``: sorted by name; directories
@@ -131,6 +132,7 @@ class Post:
     needs_root: bool = False
     after: str | None = None
     description: str = ""
+    unless_linked: tuple[str, ...] = ()  # $HOME-relative files: the post is not planned when the profile links one
 
 
 @dataclass(frozen=True)
@@ -158,6 +160,7 @@ class Manifest:
     install: Install = Install()
     steps: tuple[Step, ...] = ()
     post: tuple[Post, ...] = ()
+    manual: str = ""  # how the user completes the step the installer reports as manual (exit 10)
 
 
 class _Reader:
@@ -360,7 +363,7 @@ def _argv(reader: _Reader, key: str) -> tuple[str, ...]:
 def _parse_posts(readers: list[_Reader]) -> tuple[Post, ...]:
     posts: list[Post] = []
     for reader in readers:
-        reader.only("name", "run", "check", "needs_root", "after", "description")
+        reader.only("name", "run", "check", "needs_root", "after", "description", "unless_linked")
         name = reader.required_string("name")
         if not _NAME.fullmatch(name) or name == POST_AFTER_INSTALL:
             raise reader.fail(f"invalid post name {name!r}; use lowercase letters, digits, '.', '_' and '-'")
@@ -378,6 +381,7 @@ def _parse_posts(readers: list[_Reader]) -> tuple[Post, ...]:
                 reader.boolean("needs_root", False),
                 after,
                 reader.string("description") or "",
+                reader.strings("unless_linked"),
             )
         )
     return tuple(posts)
@@ -407,6 +411,7 @@ def parse_manifest(name: str, text: str, directory: Path) -> Manifest:
         "install",
         "step",
         "post",
+        "manual",
     )
     source_reader = root.sub("source")
     if source_reader is None:
@@ -450,6 +455,7 @@ def parse_manifest(name: str, text: str, directory: Path) -> Manifest:
         install=_parse_install(install_reader) if install_reader is not None else Install(),
         steps=steps,
         post=_parse_posts(root.array("post")),
+        manual=root.string("manual") or "",
     )
 
 

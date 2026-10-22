@@ -1,6 +1,7 @@
 description = "OpenSSH server installed, enabled and running; ordered after tailscaled when it listens on tailscale addresses"
 enabled = true
 order = 50   # init step 5
+manual = "with password_auth = false and no key in ~/.ssh/authorized_keys: add your public key (ssh-copy-id), then run apply again; the lock-out guard refuses otherwise"
 
 [source]
 kind = "system"

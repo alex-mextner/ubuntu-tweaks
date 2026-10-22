@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ubuntu_tweaks.actions import Action, Phase
+from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules, tilde
 from ubuntu_tweaks.process import run
@@ -45,7 +45,8 @@ class CompileSchemas(Action):
         return all(source.stat().st_mtime <= built for source in sources)
 
     def run(self) -> None:
-        self.module.require_metadata()
+        if self.module.metadata() is None:
+            raise ManualStepRequired(f"{self.module.name}: its sources are missing (see the submodule step)")
         run(["glib-compile-schemas", str(self.module.schemas_dir)])
 
 

@@ -23,7 +23,7 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 def _source_label(manifest: Manifest) -> str:
     source = manifest.source
     if source.kind is SourceKind.SYSTEM:
-        return f"modules/{manifest.name}/{source.install[0]} (root)"
+        return f"modules/{manifest.name}/{source.install[0]} ({'root' if source.root else 'user'})"
     return source.path or "(settings only)"
 
 

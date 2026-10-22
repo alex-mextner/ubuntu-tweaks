@@ -88,16 +88,22 @@ class PackageAction(Action):
     def check(self) -> bool:
         return not self._missing()
 
+    def _update_command(self) -> Sequence[str] | None:
+        """What runs right before the install (``apt-get update``), decided when it is needed."""
+        return self._before
+
     def describe(self) -> str:
         text = f"{self._manager}: install {', '.join(self._missing())}"
-        return text + (f" (after {' '.join(self._before)})" if self._before else "")
+        before = self._update_command()
+        return text + (f" (after {' '.join(before)})" if before else "")
 
     def run(self) -> None:
         missing = self._missing()
         if not missing:
             return
-        if self._before:
-            self._process.execute(self._process.elevate(list(self._before)) if self.needs_root else list(self._before))
+        before = self._update_command()
+        if before:
+            self._process.execute(self._process.elevate(list(before)) if self.needs_root else list(before))
         argv = self._install_argv(missing)
         self._process.execute(self._process.elevate(argv) if self.needs_root else argv)
 

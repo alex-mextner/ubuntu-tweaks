@@ -149,9 +149,11 @@ def apply(
         # a manual step reported in an earlier pass is not run again (its installer may have done work)
         plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
     print(f"{changed} changed")
-    skipped = ExecutionResult(changed, result.skipped, tuple(manual.values())).render_skipped()
-    if skipped:
-        print(skipped)
+    final = ExecutionResult(changed, result.skipped, tuple(manual.values()))
+    if final.skipped:
+        print(final.render_skipped())
     if relogin_hint or any(kind in CODE_CHANGING for kind in executed):
         print(RELOGIN_HINT)
+    if final.manual:
+        print(final.render_manual())
     return 0

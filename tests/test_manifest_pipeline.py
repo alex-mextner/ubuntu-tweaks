@@ -159,5 +159,22 @@ class RepoModulesTests(unittest.TestCase):
         self.assertRegex(str(step.args["sha256"]), r"^[0-9a-f]{64}$")
 
 
+class LinkedAndManualFieldTests(unittest.TestCase):
+    def test_unless_linked_and_manual_are_read_and_default_to_nothing(self) -> None:
+        plain = parse(BUILTIN + '[[post]]\nname = "a"\nrun = ["/bin/true"]\ncheck = ["/bin/true"]\n')
+        self.assertEqual((plain.manual, plain.post[0].unless_linked, plain.post[0].after), ("", (), None))
+        text = (
+            'manual = "do the thing"\n'
+            + BUILTIN
+            + '[[post]]\nname = "a"\nunless_linked = [".bashrc"]\nrun = ["/bin/true"]\ncheck = ["/bin/true"]\n'
+        )
+        manifest = parse(text)
+        self.assertEqual((manifest.manual, manifest.post[0].unless_linked), ("do the thing", (".bashrc",)))
+
+    def test_unless_linked_must_be_a_list_of_strings(self) -> None:
+        with self.assertRaises(ConfigError):
+            parse(BUILTIN + '[[post]]\nname = "a"\nunless_linked = 3\nrun = ["/bin/true"]\ncheck = ["/bin/true"]\n')
+
+
 if __name__ == "__main__":
     unittest.main()

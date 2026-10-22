@@ -149,9 +149,10 @@ class SystemModuleAction(Action):
             self._process.execute(argv, cwd=self._manifest.directory)
         except CommandError as error:
             if error.returncode == NEEDS_MANUAL_EXIT:
+                hint = f": {self._manifest.manual}" if self._manifest.manual else ""
                 raise ManualStepRequired(
                     f"{self._manifest.name}: the installer needs a manual step (exit {NEEDS_MANUAL_EXIT}; "
-                    "its output above says which)"
+                    f"its output above says which){hint}"
                 ) from error
             raise ActionFailed(f"{self._manifest.name}: {error}") from error
 

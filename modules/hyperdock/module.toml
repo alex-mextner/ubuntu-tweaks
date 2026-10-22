@@ -1,4 +1,5 @@
 description = "macOS-style dock"
+order = 80   # init step 8 (the dock), after Firefox (step 7)
 
 [source]
 kind = "submodule"

@@ -8,7 +8,9 @@ then ``apply --commit`` in a **fresh interpreter** (the pull may have changed th
 carrying over ``--machine``, ``--profile`` and ``--only``; the re-login hint is printed when the pull
 or the submodule update changed anything. Without ``--commit`` it prints the two git commands and
 the ``apply`` preview of the *current* checkout (what the plan will be after the pull is not
-knowable before it). The release channel and schedule are ticket #19, not handled here.
+knowable before it). A tree that is not a git checkout (a tarball or a copied directory: no ``.git``)
+has nothing to pull: the git steps are skipped with a message and ``apply`` still runs, so ``update``
+never needs ``git`` there. The release channel and schedule are ticket #19, not handled here.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     parser.add_argument("--commit", action="store_true", help="pull and apply (default: preview only)")
     parser.add_argument("--no-sudo", action="store_true", help="skip actions that need root and say so")
     parser.set_defaults(handler=run)
+
+
+def _is_git_checkout(ctx: Context) -> bool:
+    return (ctx.repo_root / ".git").exists()  # a directory, or a file in a worktree or submodule
 
 
 def _code_state(ctx: Context) -> str:
@@ -60,10 +66,16 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         require_gi()
         from ubuntu_tweaks import reconcile
 
-        print(f"Would run in {ctx.repo_root}:\n  {' '.join(PULL)}\n  {' '.join(SUBMODULES)}")
-        print("Plan for the current checkout (computed before the pull):")
+        if _is_git_checkout(ctx):
+            print(f"Would run in {ctx.repo_root}:\n  {' '.join(PULL)}\n  {' '.join(SUBMODULES)}")
+            print("Plan for the current checkout (computed before the pull):")
+        else:
+            print(f"{ctx.repo_root} is not a git checkout: nothing to pull, no submodules to update. Plan:")
         return reconcile.apply(ctx, commit=False, no_sudo=args.no_sudo)
 
+    if not _is_git_checkout(ctx):
+        print(f"{ctx.repo_root} is not a git checkout: skipping the pull and the submodule update.")
+        return subprocess.run(_apply_command(ctx, no_sudo=args.no_sudo), check=False).returncode
     before = _code_state(ctx)
     run_command(PULL, cwd=ctx.repo_root)
     run_command(SUBMODULES, cwd=ctx.repo_root)

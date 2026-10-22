@@ -3,6 +3,8 @@
 import dataclasses
 import hashlib
 import os
+import shutil
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +41,8 @@ class BaseCase(TempDirCase):
         self.present_commands: set[str] = set()
         self.fetched: list[str] = []
         self.script = INSTALLER
+        self.uid = os.getuid()
+        write(self.root / "var/lib/apt/lists/archive.example_dists_x_main_binary-amd64_Packages", "")  # fresh lists
 
     def module(self, name: str, text: str) -> None:
         write(self.repo / "modules" / name / "module.toml", text)
@@ -54,7 +58,7 @@ class BaseCase(TempDirCase):
             home=self.home,
             user="ultra",
             group="staff",
-            uid=os.getuid(),
+            uid=self.uid,
             fetch=fetch,
             which=lambda command: f"/usr/bin/{command}" if command in self.present_commands else None,
         )
@@ -118,6 +122,34 @@ class AptBatchTests(BaseCase):
         self.assertEqual(runs[0], ("sudo", "--", "apt-get", "update"))
         self.assertIn("(after apt-get update)", action.describe())
 
+    def test_missing_or_stale_package_lists_run_apt_update_before_the_install(self) -> None:
+        self.module("base-tools", self.TOOLS)
+        lists = self.root / "var/lib/apt/lists"
+        for age_days in (None, 3):  # no index at all, an index three days old
+            shutil.rmtree(lists)
+            lists.mkdir(parents=True)
+            if age_days is not None:
+                index = write(lists / "archive.example_dists_x_main_binary-amd64_Packages", "")
+                stamp = time.time() - age_days * 24 * 3600
+                os.utime(index, (stamp, stamp))
+            runner = FakeProcess()
+            runs: list[tuple[str, ...]] = []
+            runner._effects = lambda argv, _input, runs=runs: runs.append(argv)  # noqa: SLF001
+            (action,) = self.plan(runner).actions
+            self.assertIn("(after apt-get update)", action.describe())
+            action.run()
+            self.assertEqual([run[2:4] for run in runs], [("apt-get", "update"), ("apt-get", "install")])
+
+    def test_fresh_package_lists_are_not_refreshed(self) -> None:
+        self.module("base-tools", self.TOOLS)
+        runner = FakeProcess()
+        runs: list[tuple[str, ...]] = []
+        runner._effects = lambda argv, _input: runs.append(argv)  # noqa: SLF001
+        (action,) = self.plan(runner).actions
+        self.assertNotIn("apt-get update", action.describe())
+        action.run()
+        self.assertEqual([run[2:4] for run in runs], [("apt-get", "install")])
+
     def test_disabled_modules_and_modules_outside_only_contribute_nothing(self) -> None:
         self.module("base-tools", self.TOOLS)
         self.module("clipboard", self.CLIP)
@@ -173,6 +205,11 @@ class LoginShellTests(BaseCase):
         (action,) = self.plan(FakeProcess()).actions
         self.assertIn("(now unknown)", action.describe())
 
+    def test_a_path_instead_of_a_shell_name_is_invalid_config(self) -> None:
+        self.module("zsh", self.MODULE.replace('shell = "zsh"', 'shell = "/tmp/evil"'))
+        with self.assertRaisesRegex(ConfigError, "a name like 'zsh', not a path"):
+            self.candidates(FakeProcess())
+
 
 class RcFileTests(BaseCase):
     MODULE = 'phase = "base"\n[source]\nkind = "builtin"\n[[step]]\nname = "shell-rc"\nshell = "zsh"\n'
@@ -207,6 +244,22 @@ class RcFileTests(BaseCase):
         first.run()
         self.assertEqual((self.home / ".zprofile").read_text(encoding="utf-8"), "raced\n")
 
+    def test_a_file_the_profile_links_is_not_created_by_the_base_phase(self) -> None:
+        self.module("zsh", self.MODULE)
+        write(self.profile.files_dir / ".zshrc", "mine\n")
+        self.assertEqual(
+            [a.describe() for a in self.plan(FakeProcess()).actions],
+            ["create ~/.zprofile (brew shellenv, ~/.local/bin on PATH); only because it is absent"],
+        )
+        write(self.profile.overlay_files_dir / ".zprofile", "this machine\n")
+        self.assertEqual(self.plan(FakeProcess()).actions, ())
+
+    def test_with_only_the_links_are_not_in_the_plan_so_the_files_are_still_created(self) -> None:
+        self.module("zsh", self.MODULE)
+        write(self.profile.files_dir / ".zshrc", "mine\n")
+        only = frozenset({"zsh"})
+        self.assertEqual(len(self.plan(FakeProcess(), only)), 2)
+
 
 class GitTests(BaseCase):
     MODULE = (
@@ -231,13 +284,15 @@ class GitTests(BaseCase):
                 action.run()
         self.assertEqual(runner.executed, [])
 
-    def test_a_failing_login_command_is_a_clean_failure_naming_the_step(self) -> None:
+    def test_a_rejected_token_or_an_offline_host_is_a_manual_step_never_an_abort(self) -> None:
         class Failing(FakeProcess):
             def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
-                raise CommandError("exited with status 1", 1)
+                raise CommandError("gh: HTTP 401 Bad credentials", 1)
 
         (action,) = [a for a in self.plan(Failing({self.EXISTS: ok()})).actions if a.kind == "gh-login"]
-        with self.assertRaisesRegex(ActionFailed, "gh auth login with the keychain token failed"):
+        with self.assertRaisesRegex(
+            ManualStepRequired, r"gh auth login \(the keychain token was not accepted or github.com is unreachable"
+        ):
             action.run()
 
     def test_describe_asks_the_keychain_once(self) -> None:
@@ -397,6 +452,17 @@ class BrewTests(BaseCase):
         self.prefix.mkdir(parents=True)
         self.assertEqual(list(self.actions(FakeProcess())), ["brew-install"])
 
+    def test_a_prefix_the_user_does_not_own_is_a_manual_step_with_the_chown_and_changes_nothing(self) -> None:
+        self.uid = os.getuid() + 1  # the directory exists, but it is "root's"
+        self.prefix.mkdir(parents=True)
+        runner = FakeProcess()
+        prefix = self.actions(runner)["brew-prefix"]
+        with self.assertRaisesRegex(
+            ManualStepRequired, r"run `sudo chown -R ultra:staff /home/linuxbrew/.linuxbrew` yourself"
+        ):
+            prefix.run()
+        self.assertEqual(runner.executed, [])
+
     def test_install_verifies_the_checksum_then_runs_the_script_non_interactively(self) -> None:
         self.prefix.mkdir(parents=True)
         runner = FakeProcess()
@@ -550,6 +616,42 @@ class PostTests(BaseCase):
         self.prefix.mkdir(parents=True)
         wire.run()
         self.assertEqual(executed, [("/bin/true",)])
+
+    def test_a_post_without_after_waits_for_the_install_like_after_install(self) -> None:
+        self.post_module(
+            '[[post]]\nname = "wire"\nrun = ["/bin/true"]\ncheck = ["/bin/false"]\n', '[[step]]\nname = "brew-prefix"\n'
+        )
+        runner = FakeProcess({("/bin/false",): CommandResult(1)})
+        _prefix, wire = self.candidates(runner)
+        with self.assertRaisesRegex(ManualStepRequired, r"wire waits for its install \(\[brew-prefix\]"):
+            wire.run()
+        self.assertEqual(runner.executed, [])
+
+    def test_unless_linked_drops_the_post_when_the_profile_links_one_of_the_files(self) -> None:
+        self.post_module(
+            '[[post]]\nname = "shellenv"\nunless_linked = [".bashrc", ".profile"]\nrun = ["/bin/true"]\n'
+            'check = ["/bin/false"]\n[[post]]\nname = "tools"\nafter = "shellenv"\nrun = ["/bin/true"]\n'
+            'check = ["/bin/false"]\n'
+        )
+        runner = FakeProcess({("/bin/false",): CommandResult(1)})
+        self.assertEqual([a.key for a in self.candidates(runner)], ["post:brew:shellenv", "post:brew:tools"])
+        write(self.profile.overlay_files_dir / ".profile", "mine\n")
+        self.assertEqual([a.key for a in self.candidates(runner)], ["post:brew:tools"])
+
+    def test_a_system_installer_probe_gets_the_module_options(self) -> None:
+        self.module(
+            "svc",
+            '[source]\nkind = "system"\ninstall = "i.sh"\ncheck = "i.sh --check"\n'
+            '[[post]]\nname = "wire"\nrun = ["/bin/true"]\ncheck = ["/bin/false"]\n',
+        )
+        write(self.profile.machine_toml, '[modules.svc]\nenabled = true\nflavor = "x"\n')
+        runner = FakeProcess({("/bin/false",): CommandResult(1)})
+        (wire,) = self.candidates(runner)
+        with self.assertRaises(ManualStepRequired):
+            wire.run()
+        probes = [argv for argv in runner.queries if argv[:1] == ("env",)]
+        checker = str(self.repo / "modules/svc/i.sh")
+        self.assertEqual(probes, [("env", 'UBUNTU_TWEAK_MODULE_CONFIG={"flavor":"x"}', checker, "--check")])
 
     def test_unknown_step_is_invalid_config(self) -> None:
         self.post_module('[[step]]\nname = "make-coffee"\n')

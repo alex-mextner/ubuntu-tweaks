@@ -27,12 +27,11 @@ gi.require_version("GLib", "2.0")
 
 from gi.repository import GLib  # noqa: E402
 
-from ubuntu_tweaks.actions import Action, Phase  # noqa: E402
+from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase  # noqa: E402
 from ubuntu_tweaks.context import Context  # noqa: E402
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules  # noqa: E402
 from ubuntu_tweaks.manifest import discover_modules  # noqa: E402
 from ubuntu_tweaks.settings import SettingsBackend  # noqa: E402
-from ubuntu_tweaks.errors import ConfigError  # noqa: E402
 
 SCHEMA = "org.gnome.shell"
 ENABLED = "enabled-extensions"
@@ -66,7 +65,7 @@ class _ExtensionListAction(Action):
     def resolved(self) -> str:
         uuid = self._uuid()
         if uuid is None:
-            raise ConfigError(f"module {self.scope}: extension uuid unknown, the submodule is not initialized")
+            raise ManualStepRequired(f"module {self.scope}: extension uuid unknown, its sources are missing")
         return uuid
 
     def _label(self) -> str:

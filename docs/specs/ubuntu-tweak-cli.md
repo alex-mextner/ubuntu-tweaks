@@ -279,11 +279,36 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 3 | `git` + `gh` installed and configured | `git-gh` (30) |
 | 4 | Homebrew for Linux and its follow-up actions | `brew` (40) |
 | 5 | ssh server | `ssh-server` (50) |
-| 6 | passwords-app: install, enable unit, native host | `passwords-app*` (60) |
-| 7 | Firefox integration: extension, auto-login with passwords-app credentials | `firefox*` (70) |
+| 6 | passwords-app: install, enable unit, native host, polkit action | `passwords-app` (60), `passwords-app-polkit` (61) |
+| 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
-| 9 | GNOME settings and profile files | the settings and files phases |
-| 10 | optional, off unless a machine enables them: rig (+ tmux, omp), the `.files` checkout | modules (100+) |
+| 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
+| 10 | optional, off unless a machine enables them: rig (+ tmux, omp, `ctmux`), the `.files` checkout | `rig` (100), `dotfiles` (110) |
+
+`ctmux` is not a module: it is a first-class rig tool (`tools.items.ctmux`), installed by `rig activate`
+inside step 10.
+
+<a id="init-order-table"></a>
+**Order of every module** (the golden `init` preview of an empty machine, `tests/golden/init_empty_machine.txt`,
+covers all of them; `tests/test_init_pipeline.py` fails when this table and a `module.toml` disagree):
+
+| Module | `order` | Phase of its install actions | Default |
+|---|---|---|---|
+| `base-tools` | 10 | `base` | on |
+| `zsh` | 11 | `base` | on |
+| `clipboard` | 20 | `base` | on |
+| `git-gh` | 30 | `base` | on |
+| `brew` | 40 | `base` | on |
+| `ssh-server` | 50 | `system` | on |
+| `passwords-app` | 60 | `system` | on |
+| `passwords-app-polkit` | 61 | `system` | on |
+| `firefox` | 70 | `system` | on |
+| `firefox-policy` | 71 | `system` | on |
+| `firefox-autologin` | 72 | `system` | on |
+| `firefox-passkey-qr` | 73 | `system` | off |
+| `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
+| `rig` | 100 | `system` | off |
+| `dotfiles` | 110 | `system` | off |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
 
@@ -304,7 +329,7 @@ may set:
 `planners.build_actions` applies both after all planners ran (`apply_module_ordering`), so any planner's
 actions, the system-module planner's included, follow the manifest.
 
-**Manifest tables** (any source kind; a `system` module has its own installer and takes only `[[post]]`):
+**Manifest tables** (any source kind; a `system` module has its own installer and takes only `[[post]]` and `manual`):
 
 ```toml
 order = 30
@@ -324,9 +349,12 @@ sha256 = "..."
 name = "formulae"
 description = "brew install the formulae of packages.toml"   # the preview line; default: name + argv
 needs_root = false
-after = "install"              # "install" or an earlier [[post]] name; posts run in declared order
+after = "install"              # default; or an earlier [[post]] name; posts run in declared order
+unless_linked = [".bashrc"]    # optional: not planned when the profile links one of these files
 run = ["/home/linuxbrew/.linuxbrew/bin/brew", "install", "{packages.brew}"]
 check = ["/home/linuxbrew/.linuxbrew/bin/brew", "list", "--formula", "{packages.brew}"]
+
+manual = "how the user completes the step a `system` installer reports as manual (exit 10)"   # top level
 ```
 
 - **`[install] apt`** of every enabled module of one phase is **one** `package` action (one
@@ -341,7 +369,11 @@ check = ["/home/linuxbrew/.linuxbrew/bin/brew", "list", "--formula", "{packages.
   path. A whole argument `{packages.apt|snap|flatpak|brew}` expands to that list of `packages.toml`; a post
   whose placeholder expands to nothing is not planned. `check` exits 0 = satisfied (a failing or missing
   check means "not satisfied"). An absolute `argv[0]` that does not exist yet (brew before its install ran,
-  e.g. under `--no-sudo`) makes the post a manual step instead of a crash.
+  e.g. under `--no-sudo`) makes the post a manual step instead of a crash. `after` defaults to `"install"`
+  (the module's install actions: its apt batch, its steps, its system installer); a post never runs while
+  what it waits for is unsatisfied. `unless_linked = [".bashrc", ...]` (`$HOME`-relative) drops the post
+  from the plan when the profile's `files/` links one of those paths: the profile's own file is then the
+  one that does the job (see *rc files* below).
 - **Manual steps.** An action whose `run()` raises `ManualStepRequired` is reported as
   `needs manual: <what>`, is not counted in `N changed`, does not fail the plan, and stays unsatisfied, so
   `status` lists it as Missing (exit 3). `apply` never prompts for it. A staged `apply` (it rebuilds the plan
@@ -350,7 +382,14 @@ check = ["/home/linuxbrew/.linuxbrew/bin/brew", "list", "--formula", "{packages.
   state). Steps that need a package an unsatisfied step was to install (`login-shell` without zsh,
   `gh-login` / `git-credential-helper` without `gh`, `brew-install` without its prefix) are manual steps too,
   so `--no-sudo` never aborts the plan. `run()` raises it before any side effect (the system-module
-  exit-10 case is the one exception, and is covered by that rule).
+  exit-10 case is the one exception, and is covered by that rule). A `gh auth login` that fails (a token the
+  server rejects, an offline machine) is a manual step as well, never a failed plan: `init --commit` with an
+  expired token still ends with brew installed and `gh-login` in the list.
+- **The closing `Manual steps` block.** `apply --commit` and `init --commit` end with one block listing every
+  manual step of the run, numbered, one line each (`  1. [gh-login] gh auth login (...)`), after `N changed`,
+  the `--no-sudo` skip list and the re-login hint. A module's installer that exits 10 contributes its
+  manifest `manual` text (how the user finishes it); the installer's own `needs manual: <what>` line is above
+  in the output. Every manual step a module can end with is in the table *Manual steps* below.
 
 **`system` modules, additions.** `[source] root = false` (default `true`) runs the installer as the user:
 the action has no `[sudo]` marker, is not skipped by `--no-sudo`, and `install` runs directly (for modules
@@ -370,7 +409,10 @@ exit stays a failure.
 built without them). `git` and a module's `[deps] apt` that an enabled module installs through
 `[install] apt` of a module with `phase = "base"` (the only installs that run before the submodule init that
 needs `git`) are reported `planned` (`init` / `apply` install them), not `MISSING`, so `doctor` does not
-fail on tools the pipeline is about to install. `update` runs `git pull` before `apply` and still needs git.
+fail on tools the pipeline is about to install. `update` runs `git pull` and the submodule update before `apply` only in
+a git checkout (`<repo>/.git` exists); a tree without it (an unpacked tarball) prints that it skips them and runs
+`apply`, so it never needs `git` there. The `submodule` planner agrees: in a tree without `.git` a non-empty
+submodule directory counts as present and an empty one is a manual step (never a `git` call).
 
 ### Base modules
 
@@ -380,9 +422,9 @@ Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
 |---|---|
 | `base-tools` | apt: `curl wget ca-certificates git gnupg openssh-client zsh build-essential procps file zip unzip 7zip xz-utils bzip2 jq libsecret-tools` (verified with `apt-cache policy` on Ubuntu 26.04: all exist; `p7zip-full` does not, `7zip` replaces it). `build-essential procps file curl git` are Homebrew's prerequisites; the archivers answer "zip is missing" on a stock install; `libsecret-tools` (`secret-tool`) is for the Secret Service scripts of the passwords-app and Firefox modules. |
 | `clipboard` | apt: `wl-clipboard xclip xsel`: what `gh` looks for when it copies a one-time code (`! Failed to copy one-time code to clipboard: No clipboard utilities available`). |
-| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`); step `shell-rc`: `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone); the mac-era dotfiles at the root of `.files` are not touched. |
+| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`); step `shell-rc`: `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone) **and not linked by the profile** (see *rc files* below); the mac-era dotfiles at the root of `.files` are not touched. |
 | `git-gh` | apt `git gh` (`gh` 2.46.0 is in the 26.04 `universe` archive, decided with `apt-cache policy gh`); steps `git-identity`, `gh-login`, `git-credential-helper`. |
-| `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it), `tools` (`brew install uv oven-sh/bun/bun` unless `uv` and `bun` are already on `PATH`: what the passwords-app and Firefox modules run on) and `formulae` (`brew install` of `packages.toml` `brew`). A post with `after` does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
+| `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it, or the profile links one of them), `tools` (`brew install uv oven-sh/bun/bun` unless `uv` and `bun` are already on `PATH`: what the passwords-app and Firefox modules run on) and `formulae` (`brew install` of `packages.toml` `brew`). A post waits for the module's install (`after` defaults to `install`) and does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
 
 **git and gh.** Identity comes only from the profile, never invented:
 
@@ -402,7 +444,8 @@ item `token_ref` (the `keychain` CLI, GNOME Keyring / Secret Service), at run ti
 and its output is masked by `keychain`. Items under `ubuntu-tweaks/` belong to the caller `ubuntu-tweaks`;
 another namespace needs a grant in `~/.config/keychain-cli/policy.toml`. When the keychain is missing, locked,
 denies access or has no item, the action is `needs manual: gh auth login (<reason>; store a token with
-`keychain set <ref>`)` and `status` lists it Missing. `git-credential-helper` runs
+`keychain set <ref>`)` and `status` lists it Missing. A token that exists but is rejected, or an unreachable
+host, is the same manual step (`gh auth login` failing never aborts the plan). `git-credential-helper` runs
 `gh auth setup-git --hostname <host> --force`.
 
 **Homebrew installer pin.** `brew-prefix` creates `/home/linuxbrew/.linuxbrew` owned by the user with
@@ -433,6 +476,61 @@ and `git config --global --get-all credential.https://github.com.helper` names `
 without one, `status` lists `gh-login` as Missing and `apply --commit` still exits 0. Not yet observed on a
 real fresh machine: the Homebrew installer running non-interactively against a pre-created prefix
 (derived from reading the pinned script, not executed).
+
+**rc files and the profile's `files/`.** The BASE phase runs before the FILES phase, so a file the profile links
+would be created or appended to by BASE and then replaced (with a backup) by the link. The rule, one for all:
+**BASE never creates or appends to an rc file that the profile's `files/` links** (shared or machine overlay).
+`shell-rc` leaves out `~/.zprofile` / `~/.zshrc` when the profile links that file, and the brew `shellenv` post
+(`unless_linked = [".bashrc", ".profile", ".bash_profile"]`) is not planned when the profile links any of them.
+The profile's own file is then the one that puts brew's `shellenv` and `~/.local/bin` on `PATH`. The preview
+shows what remains, and `tests/test_planner_base.py` covers both. With `--only` the links of `files/` are not in
+the plan (they carry no module scope), so BASE keeps creating the rc files then.
+
+**Stale package lists.** The base apt batch runs `apt-get update` right before its install when the package
+indexes in `/var/lib/apt/lists` are missing (a fresh image) or the newest `*_Packages*` file is older than two
+days (the preview line ends `(after apt-get update)`); `apt_update = true` of `packages.toml` forces it. The
+update is skipped when nothing is missing. **`login-shell`** takes a shell *name* (`zsh`); an argument with a
+`/` is invalid config (exit 2). **`brew-prefix`**: a prefix that exists but is not owned by the user (and has no
+brew) is a manual step with the exact `sudo chown -R <user>:<group> <prefix>` (nothing is changed); a prefix with
+a working `brew` counts as done.
+
+### Manual steps
+
+What `init` / `apply` can end with as `needs manual` (the closing `Manual steps` block prints these, see
+*Init pipeline*). Each is Missing in `status` until done; `apply` never prompts and never stores a secret.
+After doing one, run `ubuntu-tweak apply --commit` again.
+
+| Step | Module | Why only you | How you complete it |
+|---|---|---|---|
+| `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set ubuntu-tweaks/gh-token` (GNOME keyring), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
+| git identity | `git-gh` | not planned, only warned | set `[git] name` / `email` in `profile.toml` |
+| login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
+| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` (or `pkexec`); `--yes` only skips the apt confirmation, never the password |
+| `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
+| iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
+| polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
+| AMO signing key | `firefox` | the key belongs to the owner's AMO account | `secret-tool store` the items `purpose=amo-jwt-issuer` and `purpose=amo-jwt-secret` (the install output prints the commands) |
+| signed extension missing | `firefox-policy` | nothing to force-install yet | do the AMO step above first |
+| extension not active | `firefox-autologin` | Firefox must show the WebExtension-backend prompt | apply `firefox-policy`, restart Firefox, answer the prompt, check `about:policies` |
+| Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (see *Firefox*): without it the bridge step is skipped. Until firefox-passkey-qr PR 2 is merged the installer cannot run unattended: the module reports a manual step, run `passkey-qr install` in `~/dev/firefox-passkey-qr` |
+| rig / `.files` clone | `rig`, `dotfiles` (opt-in) | forge credentials, or a directory in the way | `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote`; resolve a diverged `~/.files` |
+| missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
+
+### One command on a fresh machine
+
+Request 13. `scripts/bootstrap.sh` (POSIX `sh`, at most 40 lines) takes a stock Ubuntu with neither `curl` nor
+`git` to a running `init`: when `git`, `curl`, the CA bundle or `python3-gi` is missing it runs `sudo apt-get update`
+and `sudo apt-get install -y git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
+without them), clones `alex-mextner/ubuntu-tweaks` with its submodules into `~/xp/ubuntu-tweaks` (or
+`$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated), then runs
+`bin/ubuntu-tweak init "$@"`. The commit is explicit: with no arguments it is the **preview**; `--yes` is the
+only word that turns it into `init --commit --yes` (apply and install without asking); any other argument
+(`--commit`, `--no-sudo`) goes to `init` unchanged. It is the one-liner of the README:
+`curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scripts/bootstrap.sh | sh -s -- --yes`
+(once on `main`; with no `curl` at all, `wget -qO- <url> | sh -s -- --yes`, or `sudo apt-get install -y curl` first).
+`sudo` still asks for the password on the terminal. A private profile (`~/.files/ubuntu`) is not cloned by it: the
+first `init` prints the exact clone command and the *Manual steps* block lists the gh login it needs.
+`tests/test_bootstrap.py` runs the script with fake `sudo`, `apt-get`, `git` and `python3` on `PATH` and checks the argv.
 
 ### Modules at cutover
 

@@ -1,6 +1,7 @@
 description = "passwords-app Firefox extension: built and signed on AMO (key from the Secret Service), staged for the policy"
 enabled = true
 order = 70   # init step 7, after passwords-app (it needs the checkout)
+manual = "create the AMO API key once: secret-tool store items purpose=amo-jwt-issuer and purpose=amo-jwt-secret (the install output names the exact commands), then run apply again"
 
 [source]
 kind = "system"

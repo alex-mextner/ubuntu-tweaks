@@ -12,7 +12,7 @@ from tests.util import write
 
 try:
     from tests.actions_scenario import Scenario
-    from ubuntu_tweaks.actions import Plan
+    from ubuntu_tweaks.actions import ManualStepRequired, Plan
     from ubuntu_tweaks.context import Context
     from ubuntu_tweaks.errors import ConfigError
     from ubuntu_tweaks.extension import extension_modules
@@ -90,7 +90,7 @@ class ExtensionLinkTests(Scenario):
         self.assertEqual(len(pending), 1)
         self.assertIn("known once the submodule is initialized", pending[0].describe())
         self.assertEqual(pending[0].kind, "link")
-        with self.assertRaisesRegex(ConfigError, "initialize the submodule first"):
+        with self.assertRaisesRegex(ManualStepRequired, "its sources are missing"):
             pending[0].run()
         self.add_extension("gnome-extensions/dock", "dock@real")
         pending[0].run()
@@ -232,6 +232,17 @@ class SubmoduleTests(Scenario):
         self.assertIn("never resets", line)
         self.assertEqual(self.git(inside, "rev-parse", "HEAD").strip(), head)
 
+    def test_an_unpacked_archive_has_no_git_to_ask(self) -> None:
+        archive = self.tmp / "archive"
+        write(archive / "modules/dock/module.toml", '[source]\nkind = "submodule"\npath = "gnome-extensions/dock"\n')
+        (archive / "gnome-extensions/dock").mkdir(parents=True)
+        context = Context(archive, Profile(self.profile_root, "home"))
+        (action,) = Plan.build(submodule.build(context, self.backend())).actions
+        with self.assertRaisesRegex(ManualStepRequired, "is not a git checkout"):
+            action.run()
+        write(archive / "gnome-extensions/dock/metadata.json", "{}")
+        self.assertEqual(len(Plan.build(submodule.build(context, self.backend()))), 0)
+
 
 class ToggleTests(Scenario):
     def setUp(self) -> None:
@@ -286,7 +297,7 @@ class ToggleTests(Scenario):
         backend = self.backend()
         (action,) = [a for a in self.plan(backend).actions if a.scope == "later"]
         self.assertIn("uuid known once the submodule is initialized", action.describe())
-        with self.assertRaisesRegex(ConfigError, "not initialized"):
+        with self.assertRaisesRegex(ManualStepRequired, "its sources are missing"):
             action.run()
 
     def test_extras_list_enabled_extensions_no_module_declares(self) -> None:

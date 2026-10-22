@@ -1,6 +1,7 @@
 description = "Optional (init step 10): a checkout of alex-mextner/.files at ~/.files when absent; the profile directory ~/.files/ubuntu lives inside it"
 enabled = false          # a machine opts in: [modules.dotfiles] enabled = true in machines/<host>/machine.toml
 order = 110
+manual = "a checkout that is behind with local changes, or diverged, is yours to resolve in ~/.files; a failed clone needs `gh auth login`"
 
 # User level: it only clones into $HOME and fast-forwards that checkout; it never writes a file of the
 # repository, links nothing and never touches the mac-era dotfiles (zsh, zplug, brew) in it.

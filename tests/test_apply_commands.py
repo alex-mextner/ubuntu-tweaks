@@ -436,6 +436,7 @@ class UpdateTests(CommandScenario):
     def setUp(self) -> None:
         super().setUp()
         self.real_apply = reconcile.apply
+        (Path(self.repo) / ".git").mkdir(exist_ok=True)
 
     def test_preview_prints_the_git_commands_and_the_current_plan(self) -> None:
         with mock.patch.object(update, "run_command") as run_command:
@@ -495,6 +496,25 @@ class UpdateTests(CommandScenario):
             code, out = self.run_update(commit=True)
         self.assertEqual(code, 3)
         self.assertNotIn(RELOGIN_HINT, out)
+
+    def test_a_tree_without_dot_git_skips_the_git_steps_and_still_applies(self) -> None:
+        (Path(self.repo) / ".git").rmdir()
+        with (
+            mock.patch.object(update, "run_command") as run_command,
+            mock.patch.object(update.subprocess, "run", return_value=mock.Mock(returncode=0)) as spawn,
+        ):
+            code, out = self.run_update(commit=True)
+        self.assertEqual(code, 0)
+        run_command.assert_not_called()
+        spawn.assert_called_once()
+        self.assertIn("is not a git checkout: skipping the pull and the submodule update", out)
+
+    def test_the_preview_of_a_tree_without_dot_git_names_no_git_command(self) -> None:
+        (Path(self.repo) / ".git").rmdir()
+        code, out = self.run_update()
+        self.assertEqual(code, 0)
+        self.assertNotIn("git pull", out)
+        self.assertIn("is not a git checkout", out)
 
 
 if __name__ == "__main__":

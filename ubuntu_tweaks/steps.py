@@ -119,6 +119,7 @@ class StepEnv:
     uid: int = field(default_factory=os.getuid)
     fetch: Callable[[str], bytes] = default_fetch
     which: Callable[[str], str | None] = shutil.which
+    linked: frozenset[str] = frozenset()  # $HOME-relative paths the profile's files/ links (FILES phase)
 
     def system_path(self, absolute: str) -> Path:
         return self.root / absolute.lstrip("/")
@@ -330,7 +331,11 @@ class GhLoginAction(Action):
                 ]
             )
         except CommandError as error:
-            raise ActionFailed(f"gh auth login with the keychain token failed: {error}") from error
+            first = next((line.strip() for line in str(error).splitlines() if line.strip()), "no output")
+            raise ManualStepRequired(
+                f"gh auth login (the keychain token was not accepted or {self._host} is unreachable: {first}; "
+                f"fix the token with `keychain set {self._ref}` or run `gh auth login` yourself)"
+            ) from error
 
 
 class BrewPrefixAction(Action):
@@ -352,6 +357,12 @@ class BrewPrefixAction(Action):
         return self._owned() or self._env.system_path(f"{self._prefix}/bin/brew").exists()
 
     def run(self) -> None:
+        path = self._env.system_path(self._prefix)
+        if path.exists() and not _owned_by(path, self._env.uid):
+            raise ManualStepRequired(
+                f"{self._prefix} exists but is not owned by {self._env.user}: "
+                f"run `sudo chown -R {self._env.user}:{self._env.group} {self._prefix}` yourself"
+            )
         argv = ["install", "-d", "-o", self._env.user, "-g", self._env.group, self._prefix]
         _execute(self._env, self._env.process.elevate(argv), "brew-prefix")
 
@@ -401,7 +412,10 @@ class BrewInstallAction(Action):
 def _login_shell(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:
     where = f"module {module} step login-shell"
     _only_args(args, where, "shell")
-    return [LoginShellAction(env, _text_arg(args, "shell", where, "zsh"))]
+    shell = _text_arg(args, "shell", where, "zsh")
+    if "/" in shell:
+        raise ConfigError(f"{where}: step argument 'shell' is a name like 'zsh', not a path: {shell!r}")
+    return [LoginShellAction(env, shell)]
 
 
 def _shell_rc(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:
@@ -410,7 +424,7 @@ def _shell_rc(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[
     shell = _text_arg(args, "shell", where, "zsh")
     if shell not in RC_FILES:
         raise ConfigError(f"{where}: no rc file template for shell {shell!r}; known: {', '.join(RC_FILES)}")
-    return [RcFileAction(env, env.home / name, content) for name, content in RC_FILES[shell]]
+    return [RcFileAction(env, env.home / name, content) for name, content in RC_FILES[shell] if name not in env.linked]
 
 
 def _git_identity(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:
