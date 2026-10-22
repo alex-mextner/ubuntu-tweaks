@@ -545,6 +545,18 @@ class DoctorTests(CommandScenario):
             f'[deps]\napt = ["{apt}"]\n'
         )
 
+    def test_install_runs_through_the_open_sessions_prefix(self) -> None:
+        absent = [doctor.Requirement("tmux", "tmux", "x", lambda: False)]
+        self.addCleanup(process.use_root_prefix, None)
+        for prefix in (("pkexec",), ("sudo", "-A", "--")):
+            process.use_root_prefix(prefix)
+            with (
+                mock.patch.object(doctor, "run_command") as run_command,
+                mock.patch.object(process.os, "geteuid", return_value=1000),
+            ):
+                doctor.install(absent)
+            run_command.assert_called_once_with([*prefix, "apt-get", "install", "-y", "tmux"])
+
     def test_install_uses_sudo_unless_root(self) -> None:
         absent = [
             doctor.Requirement("tmux", "tmux", "x", lambda: False),
