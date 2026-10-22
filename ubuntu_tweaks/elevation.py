@@ -12,7 +12,7 @@ Assumptions:
 - The strategy is, first match wins: root; ``NoNewPrivs: 1`` (sudo and pkexec cannot work, whatever the
   sudoers say: ``RootUnavailable``); neither sudo nor pkexec (``RootUnavailable``); ``sudo -n true`` (NOPASSWD or
   a valid ticket); a controlling terminal: one explanatory line, then ``sudo -v`` once; ``SUDO_ASKPASS``:
-  ``sudo -A -v``; a graphical session and pkexec: ``pkexec true`` (polkit keeps no ticket, so it may ask per
+  ``sudo -A -v``; pkexec and a graphical session or a terminal: ``pkexec true`` (polkit keeps no ticket, so it may ask per
   action); else ``RootUnavailable``. A refused sudo or pkexec (wrong password, timeout, not allowed) is
   ``RootUnavailable`` too, with no retry. Every sudo path then runs a thread that executes ``sudo -n -v`` every
   ``refresh_seconds``, so the one password (or a ticket that was about to expire) outlives long steps.
@@ -211,26 +211,32 @@ class RootSession:
         ahead = f"{count} root action(s) ahead ({what})."
         if "sudo" in host.tools and self._via_sudo(host, ahead):
             return
-        if "pkexec" in host.tools and host.graphical:
-            self._say(f"{ahead} pkexec asks for your password in a graphical prompt (polkit may ask per action).")
+        if "pkexec" in host.tools and (host.graphical or host.terminal):
+            self._say(f"{ahead} pkexec asks for your password (polkit may ask per action).")
             self._ask(PKEXEC_CHECK, "pkexec", PKEXEC_PREFIX)
             return
-        if "sudo" in host.tools:
-            reason = (
-                "root is needed but nothing here can ask for a password: there is no terminal, no SUDO_ASKPASS, no "
-                "graphical session, and sudo is not passwordless."
-            )
-        else:
-            reason = (
-                "root is needed but only pkexec is installed and there is no graphical session to show its prompt. "
-                "Install sudo as root (`su -c 'apt-get install -y sudo'`) to be asked on a terminal."
-            )
-        raise self._unavailable(Cause.NO_PROMPT, reason)
+        raise self._unavailable(Cause.NO_PROMPT, self._no_prompt_reason(host))
+
+    @staticmethod
+    def _no_prompt_reason(host: Host) -> str:
+        """Only reached when nothing could ask: sudo (if installed) has no terminal and no askpass, and pkexec is
+        missing or has neither a terminal nor a graphical session; the reason says exactly that."""
+        gaps = (
+            ["sudo is not passwordless", "there is no terminal", "there is no SUDO_ASKPASS"]
+            if "sudo" in host.tools
+            else ["sudo is not installed"]
+        )
+        gaps.append(
+            "pkexec has no terminal or graphical session to ask on"
+            if "pkexec" in host.tools
+            else "pkexec is not installed"
+        )
+        return "root is needed but nothing here can ask for a password: " + ", ".join(gaps) + "."
 
     def _via_sudo(self, host: Host, ahead: str) -> bool:
         """``True`` when sudo works now (NOPASSWD, a valid ticket, or the one password it just got)."""
         if self._process.query(SUDO_CHECK).ok:
-            self._use(SUDO_PREFIX)
+            self._use(SUDO_ASKPASS_PREFIX if host.askpass and not host.terminal else SUDO_PREFIX)
             self._keep_alive()  # a ticket that is still valid may expire mid-run; harmless for NOPASSWD
             return True
         if host.terminal:

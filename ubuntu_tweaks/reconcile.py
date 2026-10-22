@@ -24,9 +24,15 @@ Public API:
 - ``header_lines(ctx, title) -> list[str]``, ``engine_version(ctx)``, ``print_warnings(lines)``: the
   explained (``ui.rich()``) header and warnings block of ``apply`` / ``status``.
 - ``apply(ctx, *, commit, no_sudo, extra_actions=(), backend_factory=open_backend,
-  relogin_hint=False, relocate=None, title="apply", preview_footer="apply.footer") -> int``: prints the
+  relogin_hint=False, relocate=None, title="apply", preview_footer="apply.footer", root=None) -> int``: prints the
   preview, or executes and prints ``N changed`` (interactive: numbered progress and a summary, see the
   spec's *Output*). ``title`` / ``preview_footer`` let ``init`` and ``update`` frame the same preview.
+  ``root`` is the ``elevation.RootSession`` that asks for root once, before the first root action (also again
+  after a rebuild that adds root actions); without one ``apply`` makes its own for the call. A preview and
+  ``--no-sudo`` never ask.
+- ``apply_detailed(..., confirm=None) -> ApplyOutcome``: the same, returning the exit ``code`` plus ``changed``,
+  ``manual`` steps and ``skipped`` root actions; ``confirm(plan)`` is asked after the preview and before
+  anything runs (``False``: nothing runs, ``declined``, exit 3).
 - ``RELOGIN_HINT``.
 """
 
@@ -41,6 +47,8 @@ from pathlib import Path
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.elevation import RootSession
+from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
 from ubuntu_tweaks.planners import build_actions, collect_warnings
 from ubuntu_tweaks.identity import Location, locate, missing_lines
@@ -183,6 +191,18 @@ def _manual_key(action: Action) -> tuple[str, str | None, str]:
     return (action.kind, action.scope, action.key or action.describe())
 
 
+@dataclasses.dataclass(frozen=True)
+class ApplyOutcome:
+    """What ``apply_detailed`` did: the exit ``code``, how many actions ``changed``, whether ``confirm`` said no
+    (nothing ran), and the ``manual`` steps (with their messages) and ``skipped`` root actions left over."""
+
+    code: int
+    changed: int = 0
+    declined: bool = False
+    manual: tuple[tuple[Action, str], ...] = ()
+    skipped: tuple[Action, ...] = ()
+
+
 def apply(
     ctx: Context,
     *,
@@ -194,7 +214,36 @@ def apply(
     relocate: Callable[[], Location] | None = None,
     title: str = "apply",
     preview_footer: str = "apply.footer",
+    root: RootSession | None = None,
 ) -> int:
+    return apply_detailed(
+        ctx,
+        commit=commit,
+        no_sudo=no_sudo,
+        extra_actions=extra_actions,
+        backend_factory=backend_factory,
+        relogin_hint=relogin_hint,
+        relocate=relocate,
+        title=title,
+        preview_footer=preview_footer,
+        root=root,
+    ).code
+
+
+def apply_detailed(
+    ctx: Context,
+    *,
+    commit: bool,
+    no_sudo: bool,
+    extra_actions: Iterable[Action] = (),
+    backend_factory: BackendFactory = open_backend,
+    relogin_hint: bool = False,
+    relocate: Callable[[], Location] | None = None,
+    title: str = "apply",
+    preview_footer: str = "apply.footer",
+    root: RootSession | None = None,
+    confirm: Callable[[Plan], bool] | None = None,
+) -> ApplyOutcome:
     extras = tuple(extra_actions)
     backend = backend_factory(ctx)
     plan = build_plan(ctx, backend, extras)
@@ -206,8 +255,46 @@ def apply(
                 print("\n".join(ui.wrap(ui.t(preview_footer), first=f"{ui.symbol('info')} ", names=("cyan",))))
             else:
                 print("Preview only, nothing was changed. Run with --commit to apply.")
-        return 0
+        return ApplyOutcome(0)
+    if confirm is not None and len(plan) and not confirm(plan):
+        return ApplyOutcome(int(ExitCode.DRIFT), declined=True)
+    session = root or RootSession(command="ubuntu-tweak apply --commit", skip="ubuntu-tweak apply --commit --no-sudo")
+    try:
+        return _commit(
+            ctx,
+            plan,
+            extras=extras,
+            no_sudo=no_sudo,
+            backend_factory=backend_factory,
+            relogin_hint=relogin_hint,
+            relocate=relocate,
+            root=session,
+        )
+    finally:
+        if root is None:
+            session.close()
 
+
+def _require_root(root: RootSession, plan: Plan, *, no_sudo: bool, ran_before: bool) -> None:
+    """Ask for root before the first root action of ``plan`` runs (a no-op after the first success);
+    ``ran_before``: this run already executed actions."""
+    if no_sudo:
+        return
+    pending = [action for action in plan.actions if action.needs_root]
+    root.require(len(pending), ", ".join(sorted({action.kind for action in pending})), ran_before=ran_before)
+
+
+def _commit(
+    ctx: Context,
+    plan: Plan,
+    *,
+    extras: tuple[Action, ...],
+    no_sudo: bool,
+    backend_factory: BackendFactory,
+    relogin_hint: bool,
+    relocate: Callable[[], Location] | None,
+    root: RootSession,
+) -> ApplyOutcome:
     executed: list[str] = []
 
     def runnable(pending: Plan) -> int:
@@ -232,6 +319,9 @@ def apply(
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
     acquire = _profile_acquisition(ctx, plan)
+    # with a profile still to clone, only what the clone stage runs is certain: the profile may switch the rest
+    # off, and the rebuilt plan asks for itself in the loop below
+    _require_root(root, Plan(acquire, 0) if acquire else plan, no_sudo=no_sudo, ran_before=False)
     if acquire:
         # the profile decides which modules are on (a profile may switch ssh-server off): clone it first, alone
         progress["total"] = runnable(Plan(acquire, 0))
@@ -247,6 +337,8 @@ def apply(
         plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
     result = ExecutionResult(0, (), ())
     while True:
+        # a rebuilt plan may hold root actions the first one did not
+        _require_root(root, plan, no_sudo=no_sudo, ran_before=bool(executed))
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:
             raise ActionFailed(f"the plan still installs extension code after {MAX_PASSES - 1} passes")
@@ -271,7 +363,7 @@ def apply(
             print(RELOGIN_HINT)
         if final.manual:
             print(final.render_manual())
-        return 0
+        return ApplyOutcome(0, changed, manual=final.manual, skipped=final.skipped)
     print()
     print(ui.heading(ui.t("commit.summary")))
     counts = [f"{ui.symbol('ok')} {ui.style(ui.t('commit.changed', n=changed), 'green')}"]
@@ -288,4 +380,4 @@ def apply(
         print(final.render_manual())
     hint = "commit.rerun_pending" if final.skipped or final.manual else "commit.rerun"
     print("\n".join(ui.wrap(ui.t(hint), first=f"{ui.symbol('info')} ", names=("cyan",))))
-    return 0
+    return ApplyOutcome(0, changed, manual=final.manual, skipped=final.skipped)

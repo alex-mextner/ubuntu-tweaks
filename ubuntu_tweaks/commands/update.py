@@ -6,8 +6,9 @@ With ``--commit``: ``git pull --ff-only`` of the umbrella checkout, ``git submod
 --recursive`` (the only command that moves a submodule that is checked out at another commit),
 then ``apply --commit`` in a **fresh interpreter** (the pull may have changed this very package),
 carrying over ``--machine``, ``--profile`` and ``--only``; the re-login hint is printed when the pull
-or the submodule update changed anything. Without ``--commit`` it prints the two git commands and
-the ``apply`` preview of the *current* checkout (what the plan will be after the pull is not
+or the submodule update changed anything. The child ``apply --commit`` obtains root itself, once, before its
+first root action (``elevation``); its exit code, 6 included, is ``update``'s. Without ``--commit`` it prints
+the two git commands it would run and the ``apply`` preview of the *current* checkout (what the plan will be after the pull is not
 knowable before it). A tree that is not a git checkout (a tarball or a copied directory: no ``.git``)
 has nothing to pull: the git steps are skipped with a message and ``apply`` still runs, so ``update``
 never needs ``git`` there. The release channel and schedule are ticket #19, not handled here.

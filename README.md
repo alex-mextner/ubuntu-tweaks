@@ -59,13 +59,25 @@ private settings profile (default `<your dotfiles repo>/ubuntu`, found through `
 `$UBUNTU_TWEAK_PROFILE`; per-machine overlay named by `/etc/hostname` or `--machine`). Every
 mutating command previews first and changes nothing without `--commit`.
 
+**Root.** Actions marked `[sudo]` need root. With `--commit` (and no `--no-sudo`) the tool asks for your sudo
+password **once**, before the first root action, and keeps the sudo ticket alive for the whole run; a preview never
+asks. Where it cannot ask (a sandbox with `no_new_privs`, no terminal, a wrong password) it stops before the first
+root action with exit **6**, says why and prints the command to run from a normal terminal.
+
+To repair everything that is not right on this machine, run **`ubuntu-tweak fix`** in a terminal. It shows the plan
+and asks before it changes anything (your answer is its `--commit`; one more question first when apt packages are
+missing), asks for sudo once, installs the missing packages, applies the whole plan and ends with `status`: exit 0
+only when nothing is left, and what only you can finish is listed with the reason. `fix --yes` skips the questions.
+A second run says `0 changed`.
+
 | Command | What it does |
 |---|---|
 | `init [--commit]` | fresh system: `doctor`, submodules, CLI link in `~/.local/bin`, then `apply`; preview without `--commit` |
 | `apply [--commit] [--no-sudo]` | print the plan (what would change), or run it; a second run says `0 changed` |
 | `status` | Missing / Modified / Extra; exit 3 when anything declared is missing or modified |
 | `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
-| `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them |
+| `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them (asks for sudo once) |
+| `fix [--yes]` | repair everything: install missing packages, apply the whole plan, then `status`; one sudo prompt; exit 0 only when status is clean, 3 when something is left, 6 when root cannot be had |
 | `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | read-only inventory of the live system, printed as the exact diff the profile would get (SUMMARY block first; `--dry-run` is the explicit no-write mode, `--summary` prints only the summary); `--commit` writes it into the profile working tree (never runs git) |
 | `bundles [--show NAME]` | read-only: the settings bundles, where each applies, shadowed / duplicated / conflicting keys |
