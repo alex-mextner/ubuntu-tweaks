@@ -179,10 +179,12 @@ grep -q "# the weekday matters on this desk" "$profile/settings/regrouped.ini" |
 tweak status "${flags[@]}" || fail "a note changed what applies"
 
 echo "== capture (preview; the scratch dconf and HOME are all it can see)"
-# Every file and symlink of the profile and of HOME before and after, but for dconf's own database
-# and flatpak's user installation (`flatpak list`, which the packages section runs, creates it).
+# Every file and symlink of the profile and of HOME before and after, but for dconf's own database,
+# flatpak's user installation (`flatpak list`, which the packages section runs, creates it) and the
+# session log directory (every command, a preview included, writes its own log: spec, *Session log*).
 snapshot() {
-    find "$profile" "$HOME" \( -path "$HOME/.config/dconf" -o -path "$HOME/.local/share/flatpak" \) -prune -o \
+    find "$profile" "$HOME" \( -path "$HOME/.config/dconf" -o -path "$HOME/.local/share/flatpak" \
+        -o -path "$HOME/.local/state/ubuntu-tweaks/logs" \) -prune -o \
         \( -type f -o -type l \) -printf '%p %y %s %T@ %l\n' | sort
 }
 before="$(snapshot)"
