@@ -8,6 +8,8 @@ Assumptions:
   *user value* only (``backend.user_value``); the effective value is never written back, because
   on Ubuntu it comes from the session's override and writing it would freeze that override. An
   unset user value counts as an empty list, so the first single-item write creates it.
+- A ``builtin`` module whose apt package ships an extension names it in ``[extension] enable``: the
+  uuids are enabled like a code module's (no ``metadata.json`` to read, so no lazy lookup).
 - For an enabled module: ``enable`` (the module's uuid, from ``metadata.json``, resolved lazily)
   is in the user ``enabled-extensions`` and not in ``disabled-extensions``; every ``conflicts`` uuid
   is not in ``enabled-extensions`` and is in ``disabled-extensions`` (the Shell lets
@@ -30,6 +32,7 @@ from gi.repository import GLib  # noqa: E402
 from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase  # noqa: E402
 from ubuntu_tweaks.context import Context  # noqa: E402
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules  # noqa: E402
+from ubuntu_tweaks.manifest import SourceKind, module_defaults  # noqa: E402
 from ubuntu_tweaks.settings import SettingsBackend  # noqa: E402
 
 SCHEMA = "org.gnome.shell"
@@ -144,6 +147,21 @@ def build(ctx: Context, backend: SettingsBackend) -> Sequence[Action]:
             continue
         actions += [DisableConflict(backend, module.name, _fixed(uuid), uuid) for uuid in spec.conflicts]
         actions += [RetireExtension(backend, module.name, _fixed(uuid), uuid) for uuid in spec.retire]
+    actions += _system_extension_actions(ctx, backend)
+    return actions
+
+
+def _system_extension_actions(ctx: Context, backend: SettingsBackend) -> list[Action]:
+    manifests = ctx.manifests()
+    config = ctx.profile.load_config(module_defaults(manifests))
+    actions: list[Action] = []
+    for manifest in manifests:
+        spec = manifest.extension
+        if spec is None or manifest.source.kind is not SourceKind.BUILTIN or not config.module_enabled(manifest.name):
+            continue
+        actions += [EnableExtension(backend, manifest.name, _fixed(uuid), uuid) for uuid in spec.enable]
+        actions += [DisableConflict(backend, manifest.name, _fixed(uuid), uuid) for uuid in spec.conflicts]
+        actions += [RetireExtension(backend, manifest.name, _fixed(uuid), uuid) for uuid in spec.retire]
     return actions
 
 
@@ -155,7 +173,7 @@ def extras(ctx: Context, backend: SettingsBackend) -> Sequence[str]:
             declared.add(metadata.uuid)
     for manifest in ctx.manifests():
         if manifest.extension is not None:
-            declared.update(manifest.extension.conflicts, manifest.extension.retire)
+            declared.update(manifest.extension.enable, manifest.extension.conflicts, manifest.extension.retire)
     return [
         f"extension {uuid} is enabled but no module declares it"
         for uuid in user_list(backend, ENABLED)

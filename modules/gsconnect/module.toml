@@ -1,0 +1,16 @@
+description = "GSConnect: KDE Connect for GNOME (phone notifications, clipboard, file sharing, Files integration), from the Ubuntu package"
+enabled = false   # opt-in: a profile that pairs phones sets [modules.gsconnect] enabled = true
+order = 90
+
+[source]
+kind = "builtin"
+
+# The Ubuntu package ships the extension under /usr/share/gnome-shell/extensions (version 71, GNOME 46-50) and the
+# Files menu entries (nautilus-python). The Shell reads new extension code at login, so a fresh install needs one
+# re-login before the extension runs. Pairing keys live in ~/.config/gsconnect and are per machine: pair the
+# phone again on a new computer, nothing of it is synced.
+[install]
+apt = ["gnome-shell-extension-gsconnect", "python3-nautilus", "sshfs"]
+
+[extension]
+enable = ["gsconnect@andyholmes.github.io"]
