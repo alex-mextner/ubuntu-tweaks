@@ -1679,7 +1679,11 @@ needed, could not be obtained and root actions remain, `3` the plan still holds 
 extension the shell disabled, a replaced link, a stopped service). Unattended re-runs are the opt-in module
 `autoheal` (off by default; `[modules.autoheal] enabled = true` in the profile or machine overlay): a user systemd
 timer runs `ubuntu-tweak apply --commit --no-sudo` at login and daily. It never asks for root and never prompts;
-root actions are left for the next interactive `apply --commit`.
+root actions are left for the next interactive `apply --commit`. `apply --commit` both enables the units (the login
+run) and (re)starts the timer at once (`systemctl --user restart autoheal.timer`: a running timer keeps its old
+calendar until restarted; never the service, which would apply inside the apply that installs it), and the check
+requires the timer to be active, so it assumes a reachable user systemd manager (as the `is-enabled` check already
+did): a timer that is only enabled would not fire until the next login ([#95](https://github.com/alex-mextner/ubuntu-tweaks/issues/95)).
 
 ### Coverage
 
