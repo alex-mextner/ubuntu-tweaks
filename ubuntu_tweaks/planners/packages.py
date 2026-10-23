@@ -147,12 +147,14 @@ class EntryFailure(NamedTuple):
     retryable: bool
 
 
-def _retryable(error: UbuntuTweakError, argv: Sequence[str]) -> bool:
-    """Whether the error names a network or lock cause. The command line is left out of the text: it quotes the
+def _retryable(error: UbuntuTweakError, argv: Sequence[str], spec: str) -> bool:
+    """Whether the error names a network or lock cause. The command line and the spec are left out of the text: they quote the
     package, and a package called ``pytest-timeout`` is not a timeout."""
     if isinstance(error, Transient):
         return True
-    return is_transient(CommandError(str(error).replace(" ".join(argv), ""), getattr(error, "returncode", None)))
+    return is_transient(
+        CommandError(str(error).replace(" ".join(argv), "").replace(spec, ""), getattr(error, "returncode", None))
+    )
 
 
 class _Installer:
@@ -177,7 +179,7 @@ class _Installer:
             try:
                 self._process.execute(argv)
             except UbuntuTweakError as error:
-                failure = EntryFailure(spec, error, _retryable(error, argv))
+                failure = EntryFailure(spec, error, _retryable(error, argv, spec))
                 failing[spec] = failure
                 if not failure.retryable:
                     self._gave_up[spec] = failure

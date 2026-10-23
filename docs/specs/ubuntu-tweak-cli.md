@@ -1906,10 +1906,10 @@ among them makes the whole action *transient* (retried with backoff; a retry ins
 not repeat an entry that failed for good), anything else is permanent (`actions.Permanent`, never retried whatever its
 text says). Whether an entry's failure is a network or lock one is read from the failure text and exit status 75,
 with the command line left out (it quotes the package: `pytest-timeout` is not a timeout). `Process.execute` streams the
-manager's output to the terminal and the session log and puts the last non-empty line the child wrote to stderr into
-the `CommandError` (`<argv>: exited with status 2: <that line>`, clipped to one line of 300 characters), so
+manager's output to the terminal and the session log and puts the last three non-empty lines the child wrote to stderr into
+the `CommandError` (`<argv>: exited with status 2: <line> / <line>`, one line clipped to 400 characters), so
 `Temporary failure in name resolution`, `EAI_AGAIN`, `dns error`, `spurious network error` and the other network words of
-`actions.is_transient` are seen; a failure whose last line says nothing of the kind is permanent. A manager whose binary is missing (and, for `uv` / `npm`, whose fallback is missing too) is
+`actions.is_transient` are seen; a failure whose last lines say nothing of the kind is permanent (the command line and the spec are left out of the text, so a package named like a network word is not mistaken for one). A manager whose binary is missing (and, for `uv` / `npm`, whose fallback is missing too) is
 **blocked**: the line says `blocked by [package-manager] uv is not installed (installed by ...)` naming what installs
 it (the `brew` module's `tools` post for `uv` and `bun`, Node.js for `npm`, Rust for `cargo`, apt for `pipx`); the
 managers are not installed here, and everything else still runs (exit 7 like any blocked action). The check for the

@@ -252,7 +252,7 @@ def _uv_spec(home: Path, name: str) -> str | None:
 def _quote(text: str) -> str:
     """A TOML basic string: a listing is the output of other programs, so a quote or a newline in a name must
     not become TOML."""
-    return json.dumps(text, ensure_ascii=False)
+    return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _entry(manager: str, name: str, home: Path, off_registry: Collection[str]) -> str | None:

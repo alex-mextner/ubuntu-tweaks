@@ -120,7 +120,7 @@ class StreamedOutputTests(unittest.TestCase):
         script = "import sys; print('noise'); print('first', file=sys.stderr); print('dns error: could not resolve', file=sys.stderr); sys.exit(2)"
         with self.assertRaises(CommandError) as raised:
             self.shown(lambda: Process().execute([sys.executable, "-c", script]))
-        self.assertTrue(str(raised.exception).endswith("exited with status 2: dns error: could not resolve"))
+        self.assertTrue(str(raised.exception).endswith("exited with status 2: first / dns error: could not resolve"))
         self.assertEqual(raised.exception.returncode, 2)
 
     def test_a_silent_failure_has_no_detail_suffix(self) -> None:

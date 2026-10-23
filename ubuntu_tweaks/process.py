@@ -50,7 +50,7 @@ from ubuntu_tweaks.errors import UbuntuTweakError
 
 _CHUNK = 65536
 _TAIL = 2000  # characters of a child's stderr kept for the error message of a failure
-_DETAIL = 300  # ... of which the last non-empty line is shown, clipped to this many
+_DETAIL = 400  # ... of which the last three non-empty lines are shown on one line, clipped to this many
 _DRAIN_GRACE = 2.0  # seconds to wait for output left in the pipes once the child has exited
 _INTERRUPT_GRACE = 0.25  # seconds a child gets to react to the Ctrl-C it received too, before it is stopped
 _abandoned: list[IO[bytes]] = []  # pipes whose reader is still blocked: closing them would let the fd be reused
@@ -290,7 +290,7 @@ class Process:
             raise CommandError(f"{argv[0]}: cannot run: {error.strerror or error}") from error
         if returncode != 0:
             lines = [line.strip() for line in "".join(tail).splitlines() if line.strip()]
-            detail = f": {lines[-1][-_DETAIL:]}" if lines else ""
+            detail = f": {' / '.join(lines[-3:])[-_DETAIL:]}" if lines else ""
             raise CommandError(f"{' '.join(argv)}: exited with status {returncode}{detail}", returncode)
 
     def elevate(self, argv: Sequence[str]) -> list[str]:
