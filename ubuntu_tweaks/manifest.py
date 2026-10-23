@@ -20,7 +20,7 @@ Public API:
   ``root`` (default True) says whether the installer needs sudo; ``repo`` (optional, system only) is the
   default git URL of the tool the module fetches: the planner hands it to the installer as the option
   ``repo`` unless ``[modules.<name>] repo`` in the profile sets one.
-- ``ExtensionSpec(conflicts, retire)``, ``SettingsFile(file, schema, mode)``,
+- ``ExtensionSpec(conflicts, retire, enable)``, ``SettingsFile(file, schema, mode)``,
   ``Seed(key, provider)``, ``Migration(from_uuid, from_path)``, ``Deps(apt)``.
 - ``Install(apt, provides)``, ``Step(name, args)`` and ``Post(name, run, check, needs_root, after,
   description, unless_linked)``: the init-pipeline tables ``[install]``, ``[[step]]`` and ``[[post]]`` (spec, *Init
@@ -95,6 +95,7 @@ class Source:
 class ExtensionSpec:
     conflicts: tuple[str, ...] = ()
     retire: tuple[str, ...] = ()
+    enable: tuple[str, ...] = ()  # builtin only: uuids of extensions the system provides (apt), enabled by the toggle planner
 
 
 @dataclass(frozen=True)
@@ -295,9 +296,17 @@ def _parse_source(reader: _Reader) -> Source:
     return Source(kind)
 
 
-def _parse_extension(reader: _Reader) -> ExtensionSpec:
-    reader.only("conflicts", "retire")
-    return ExtensionSpec(conflicts=reader.strings("conflicts"), retire=reader.strings("retire"))
+def _parse_extension(reader: _Reader, kind: SourceKind) -> ExtensionSpec:
+    reader.only("enable", "conflicts", "retire")
+    spec = ExtensionSpec(
+        enable=reader.strings("enable"), conflicts=reader.strings("conflicts"), retire=reader.strings("retire")
+    )
+    if spec.enable and kind in (SourceKind.SUBMODULE, SourceKind.LOCAL):
+        raise reader.fail("'enable' is for builtin modules; a submodule or local module's uuid is its metadata.json's")
+    for uuid in (*spec.enable, *spec.conflicts, *spec.retire):
+        if "/" in uuid or uuid in {".", ".."}:
+            raise reader.fail(f"extension uuid {uuid!r} must not contain '/'")
+    return spec
 
 
 def _parse_settings(reader: _Reader, kind: SourceKind) -> SettingsFile:
@@ -442,8 +451,8 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
 
     extension_reader = root.sub("extension")
     has_code = source.kind in (SourceKind.SUBMODULE, SourceKind.LOCAL)
-    if extension_reader is not None and not has_code:
-        raise root.fail(f"[extension] is only for submodule and local modules, not {source.kind.value}")
+    if extension_reader is not None and not has_code and source.kind is not SourceKind.BUILTIN:
+        raise root.fail(f"[extension] is only for submodule, local and builtin modules, not {source.kind.value}")
     settings = tuple(_parse_settings(item, source.kind) for item in root.array("settings"))
     seeds = tuple(_parse_seed(item) for item in root.array("seeds"))
     migrations = tuple(_parse_migration(item) for item in root.array("migrations"))
@@ -467,7 +476,7 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         description=root.string("description") or "",
         enabled=root.boolean("enabled", True),
         source=source,
-        extension=_parse_extension(extension_reader) if extension_reader is not None else None,
+        extension=_parse_extension(extension_reader, source.kind) if extension_reader is not None else None,
         settings=settings,
         seeds=seeds,
         migrations=migrations,

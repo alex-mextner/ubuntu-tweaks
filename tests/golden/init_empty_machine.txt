@@ -8,7 +8,7 @@ init --commit would first install: sudo apt-get install -y dconf-cli libglib2.0-
 apply:
 machine: home (overlay <tmp>/profile/machines/home)
 profile: <tmp>/profile
-Plan: 27 action(s) to run, 1 already satisfied, 7 need root
+Plan: 30 action(s) to run, 2 already satisfied, 7 need root
   1. [sudo] [package] apt: install curl, wget, ca-certificates, git, gnupg, openssh-client, zsh, build-essential, procps, file, zip, unzip, 7zip, xz-utils, bzip2, jq, libsecret-tools, wl-clipboard, xclip, xsel, gh (after apt-get update) [base-tools, clipboard, git-gh, zsh]
   2. [sudo] [login-shell] chsh: set the login shell of alice to /usr/bin/zsh (now unknown)
   3. [gh-login] needs manual: gh auth login (no [git] token_ref set in profile.toml; run `gh auth login`, or set `[git] token_ref` to a keychain item holding a token)
@@ -23,7 +23,7 @@ Plan: 27 action(s) to run, 1 already satisfied, 7 need root
  11. [post] brew: brew install uv and bun (what the passwords-app and Firefox modules run on) unless already on PATH
  12. [submodule] init submodule gnome-extensions/hyperdock (git submodule update --init --recursive)
  13. [compile-schemas] compile schemas in <tmp>/repo/gnome-extensions/hyperdock/schemas
- 14. [sudo] [package] apt: install gnome-sushi, gstreamer1.0-libav (after apt-get update) [quicklook]
+ 14. [sudo] [package] apt: install gnome-shell-extension-gsconnect, python3-nautilus, sshfs, gnome-sushi, gstreamer1.0-libav (after apt-get update) [gsconnect, quicklook]
  15. [sudo] [system-module] run ssh-server: sudo -- modules/ssh-server/ssh-server install
  16. [system-module] run passwords-app: env 'UBUNTU_TWEAK_MODULE_CONFIG={"repo":"https://github.com/alex-mextner/passwords-app.git"}' modules/passwords-app/passwords-app install
  17. [sudo] [system-module] run passwords-app-polkit: sudo -- modules/passwords-app-polkit/passwords-app-polkit install
@@ -35,10 +35,13 @@ Plan: 27 action(s) to run, 1 already satisfied, 7 need root
  22. [system-module] run rig: modules/rig/install.sh
         would install rig
  23. [link] link hyperdock into ~/.local/share/gnome-shell/extensions/<uuid from metadata.json, known once the submodule is initialized> -> <tmp>/repo/gnome-extensions/hyperdock
- 24. [cli-link] link ~/.local/bin/ubuntu-tweak -> <tmp>/repo/bin/ubuntu-tweak
- 25. [link] link ~/.config/ubuntu-tweaks-demo/config.toml -> files/.config/ubuntu-tweaks-demo/config.toml
- 26. [enable] enable hyperdock (uuid known once the submodule is initialized)
- 27. [disable] disable ubuntu-dock@ubuntu.com (conflicts with module hyperdock)
+ 24. [link] link ~/.local/share/gnome-shell/extensions/allowlockedremotedesktop@kamens.us -> <tmp>/repo/gnome-extensions/allowlockedremotedesktop@kamens.us
+ 25. [cli-link] link ~/.local/bin/ubuntu-tweak -> <tmp>/repo/bin/ubuntu-tweak
+ 26. [link] link ~/.config/ubuntu-tweaks-demo/config.toml -> files/.config/ubuntu-tweaks-demo/config.toml
+ 27. [enable] enable hyperdock (uuid known once the submodule is initialized)
+ 28. [disable] disable ubuntu-dock@ubuntu.com (conflicts with module hyperdock)
+ 29. [enable] enable gsconnect@andyholmes.github.io
+ 30. [enable] enable allowlockedremotedesktop@kamens.us
 Warnings:
   git: user.name and user.email not set and nothing knows it (profile.toml [git], the dotfiles .gitconfig, gh): not an error, git only asks for it at your first commit. To fix it, set `[git] name` / `email` in profile.toml, or run `git config --global user.name ...` (`gh auth login` lets ubuntu-tweak take both from your GitHub account)
 Note: this plan installs extension code or schemas. Settings that depend on them are planned after those actions ran; `apply --commit` does that in the same invocation.

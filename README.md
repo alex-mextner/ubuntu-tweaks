@@ -94,7 +94,7 @@ Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-
 module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `dotfiles` 35, `shell-rc` 36,
 `brew` 40, `ssh-server` 50,
 `passwords-app` 60 / `passwords-app-polkit` 61, `firefox` 70 / `firefox-policy` 71 / `firefox-autologin` 72 /
-`firefox-passkey-qr` 73 (off by default), `hyperdock` 80, `quicklook` 85 (Space previews a file in Files), then your settings and `files/`, then the opt-in `rig`
+`firefox-passkey-qr` 73 (off by default), `hyperdock` 80, `quicklook` 85 (Space previews a file in Files), `gsconnect` 90 and `allowlockedremotedesktop` 91 (both opt-in), then your settings and `files/`, then the opt-in `rig`
 100 (+ tmux, omp, ctmux) (spec: *Init pipeline*; switch one off with
 `[modules.<name>] enabled = false` in `machine.toml`).
 

@@ -46,10 +46,12 @@ PIPELINE_MODULES = (
     "firefox-passkey-qr",
     "hyperdock",
     "quicklook",
+    "gsconnect",
+    "allowlockedremotedesktop",
     "rig",
     "dotfiles",
 )
-OPTIONAL_MODULES = ("firefox-passkey-qr", "rig")  # off by default, a machine opts in (dotfiles is on)
+OPTIONAL_MODULES = ("firefox-passkey-qr", "gsconnect", "allowlockedremotedesktop", "rig")  # off by default, a machine opts in (dotfiles is on)
 
 
 class ScriptedProcess(FakeProcess):
@@ -73,6 +75,8 @@ class EmptyMachine(TempDirCase):
         self.repo = self.tmp / "repo"
         for name in PIPELINE_MODULES:
             shutil.copytree(REPO_ROOT / "modules" / name, self.repo / "modules" / name)
+        local = "gnome-extensions/allowlockedremotedesktop@kamens.us"  # a local module's code is part of the repo
+        shutil.copytree(REPO_ROOT / local, self.repo / local)
         (self.repo / "bin").mkdir()
         self.home = self.tmp / "home"
         self.home.mkdir()

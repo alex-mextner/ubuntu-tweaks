@@ -315,6 +315,45 @@ class ToggleTests(Scenario):
         self.assertEqual(len(Plan.build(actions, only={"dock"})), 3)
 
 
+class SystemExtensionToggleTests(Scenario):
+    """A builtin module whose apt package ships an extension: ``[extension] enable`` is the uuid."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.add_builtin(enabled=True)
+
+    def add_builtin(self, *, enabled: bool) -> None:
+        text = f'enabled = {str(enabled).lower()}\n[source]\nkind = "builtin"\n[extension]\nenable = ["gsc@x"]\n'
+        write(self.repo / "modules" / "gsc" / "module.toml", text)
+
+    def plan(self, backend: FakeBackend) -> Plan:
+        return Plan.build(toggle.build(self.context(), backend))
+
+    def test_the_uuid_is_enabled_without_reading_any_metadata(self) -> None:
+        backend = self.backend()
+        backend.set_user("org.gnome.shell", None, "enabled-extensions", "['keep@x']")
+        backend.set_user("org.gnome.shell", None, "disabled-extensions", "['gsc@x']")
+        plan = self.plan(backend)
+        self.assertEqual([a.describe() for a in plan.actions], ["enable gsc@x"])
+        plan.execute()
+        self.assertEqual(toggle.user_list(backend, "enabled-extensions"), ["keep@x", "gsc@x"])
+        self.assertEqual(toggle.user_list(backend, "disabled-extensions"), [])
+        self.assertEqual(len(self.plan(backend)), 0)
+
+    def test_a_disabled_module_plans_nothing_and_its_uuid_is_not_an_extra(self) -> None:
+        self.add_builtin(enabled=False)
+        backend = self.backend()
+        self.assertEqual(len(self.plan(backend)), 0)
+        backend.set_user("org.gnome.shell", None, "enabled-extensions", "['gsc@x']")
+        self.assertEqual(toggle.extras(self.context(), backend), [])
+
+    def test_enable_is_refused_for_a_module_whose_code_is_in_the_repo(self) -> None:
+        self.add_extension("gnome-extensions/dock", "hyper@x")
+        self.add_module("dock", path="gnome-extensions/dock", extension='[extension]\nenable = ["other@x"]\n')
+        with self.assertRaisesRegex(Exception, "'enable' is for builtin modules"):
+            self.context().manifests()
+
+
 class DiscoveryTests(Scenario):
     def test_all_four_planners_contribute_to_the_discovered_plan(self) -> None:
         self.add_extension("gnome-extensions/eng@example", "eng@example")
