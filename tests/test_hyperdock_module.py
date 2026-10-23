@@ -8,6 +8,7 @@ the seed and the migration's value copy are all silently skipped.
 import json
 import shutil
 import unittest
+from xml.etree import ElementTree
 
 try:
     import gi  # noqa: F401
@@ -26,8 +27,9 @@ from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, parse_keyfi
 
 from gi.repository import GLib  # noqa: E402  (ubuntu_tweaks.settings has pinned the GLib typelib version)
 
-SCHEMA = "org.gnome.shell.extensions.dash2dock-lite"
-DIRECTORY = "/org/gnome/shell/extensions/dash2dock-lite/"
+SCHEMA = "org.gnome.shell.extensions.hyperdock"
+DIRECTORY = "/org/gnome/shell/extensions/hyperdock/"
+OLD_DIRECTORY = "/org/gnome/shell/extensions/dash2dock-lite/"
 OLD_UUID = "dash2dock-lite@icedman.github.com"
 
 
@@ -74,7 +76,7 @@ class HyperdockModuleTests(TempDirCase):
 
     def test_the_migration_drops_the_old_uuid_from_enabled_extensions(self) -> None:
         self.backend.set_user("org.gnome.shell", None, "enabled-extensions", f"['{OLD_UUID}', 'ding@rastersoft.com']")
-        process = FakeProcess({("dconf", "dump", "/org/gnome/shell/extensions/dash2dock-lite/"): CommandResult(0, "")})
+        process = FakeProcess({("dconf", "dump", OLD_DIRECTORY): CommandResult(0, "")})
 
         (action,) = migrations.build(
             self.ctx, self.backend, process=process, home=self.tmp / "home", extension_root=Path(self.tmp / "ext")
@@ -82,6 +84,15 @@ class HyperdockModuleTests(TempDirCase):
 
         self.assertFalse(action.check())
         self.assertIn(f"drop {OLD_UUID} from enabled-extensions", action.describe())
+
+    def test_every_preset_key_exists_in_the_schema_the_submodule_ships(self) -> None:
+        """Real schema, not the fake built from the preset: a key the extension dropped fails every apply."""
+        schema_file = REPO_ROOT / "gnome-extensions/hyperdock/schemas" / f"{SCHEMA}.gschema.xml"
+        if not schema_file.is_file():
+            self.skipTest("the hyperdock submodule is not initialised")
+        declared = {key.get("name") for key in ElementTree.parse(schema_file).getroot().iter("key")}
+
+        self.assertEqual(sorted(set(self.preset) - declared), [])
 
 
 if __name__ == "__main__":

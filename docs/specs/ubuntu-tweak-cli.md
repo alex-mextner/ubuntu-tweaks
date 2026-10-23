@@ -2359,8 +2359,9 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   user has not seen.
 - **The hyperdock uuid is read from `metadata.json`**: the umbrella works before and after
   hyperdock#3; the migration covers the switch.
-- **Dev clone remotes**: in `~/xp/dash2dock-lite`, `origin` is upstream icedman; the
-  fork is `fork`. Tickets for hyperdock are filed with `--repo alex-mextner/hyperdock`.
+- **Dev clone remotes**: in `~/xp/dash2dock-lite`, `origin` is `alex-mextner/hyperdock` (so recorded reviews
+  and `gh ship` see the right repository), `upstream` is icedman, and `fork` is kept as an alias of `origin`.
+  Tickets for hyperdock are filed with `--repo alex-mextner/hyperdock`.
 - **Engine base list vs profile list**: the engine ships only the minimal bootstrap its own pipeline
   needs (`modules/base-tools`, `clipboard`, `git-gh`, `zsh`, `brew`); a person's other tools are
   `apt` / `snap` / `flatpak` / `brew` in the profile's `packages.toml`, with `# reason` comments. Both are
