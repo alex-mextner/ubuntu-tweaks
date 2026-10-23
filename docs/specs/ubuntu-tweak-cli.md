@@ -1020,6 +1020,7 @@ counts as "not satisfied". Timezone, locale and keyboard are three `system` acti
 ```toml
 apt = ["tmux", "ripgrep"]
 snap = ["firefox"]
+snap_classic = ["code"]     # classic-confinement snaps: `snap install --classic` (docs/specs/packages-snap-classic.md)
 brew = ["gh"]                # optional: Homebrew formulae (Linuxbrew), installed by the brew module
 flatpak = ["org.gnome.Extensions"]
 flatpak_remote = "flathub"   # optional: the one remote flatpaks are installed from (default flathub)

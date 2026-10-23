@@ -42,7 +42,7 @@ Public API:
 - ``Layer`` = ``"module"`` | ``"shared"`` | ``"overlay"``; ``Origin`` = ``"shared"`` | ``"overlay"``.
 - ``BundleFile(name, origin, path)`` and ``ProfileFile(rel, source, origin, shadows)``
   (``shadows``: tuple of the shared files an overlay entry replaces).
-- ``Packages(apt, snap, flatpak, brew, flatpak_remote, apt_update)``, ``Keyboard(model, layout, variant, options)``,
+- ``Packages(apt, snap, snap_classic, flatpak, brew, flatpak_remote, apt_update)``, ``Keyboard(model, layout, variant, options)``,
   ``SystemConfig(timezone, locale, keyboard)``: typed views of ``packages.toml`` and
   ``system.toml`` after the shared + overlay union-merge.
 - ``TomlValue`` / ``TomlTable``: the value types of parsed TOML.
@@ -204,6 +204,7 @@ class ProfileFile:
 class Packages:
     apt: tuple[str, ...] = ()
     snap: tuple[str, ...] = ()
+    snap_classic: tuple[str, ...] = ()
     flatpak: tuple[str, ...] = ()
     brew: tuple[str, ...] = ()
     flatpak_remote: str = "flathub"
@@ -246,7 +247,7 @@ def _str_tuple(table: Mapping[str, TomlValue], key: str, where: str) -> tuple[st
 
 
 def _parse_packages(table: TomlTable, where: str) -> Packages:
-    _reject_unknown(table, ("apt", "snap", "flatpak", "brew", "flatpak_remote", "apt_update"), where)
+    _reject_unknown(table, ("apt", "snap", "snap_classic", "flatpak", "brew", "flatpak_remote", "apt_update"), where)
     remote = _optional_str(table, "flatpak_remote", where)
     if remote is not None and (not remote or remote.startswith("-") or any(char.isspace() for char in remote)):
         raise ConfigError(f"{where}: flatpak_remote must be a remote name, got {remote!r}")
@@ -256,6 +257,7 @@ def _parse_packages(table: TomlTable, where: str) -> Packages:
     return Packages(
         apt=_str_tuple(table, "apt", where),
         snap=_str_tuple(table, "snap", where),
+        snap_classic=_str_tuple(table, "snap_classic", where),
         flatpak=_str_tuple(table, "flatpak", where),
         brew=_str_tuple(table, "brew", where),
         flatpak_remote=remote or "flathub",
@@ -468,7 +470,14 @@ class Profile:
         return parse(merged.data, str(shared))
 
     def load_packages(self) -> Packages:
-        return self._load_union(self.packages_toml, self.overlay_packages_toml, _parse_packages)
+        packages = self._load_union(self.packages_toml, self.overlay_packages_toml, _parse_packages)
+        for name in packages.snap_classic:
+            if name in packages.snap:
+                raise ConfigError(
+                    f"packages.toml (shared or {self.machine} overlay) snap_classic: {name!r} is also in snap; "
+                    "list it once, in snap_classic"
+                )
+        return packages
 
     def load_system(self) -> SystemConfig:
         return self._load_union(self.system_toml, self.overlay_system_toml, _parse_system)

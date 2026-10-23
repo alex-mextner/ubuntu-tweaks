@@ -114,6 +114,7 @@ def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = N
     for manager, names in (
         ("apt", packages.apt),
         ("snap", packages.snap),
+        ("snap_classic", packages.snap_classic),
         ("flatpak", packages.flatpak),
         ("brew", packages.brew),  # installed by the brew module's post, validated here for every machine
     ):
@@ -133,17 +134,18 @@ def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = N
                 before=["apt-get", "update"] if packages.apt_update else None,
             )
         )
-    if packages.snap:
-        actions.append(
-            PackageAction(
-                "snap",
-                packages.snap,
-                runner,
-                installed_snap,
-                lambda names: ["snap", "install", *names],
-                needs_root=True,
+    for label, names, flags in (("snap", packages.snap, ()), ("snap --classic", packages.snap_classic, ("--classic",))):
+        if names:
+            actions.append(
+                PackageAction(
+                    label,
+                    names,
+                    runner,
+                    installed_snap,
+                    lambda missing, flags=flags: ["snap", "install", *flags, *missing],
+                    needs_root=True,
+                )
             )
-        )
     if packages.flatpak:
         actions.append(
             PackageAction(
