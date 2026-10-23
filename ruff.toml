@@ -1,6 +1,7 @@
 # Repo ruff config, so CI and local runs check the same rules (ruff's defaults: syntax errors,
 # undefined names, unused imports), not whatever a user-level config selects.
 line-length = 120
+target-version = "py312"   # Ubuntu 24.04's python3 (the CI runner); `type` statements need 3.12
 
 [lint]
 select = ["E4", "E7", "E9", "F"]

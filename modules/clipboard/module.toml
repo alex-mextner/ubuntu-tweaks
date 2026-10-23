@@ -1,0 +1,15 @@
+description = "Init step 2: clipboard utilities (fixes gh's \"No clipboard utilities available\" when it copies a one-time code)"
+enabled = true
+order = 20      # init pipeline step 2 (x10)
+phase = "base"
+
+[source]
+kind = "builtin"
+
+[install]
+apt = ["wl-clipboard", "xclip", "xsel"]   # Wayland, X11 and the selection tool gh/xclip-aware programs look for
+
+[install.provides]
+wl-clipboard = "wl-copy"
+xclip = "xclip"
+xsel = "xsel"

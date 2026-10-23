@@ -1,0 +1,499 @@
+#!/usr/bin/python3 -B
+"""ssh-server module: openssh-server installed, enabled, running and listening where sshd_config says.
+
+    ssh-server check     exit 0 satisfied, 3 unsatisfied (read-only, no root)
+    ssh-server status    the same facts, one line each (read-only)
+    ssh-server install   as root: make them true (sudo, run by `ubuntu-tweak apply --commit`)
+
+The module never changes Port, AllowUsers or the other existing sshd settings. It makes the machine's
+own configuration work: installs the package, runs sshd as a plain service (not through `ssh.socket`,
+which would ignore sshd_config's Port/ListenAddress) and, when sshd is told to listen on tailscale
+addresses, orders ssh.service after tailscaled.service (the 2026-10 boot failure `Cannot assign
+requested address`). Only the profile can ask for more: `[modules.ssh-server] password_auth = false`
+writes /etc/ssh/sshd_config.d/00-ubuntu-tweaks.conf and refuses while the desktop user has no
+authorized key. Spec: docs/specs/ubuntu-tweak-cli.md, *SSH server*.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import ipaddress
+import os
+import re
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Account,
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    environment,
+    invoking_account,
+    main,
+    module_config,
+    write_file,
+)
+from ubuntu_tweaks.process import CommandError, Process  # noqa: E402
+
+PACKAGE = "openssh-server"
+SERVICE = "ssh.service"
+SOCKET = "ssh.socket"
+SSHD = "/usr/sbin/sshd"
+SSHD_CONFIG = "etc/ssh/sshd_config"
+AUTH_DROPIN = "etc/ssh/sshd_config.d/00-ubuntu-tweaks.conf"
+UNIT_DROPIN = "etc/systemd/system/ssh.service.d/10-ubuntu-tweaks-tailscale.conf"
+TAILSCALED_UNITS = (
+    "usr/lib/systemd/system/tailscaled.service",
+    "lib/systemd/system/tailscaled.service",
+    "etc/systemd/system/tailscaled.service",
+)
+TAILSCALE_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+WILDCARDS = {"*", "0.0.0.0", "::"}  # a v6 wildcard also serves v4 (bindv6only=0); 0.0.0.0 serves v4 only
+DEFAULT_PORT = 22
+MAX_INCLUDE_DEPTH = 5
+TRACKED_KEYWORDS = ("passwordauthentication", "kbdinteractiveauthentication")
+KEYWORD_ALIASES = {"challengeresponseauthentication": "kbdinteractiveauthentication"}
+_RESTRICTED = re.compile(r"(?:^|[\s,])(?:command=|restrict(?:[\s,]|$)|from=)")
+_KEY_LINE = re.compile(r"(?:^|\s)(?:ssh-|ecdsa-|sk-)[a-z0-9@.-]+\s+[A-Za-z0-9+/=]{20,}")
+
+# sshd exits 255 on a bind failure and ssh.service says RestartPreventExitStatus=255, so a boot race
+# with tailscale's address assignment would leave sshd dead for good: order it after tailscaled and
+# let it retry a bounded number of times.
+UNIT_DROPIN_TEXT = """\
+# Managed by ubuntu-tweaks (modules/ssh-server). sshd_config makes sshd listen on tailscale addresses,
+# which exist only once tailscaled is up: start after it, and retry (bounded) if the address is late.
+[Unit]
+After=tailscaled.service
+Wants=tailscaled.service
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=
+"""
+
+AUTH_DROPIN_TEXT = {
+    False: """\
+# Managed by ubuntu-tweaks (modules/ssh-server, [modules.ssh-server] password_auth = false).
+# Named 00- so it is read before every other drop-in: sshd keeps the first value it sees.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+""",
+    True: """\
+# Managed by ubuntu-tweaks (modules/ssh-server, [modules.ssh-server] password_auth = true).
+# Named 00- so it is read before every other drop-in: sshd keeps the first value it sees.
+PasswordAuthentication yes
+""",
+}
+WANTED_VALUES = {
+    False: {"passwordauthentication": "no", "kbdinteractiveauthentication": "no"},
+    True: {"passwordauthentication": "yes"},
+}
+
+
+@dataclass(frozen=True)
+class SshdSettings:
+    ports: tuple[int, ...]
+    listen: tuple[tuple[str, int | None], ...]  # (host, explicit port)
+    includes_dropins: bool
+    first: Mapping[str, str]  # the value sshd uses for TRACKED_KEYWORDS: the first one it reads
+
+
+_KEYWORD = re.compile(r"\s*(\w+)\s*(?:=\s*|\s+)(.*\S)\s*$")
+
+
+def _split_keyword(line: str) -> tuple[str, str] | None:
+    """``Key value``, ``Key=value`` or ``Key = value``; comments and blank lines give None."""
+    found = _KEYWORD.match(line.split("#", 1)[0])
+    return (found.group(1).lower(), found.group(2)) if found else None
+
+
+def parse_listen_address(value: str) -> tuple[str, int | None]:
+    """``host``, ``host:port``, ``[v6]:port`` or a bare IPv6 address."""
+    if value.startswith("["):
+        host, _, rest = value[1:].partition("]")
+        return host, int(rest[1:]) if rest.startswith(":") and rest[1:].isdigit() else None
+    if value.count(":") == 1:
+        host, port = value.split(":")
+        return host, int(port) if port.isdigit() else None
+    return value, None
+
+
+def read_sshd_settings(root: Path) -> SshdSettings:
+    """What sshd derives from ``/etc/ssh/sshd_config`` and its Include chain, in sshd's reading order.
+
+    A file that exists but cannot be read raises ``ModuleError``: the unprivileged check would otherwise
+    see a different configuration than the root install does and the two would never agree.
+    """
+    ports: list[int] = []
+    listen: list[tuple[str, int | None]] = []
+    included: list[str] = []
+    first: dict[str, str] = {}
+
+    def read(path: Path, depth: int) -> None:
+        """Collect one file's global settings; its Match blocks end its global part."""
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise ModuleError(
+                f"cannot read {path}: {error.strerror}. The checker must see the configuration sshd uses: "
+                "make it readable (mode 644) or run the module with `status` as root"
+            ) from error
+        for line in lines:
+            pair = _split_keyword(line)
+            if pair is None:
+                continue
+            key, value = pair
+            if key == "match":
+                return  # everything below belongs to a Match block, not to the global settings
+            if key == "port" and value.isdigit():
+                ports.append(int(value))
+            elif key == "listenaddress":
+                listen.append(parse_listen_address(value.split()[0]))
+            elif key in TRACKED_KEYWORDS or key in KEYWORD_ALIASES:
+                first.setdefault(KEYWORD_ALIASES.get(key, key), value.split()[0].lower())
+            elif key == "include" and depth < MAX_INCLUDE_DEPTH:
+                for pattern in value.split():
+                    included.append(pattern)
+                    anchored = root / pattern.lstrip("/") if pattern.startswith("/") else root / "etc/ssh" / pattern
+                    for match in sorted(anchored.parent.glob("*")):
+                        if fnmatch.fnmatch(match.name, anchored.name) and match.is_file():
+                            read(match, depth + 1)
+
+    read(root / SSHD_CONFIG, 0)
+    dropins = "/etc/ssh/sshd_config.d/"
+    return SshdSettings(
+        tuple(ports) or (DEFAULT_PORT,),
+        tuple(listen),
+        any(pattern.startswith(dropins) or pattern.startswith("sshd_config.d/") for pattern in included),
+        first,
+    )
+
+
+def expected_listeners(settings: SshdSettings) -> list[tuple[str | None, int]]:
+    """Where sshd must accept connections: a ListenAddress without a port listens on every Port."""
+    if not settings.listen:
+        return [(None, port) for port in settings.ports]
+    return [
+        (host, number)
+        for host, port in settings.listen
+        for number in ((port,) if port is not None else settings.ports)
+    ]
+
+
+def _normalise(host: str) -> str:
+    host = host.strip("[]")
+    try:
+        return str(ipaddress.ip_address(host.split("%")[0]))
+    except ValueError:
+        return host
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]").split("%")[0])
+    except ValueError:
+        return False
+    return True
+
+
+def parse_listeners(ss_output: str) -> list[tuple[str, int]]:
+    """Local ``(host, port)`` of every line of ``ss -H -ltn``."""
+    found: list[tuple[str, int]] = []
+    for line in ss_output.splitlines():
+        columns = line.split()
+        if len(columns) < 4:
+            continue
+        host, _, port = columns[3].rpartition(":")
+        if port.isdigit():
+            found.append((_normalise(host), int(port)))
+    return found
+
+
+def is_listening(expected: tuple[str | None, int], listeners: list[tuple[str, int]]) -> bool:
+    """A named host that is not an IP address (``localhost``) is matched by port only: ``ss -n`` shows numbers.
+    A wildcard socket covers a named address of its own family (``::`` and ``*`` cover both)."""
+    host, port = expected
+    anywhere = host is None or not _is_ip(host)
+    version = None if anywhere else ipaddress.ip_address(_normalise(str(host)).split("%")[0]).version
+    for listener_host, listener_port in listeners:
+        if listener_port != port:
+            continue
+        # sshd sets IPV6_V6ONLY on its v6 sockets, so `::` never serves a v4 address; `*` is a dual socket
+        covers = listener_host == "*" or (listener_host == "0.0.0.0" and version == 4) or (listener_host == "::" and version == 6)
+        if anywhere or covers or _normalise(str(host)) == listener_host:
+            return True
+    return False
+
+
+def is_tailscale_address(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    return any(address in network for network in TAILSCALE_NETWORKS if network.version == address.version)
+
+
+def has_authorized_key(path: Path) -> bool:
+    """A line that looks like a public key (type and base64 body), not just any non-comment text."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(
+        _KEY_LINE.search(line) and not _RESTRICTED.search(line.split("ssh-")[0] if "ssh-" in line else line)
+        for line in lines
+        if not line.lstrip().startswith("#")
+    )
+
+
+def policy_problem(settings: SshdSettings, password_auth: bool) -> str:
+    """Empty when sshd's first-read values equal the wanted ones, else which line wins instead."""
+    for key, wanted in WANTED_VALUES[password_auth].items():
+        if settings.first.get(key) != wanted:
+            return f"sshd reads {key} = {settings.first.get(key, 'default')!r} first, not {wanted!r}"
+    return ""
+
+
+class SshServer(Module):
+    name = "ssh-server"
+
+    def __init__(
+        self,
+        process: Process,
+        root: Path,
+        options: dict[str, object],
+        account: Account,
+        *,
+        is_root: bool,
+    ) -> None:
+        self._process = process
+        self._root = root
+        self._account = account
+        self._is_root = is_root
+        unknown = sorted(set(options) - {"password_auth"})
+        if unknown:
+            raise ModuleError(f"[modules.ssh-server] unknown option(s): {', '.join(unknown)}")
+        password_auth = options.get("password_auth")
+        if password_auth is not None and not isinstance(password_auth, bool):
+            raise ModuleError(f"[modules.ssh-server] password_auth must be true or false, got {password_auth!r}")
+        self._password_auth: bool | None = password_auth
+
+    def _path(self, relative: str) -> Path:
+        return self._root / relative
+
+    def _query(self, *argv: str) -> tuple[int, str]:
+        result = self._process.query(list(argv), timeout=20)
+        return result.returncode, (result.stdout or "").strip()
+
+    def _installed(self) -> bool:
+        code, out = self._query("dpkg-query", "-W", "-f=${Status}", PACKAGE)
+        return code == 0 and "install ok installed" in out
+
+    def _unit_is(self, verb: str, unit: str, wanted: str) -> bool:
+        code, out = self._query("systemctl", verb, unit)
+        return code == 0 and out.splitlines()[:1] == [wanted]
+
+    def _socket_in_use(self) -> bool:
+        return self._unit_is("is-enabled", SOCKET, "enabled") or self._unit_is("is-active", SOCKET, "active")
+
+    def _needs_daemon_reload(self) -> bool:
+        """systemd's own flag: a unit file or drop-in changed on disk since it was loaded."""
+        return self._query("systemctl", "show", "-p", "NeedDaemonReload", "--value", SERVICE)[1] == "yes"
+
+    def _needs_tailscale_ordering(self, settings: SshdSettings) -> bool:
+        return any(is_tailscale_address(host) for host, _ in settings.listen) and any(
+            self._path(unit).is_file() for unit in TAILSCALED_UNITS
+        )
+
+    def _file_is(self, relative: str, text: str) -> bool:
+        try:
+            return self._path(relative).read_text(encoding="utf-8") == text
+        except OSError:
+            return False
+
+    def _has_key(self) -> bool:
+        return has_authorized_key(self._account.home / ".ssh/authorized_keys")
+
+    def _password_finding(self, settings: SshdSettings) -> Finding:
+        wanted = bool(self._password_auth)
+        subject = f"/{AUTH_DROPIN} (password_auth = {str(wanted).lower()})"
+        written = self._file_is(AUTH_DROPIN, AUTH_DROPIN_TEXT[wanted])
+        if not settings.includes_dropins:
+            return Finding(False, subject, "sshd_config has no `Include /etc/ssh/sshd_config.d/*.conf`", manual=True)
+        if written:
+            problem = policy_problem(settings, wanted)
+            return Finding(not problem, subject, problem, manual=bool(problem))
+        if not wanted and (self._account.uid == 0 or not self._has_key()):
+            return Finding(
+                False, subject, f"{self._account.name} has no usable authorized key: refusing to disable passwords", manual=True
+            )
+        return Finding(False, subject)
+
+    def findings(self) -> list[Finding]:
+        settings = read_sshd_settings(self._root)
+        found = [Finding(self._installed(), f"package {PACKAGE}")]
+        if self._password_auth is not None:
+            found.append(self._password_finding(settings))
+        if self._needs_tailscale_ordering(settings):
+            found.append(
+                Finding(self._file_is(UNIT_DROPIN, UNIT_DROPIN_TEXT), f"/{UNIT_DROPIN} (After=tailscaled.service)")
+            )
+        found.append(
+            Finding(
+                not self._socket_in_use(),
+                f"{SOCKET} off (sshd_config's Port and ListenAddress only apply to {SERVICE})",
+            )
+        )
+        found.append(Finding(self._unit_is("is-enabled", SERVICE, "enabled"), f"{SERVICE} enabled"))
+        found.append(Finding(self._unit_is("is-active", SERVICE, "active"), f"{SERVICE} active"))
+        found.append(Finding(not self._needs_daemon_reload(), f"systemd has loaded the current {SERVICE} files"))
+        _, listing = self._query("ss", "-H", "-ltn")
+        listeners = parse_listeners(listing)
+        for host, port in expected_listeners(settings):
+            where = f"[{host}]:{port}" if host and ":" in host else f"{host or 'any address'}:{port}"
+            found.append(Finding(is_listening((host, port), listeners), f"sshd listening on {where}"))
+        return found
+
+    # -- install (root) --------------------------------------------------------------------------
+
+    def _run(self, *argv: str) -> None:
+        self._process.execute(list(argv))
+
+    def _validate(self) -> None:
+        result = self._process.query([SSHD, "-t"], timeout=20)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise ModuleError(f"sshd -t rejects the configuration (nothing was restarted):\n{detail}")
+
+    def _write_dropin(self, relative: str, text: str) -> str | None:
+        """Write the file; return the previous text (``""`` when absent) when it changed, else None."""
+        target = self._path(relative)
+        try:
+            previous = target.read_text(encoding="utf-8")
+        except OSError:
+            previous = ""
+        if previous == text:
+            return None
+        write_file(target, text)
+        return previous
+
+    def _restore(self, relative: str, previous: str) -> None:
+        target = self._path(relative)
+        if previous:
+            write_file(target, previous)
+        else:
+            target.unlink(missing_ok=True)
+
+    def _apply_password_policy(self, settings: SshdSettings) -> tuple[str, str] | None:
+        """Write the profile's policy; return ``(file, previous text)`` when something was written."""
+        wanted = bool(self._password_auth)
+        if not settings.includes_dropins:
+            raise NeedsManual(
+                f"/{SSHD_CONFIG} has no `Include /etc/ssh/sshd_config.d/*.conf`; add it, or set the "
+                "password policy there by hand"
+            )
+        if self._file_is(AUTH_DROPIN, AUTH_DROPIN_TEXT[wanted]):
+            problem = policy_problem(settings, wanted)  # already written: only the effective value matters
+            if problem:
+                raise NeedsManual(f"{problem}: a setting above the Include line in /{SSHD_CONFIG} overrides the drop-in")
+            return None
+        if not wanted and self._account.uid == 0:
+            raise NeedsManual(
+                "cannot tell which desktop user to protect from a lockout (run through sudo from that user's "
+                "session, not from a root shell)"
+            )
+        if not wanted and not self._has_key():
+            raise NeedsManual(
+                f"{self._account.name} has no usable public key in ~/.ssh/authorized_keys; refusing to disable "
+                "password login (it would lock you out). Add a key, then re-run"
+            )
+        previous = self._write_dropin(AUTH_DROPIN, AUTH_DROPIN_TEXT[wanted])
+        problem = policy_problem(read_sshd_settings(self._root), wanted)
+        if problem:
+            if previous is not None:
+                self._restore(AUTH_DROPIN, previous)
+            raise NeedsManual(f"{problem}: a setting above the Include line in /{SSHD_CONFIG} overrides the drop-in")
+        return None if previous is None else (AUTH_DROPIN, previous)
+
+    def apply(self) -> None:
+        if not self._is_root:
+            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+        if not self._installed():
+            with environment(DEBIAN_FRONTEND="noninteractive"):
+                self._run("apt-get", "install", "-y", PACKAGE)
+        settings = read_sshd_settings(self._root)
+
+        config_changed = self._apply_password_policy(settings) if self._password_auth is not None else None
+        try:
+            self._validate()
+        except ModuleError:
+            if config_changed is not None:
+                self._restore(*config_changed)
+            raise
+        # the unit drop-in is written only after sshd accepted the configuration, so a rejected run leaves nothing behind
+        if self._needs_tailscale_ordering(settings):
+            self._write_dropin(UNIT_DROPIN, UNIT_DROPIN_TEXT)
+        socket_before = self._socket_in_use()
+        try:
+            self._bring_up(config_changed is not None)
+        except CommandError as error:
+            if socket_before and not self._unit_is("is-active", SERVICE, "active"):
+                try:  # never leave the machine without any SSH listener
+                    self._run("systemctl", "enable", "--now", SOCKET)
+                except CommandError:
+                    pass
+            if config_changed is not None:
+                self._restore(*config_changed)  # never leave a policy file that sshd did not take
+            raise ModuleError(f"{error}" + (": the password policy file was removed again" if config_changed else "")) from error
+
+    def _bring_up(self, config_changed: bool) -> None:
+        if self._needs_daemon_reload():
+            self._run("systemctl", "daemon-reload")
+        socket_was_in_use = self._socket_in_use()
+        if socket_was_in_use:
+            self._run("systemctl", "disable", "--now", SOCKET)
+        if not self._unit_is("is-enabled", SERVICE, "enabled"):
+            self._run("systemctl", "enable", SERVICE)
+        if not self._unit_is("is-active", SERVICE, "active"):
+            self._run("systemctl", "reset-failed", SERVICE)
+            self._run("systemctl", "start", SERVICE)
+        elif socket_was_in_use:
+            # the running sshd was started by the socket with systemd's listener: re-exec it as a plain service
+            self._run("systemctl", "restart", SERVICE)
+        elif config_changed:
+            self._run("systemctl", "reload", SERVICE)
+
+
+def build(env: Mapping[str, str]) -> SshServer:
+    return SshServer(
+        Process(),
+        Path("/"),
+        module_config(env),
+        invoking_account(env),
+        is_root=os.geteuid() == 0,
+    )
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"ssh-server: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

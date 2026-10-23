@@ -15,7 +15,7 @@ HARNESS = """
 const fs = require("fs");
 const rules = [];
 const polkit = {Result: {YES: "yes"}, addRule: (f) => rules.push(f)};
-eval(fs.readFileSync(process.argv[2], "utf8").replace(/@USER@/g, "ultra"));
+eval(fs.readFileSync(process.argv[2], "utf8").replace(/@USER@/g, "alice"));
 const out = JSON.parse(process.argv[3]).map(([user, unit, verb, id]) => {
   const action = {id: id || "org.freedesktop.systemd1.manage-units",
                   lookup: (k) => ({unit, verb})[k]};
@@ -32,12 +32,12 @@ class PolkitRule(unittest.TestCase):
         if not js:
             self.skipTest("no node/bun to evaluate the rule")
         cases = [
-            ("ultra", "swap-drain.service", "start", None),
-            ("ultra", "swap-drain.service", "stop", None),
-            ("ultra", "swap-drain.service", "restart", None),
-            ("ultra", "swap-drain.service", "start", "org.freedesktop.systemd1.manage-unit-files"),
-            ("ultra", "swap-drain.timer", "stop", None),
-            ("ultra", "ssh.service", "stop", None),
+            ("alice", "swap-drain.service", "start", None),
+            ("alice", "swap-drain.service", "stop", None),
+            ("alice", "swap-drain.service", "restart", None),
+            ("alice", "swap-drain.service", "start", "org.freedesktop.systemd1.manage-unit-files"),
+            ("alice", "swap-drain.timer", "stop", None),
+            ("alice", "ssh.service", "stop", None),
             ("guest", "swap-drain.service", "start", None),
         ]
         with tempfile.NamedTemporaryFile("w", suffix=".js") as harness:

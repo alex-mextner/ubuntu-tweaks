@@ -1,0 +1,211 @@
+# Built-in `capture` rules. The profile's `[capture]` table adds to these (see the spec);
+# it can never switch off an `exclude` of class secret, identity or hardware.
+#
+# Globs are over the full dconf key path: `*` = one path segment, `**` = any number of
+# segments, `?` = one character. Evaluation order for one key: profile `exclude` -> `exclude`
+# classes secret/identity/hardware below -> panel table (panels.toml) -> `machine` ->
+# `exclude` class state -> `exclude` class auto (a profile `include` match lifts state and auto) ->
+# no schema -> secret scan -> unmapped.
+
+# ------------------------------------------------------------------ never captured
+[[exclude]]
+class = "secret"
+reason = "KDE Connect pairing: certificates and device ids"
+paths = ["/org/gnome/shell/extensions/gsconnect/**"]
+
+[[exclude]]
+class = "secret"
+reason = "key name says credential"
+paths = [
+  "/**/*password*", "/**/*passwd*", "/**/*secret*", "/**/*token*", "/**/*credential*",
+  "/**/*certificate*", "/**/tls-*", "/**/*api-key*", "/**/*apikey*", "/**/*private-key*",
+]
+
+[[exclude]]
+class = "identity"
+reason = "key name says personal identity"
+paths = ["/**/*email*", "/**/real-name", "/**/user-name", "/**/*username*"]
+
+# ------------------------------------------------------------------ per machine
+# An explicit `machine` match also protects the key from the `state` globs below.
+[[machine]]
+reason = "laptop versus desktop"
+paths = [
+  "/org/gnome/settings-daemon/plugins/power/**",
+  "/org/gnome/desktop/peripherals/touchpad/**",
+  "/org/gnome/desktop/peripherals/mouse/**",
+]
+
+[[machine]]
+reason = "derived from the machine's location or last session"
+paths = ["/**/night-light-last-coordinates", "/**/last-selected-power-profile"]
+
+[[machine]]
+reason = "audio device choice"
+paths = ["/**/*-device", "/**/*-device-*", "/**/default-sink*", "/**/default-source*"]
+
+# Where the state globs below never apply: these hold user-facing preferences whose names merely
+# look like state (`activate-window-menu`, `toggle-maximized`, `remember-recent-files`).
+[state_keep]
+paths = [
+  "/org/gnome/desktop/wm/keybindings/**", "/org/gnome/mutter/keybindings/**", "/org/gnome/mutter/wayland/keybindings/**",
+  "/org/gnome/shell/keybindings/**", "/org/gnome/settings-daemon/plugins/media-keys/**",
+  "/org/gnome/desktop/privacy/**", "/org/gnome/desktop/a11y/**", "/org/gnome/desktop/interface/**",
+  "/org/gnome/desktop/peripherals/**", "/org/gnome/desktop/wm/preferences/**", "/org/gnome/mutter/**",
+  "/org/gnome/shell/extensions/tiling-assistant/**", "/org/gnome/shell/extensions/dash-to-dock/**",
+  "/org/gnome/shell/extensions/ubuntu-dock/**", "/org/gnome/shell/extensions/ding/**",
+]
+
+# ------------------------------------------------------------------ state
+[[exclude]]
+class = "state"
+reason = "window geometry and UI position"
+paths = [
+  "/**/window-*", "/**/*-window-*", "/**/*window-size", "/**/*window-state", "/**/window-maximized",
+  "/**/is-maximized", "/**/maximized", "/**/initial-size*", "/**/sidebar-*", "/**/*-column-width",
+  "/**/size", "/**/width", "/**/height",
+]
+
+[[exclude]]
+class = "state"
+reason = "timestamps, counters and last-used bookkeeping"
+paths = [
+  "/**/last-*", "/**/*-last-*", "/**/*timestamp*", "/**/launch-*", "/**/first-run", "/**/migrated*",
+  "/**/prompt-check", "/**/*-time", "/**/reminders-past",
+]
+
+[[exclude]]
+class = "state"
+reason = "recents, history and layouts the Shell regenerates"
+paths = ["/**/recently-*", "/**/*history*", "/org/gnome/shell/app-picker-layout"]
+
+[[exclude]]
+class = "state"
+reason = "application bookkeeping, not preferences"
+paths = [
+  "/org/gnome/evolution-data-server/**", "/org/gnome/control-center/**", "/org/gnome/portal/**",
+  "/com/ubuntu/update-notifier/**", "/apps/update-manager/**", "/org/gnome/software/**",
+  "/**/overridden-settings",
+]
+
+# ------------------------------------------------------------------ auto
+# Keys the system or an app registered by itself (ids, ordering lists, bookkeeping): they have a
+# user value in dconf but the user never chose them, and they differ per machine and over time. They
+# stay visible in the report as their own `auto` section; the profile's `[capture] include` promotes
+# any of them back (it also overrides `state`). An explicit `machine` match protects a key from them.
+[[exclude]]
+class = "auto"
+reason = "the Shell registers every app that ever sent a notification; the id is derived from the app"
+paths = ["/org/gnome/desktop/notifications/application-children", "/org/gnome/desktop/notifications/application/*/application-id"]
+
+[[exclude]]
+class = "auto"
+reason = "random uuids Ptyxis generates for its profiles"
+paths = ["/org/gnome/Ptyxis/default-profile-uuid", "/org/gnome/Ptyxis/profile-uuids"]
+
+[[exclude]]
+class = "auto"
+reason = "Clocks remembers its last page and window: UI state, not a preference"
+paths = ["/org/gnome/clocks/state/**"]
+
+[[exclude]]
+class = "auto"
+reason = "mirror the Clocks app rewrites from /org/gnome/clocks/world-clocks"
+paths = ["/org/gnome/shell/world-clocks/locations"]
+
+[[exclude]]
+class = "auto"
+reason = "apps register their global shortcuts through the portal; ids and bindings are generated per app"
+paths = ["/org/gnome/settings-daemon/global-shortcuts/**"]
+
+[[exclude]]
+class = "auto"
+reason = "most-recently-used order of input sources, rewritten on every layout switch"
+paths = ["/org/gnome/desktop/input-sources/mru-sources"]
+
+[[exclude]]
+class = "auto"
+reason = "app grid folders the Shell seeds at first start; their contents follow the installed apps"
+paths = ["/org/gnome/desktop/app-folders/**"]
+
+[[exclude]]
+class = "auto"
+reason = "the extension's own bookkeeping (version marker, backup of the settings it overrides)"
+paths = [
+  "/org/gnome/shell/extensions/tiling-assistant/last-version-installed",
+  "/org/gnome/shell/extensions/tiling-assistant/overridden-settings",
+]
+
+[[exclude]]
+class = "auto"
+reason = "the keyrings last selected in the Passwords and Keys list: UI selection"
+paths = ["/apps/seahorse/listing/keyrings-selected"]
+
+# ------------------------------------------------------------------ [capture] defaults
+[capture]
+# Files adopted without being named in the profile (HOME-relative; same glob syntax,
+# `**` not needed).
+include_files = [
+  ".config/mimeapps.list",
+  ".config/user-dirs.dirs",
+  ".config/gtk-3.0/bookmarks",
+  ".config/gtk-3.0/settings.ini",
+  ".config/gtk-4.0/settings.ini",
+  ".config/glib-2.0/settings/keyfile",
+  ".config/monitors.xml",
+  ".config/autostart/*.desktop",
+]
+# Adopted into machines/<machine>/files/ instead of files/.
+machine_files = [".config/monitors.xml"]
+max_file_bytes = 524288
+
+# ------------------------------------------------------------------ secret scan
+[secrets]
+# Keys whose values legitimately look like e-mail addresses (extension uuids).
+email_exempt_keys = ["enabled-extensions", "disabled-extensions"]
+
+# ------------------------------------------------------------------ file classifier
+[files]
+max_text_bytes = 65536            # larger files are not read: cache-state
+large_dir_entries = 60            # a directory with this many files is one `mixed` entry
+max_depth = 4
+secret_key_names = ["passw(or)?d", "passwd", "secret", "token", "api[_-]?key", "credential", "private[_-]?key", "auth"]
+
+secret_names = [
+  "*credential*", "*secret*", "*token*", "*password*", "*passwd*", "*api_key*", "*api-key*", "*apikey*",
+  "*.pem", "*.key", "*.p12", "*.pfx", "*.kdbx", "id_rsa*",
+  "id_ed25519*", "id_ecdsa*", ".netrc", ".npmrc", ".pgpass", ".git-credentials", ".env", "*.env",
+  ".env.*", "hosts.yml", "auth.json", "*cookie*", "Login Data*", "*oauth*", "known_hosts",
+]
+secret_dirs = [
+  ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".pki", ".password-store", "1Password", "op",
+  "gcloud", "goa-1.0", "rclone", "sops", "gh", ".1password", ".mozilla", "mozilla",
+  "google-chrome*", "chromium", "BraveSoftware", "microsoft-edge*", "vivaldi*", "opera",
+]
+cache_dirs = [
+  ".cache", ".npm", ".cargo", ".rustup", ".bun", ".nvm", ".var", ".nv", ".wine", ".git",
+  "node_modules", "Cache", "GPUCache", "Code Cache", "logs", "dconf", "pulse", "systemd",
+]
+# Directories that hold both state and credential stores (~/.local/share/keyrings): one `mixed` row.
+mixed_dirs = [".local"]
+cache_names = [
+  "*.log", "*.db", "*.sqlite*", "*.lock", "*.pid", "*.sock", "*.bak*", "*~", "*.tmp", "*.swp",
+  "*history*", ".DS_Store", "*.cache", "recently-used*", "*.zcompdump*", ".viminfo", "*.pyc",
+]
+portable_extensions = [
+  ".conf", ".cfg", ".ini", ".toml", ".yaml", ".yml", ".json", ".jsonc", ".desktop", ".list", ".dirs",
+  ".rc", ".xml", ".properties", ".kdl", ".lua", ".locale",
+]
+
+# ------------------------------------------------------------------ packages proposal
+[packages]
+# apt names that are never proposed (kernels, language packs, runtime libraries) ...
+ignore = [
+  "linux-*", "language-pack-*", "*-l10n-*", "*-locale-*", "libreoffice-help-*", "hunspell-*",
+  "hyphen-*", "mythes-*", "gnome-user-docs-*", "ibus-table-*", "m17n-db", "lib*",
+]
+# ... unless they match one of these.
+keep = ["lib*-dev", "lib*-utils"]
+metapackages = ["ubuntu-desktop", "ubuntu-desktop-minimal", "ubuntu-minimal", "ubuntu-standard", "ubuntu-server"]
+# snap names that are platform plumbing, not applications
+ignore_snaps = ["bare", "core*", "gnome-*", "gtk-common-themes", "mesa-*", "snapd", "snapd-desktop-integration"]

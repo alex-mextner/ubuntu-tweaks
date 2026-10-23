@@ -17,7 +17,7 @@ model (`modules/<name>/module.toml`, actions with `check()`/`run()`, `apply --co
    более удачные идеи и реализации. и пусть оно умеет будет расширяемым, чтобы rig в него
    мог агентов закинуть которые много ресурсов жрут например.»
 2. «например omp-supervisor и omp-steer кажется должно быть в agent-tools»
-3. «важно чтобы все что мы настраиваем в систему сохранялось в ~/xp/ubuntu-tweaks/»
+3. «важно чтобы все что мы настраиваем в систему сохранялось в репозитории ubuntu-tweaks»
 
 ### Decisions approved by the owner (2026-10-11)
 
@@ -198,7 +198,7 @@ protect = true                                                 # never frozen or
 How rig plugs in (owned by rig, documented here as the reference use of the extension
 point): `~/.config/memguard/policy.d/50-agents.toml` matches
 `cgroup = "user.slice/*/omp.slice/omp-*.scope"`, `display.exec = "tg-ctl omp-live status
---memguard"` (name "omp session: CRYPT", detail = cwd/title), `warn → notify.exec =
+--memguard"` (name "agent session: CRYPT", detail = cwd/title), `warn → notify.exec =
 "omp-steer --memguard"` (delivers mem-sentinel's steer text into the owning session),
 `critical → freeze`. The daemon never sees those names.
 
@@ -249,7 +249,7 @@ The window (like macOS "Your system has run out of application memory"):
   Memory was recovered by pausing the largest apps. Quit what you don't need, or
   resume them once memory is free.
 
-  [icon] omp session: CRYPT      — ~/xp/sme-archiving-gc      9.1 GB   [Quit] [Resume]
+  [icon] agent session: CRYPT    — ~/projects/archiving       9.1 GB   [Quit] [Resume]
   [icon] Docker: fake-gcs         — container 3f2a…            2.4 GB   [Quit] [Resume]
   [icon] Chrome                   — 37 windows                 5.8 GB   [Quit] [Resume]
 
@@ -340,14 +340,15 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   - `psi`: memory `some avg60` < 5 and `full avg10` < 1. `fall`: MemAvailable not falling
     faster than 1 GB/min, sampled over `fall_window_s` (15 s) by the oneshot itself.
   - `cooldown`: `drain_cooldown_min` (20) since the last drain finished, done or aborted.
-  - `heavy-run`: the heavy-op gate's own `/proc` live-runner scan (`heavy_op_memory_gate.py`,
-    found through the `cmd` of the installed omp hook; run as the desktop user, never as
-    root, because the gate is a user-writable file) reports fewer than its
-    `RIG_HEAVY_OP_MAX_LIVE` runners. A scan that cannot run skips the drain too (fail
-    closed: the drain is the disruptive side); `heavy_gate = ""` turns the scan off.
-  - `heavy-lock`: a shared non-blocking `flock` on every `heavy_locks` path (default
-    `/tmp/3d-cli-heavy.lock`, the lock agents queue heavy runs with) succeeds. The drain
-    holds it until it ends, so a queued `flock /tmp/3d-cli-heavy.lock <cmd>` waits for the
+  - `heavy-run` (off by default): a heavy-operation gate's own `/proc` live-runner scan (a
+    script exposing `scan_live_runners()` and `_max_live()`, named by `heavy_gate` or found
+    through the `cmd` of the JSON file `heavy_hook`; run as the desktop user, never as
+    root, because the gate is a user-writable file) reports fewer runners than its limit
+    (or `heavy_max_live`). A scan that cannot run skips the drain too (fail
+    closed: the drain is the disruptive side); `heavy_gate = ""` (the default) turns the scan off.
+  - `heavy-lock`: a shared non-blocking `flock` on every `heavy_locks` path (default none;
+    the lock files heavy runs are queued with) succeeds. The drain
+    holds it until it ends, so a queued `flock <lockfile> <cmd>` waits for the
     drain instead of starting in the middle of it. Lock files are never created (with
     `fs.protected_regular=2` a root-owned file in `/tmp` would lock the user out) and never
     opened through a symlink. The unit has no `PrivateTmp=`.
@@ -382,7 +383,12 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
     starts the unit and prints the decision (`--wait`: also the result). The polkit rule
     `/etc/polkit-1/rules.d/50-memguard-swap-drain.rules` lets the desktop user (`user`) start
     and stop exactly `swap-drain.service`, no sudo, no password; any other unit or verb falls
-    through to the default policy. `--dry-run` decides locally and executes nothing.
+    through to the default policy. `--dry-run` decides locally and executes nothing. The desktop
+    user is never hardcoded: `install.sh` takes `$SUDO_USER`, else the `$PKEXEC_UID` account,
+    else `user` of `memguard.toml` (a non-root `--dry-run`/`--check` uses the invoking user;
+    no user at all exits 1 with `memguard.toml: user is not set and no SUDO_USER/PKEXEC_UID`),
+    and writes it into the installed `/etc/memguard/memguard.toml` (`user = "..."`) for the
+    polkit rule and swap-drain's heavy scan; `--check` compares against that rendering.
 
   Exit codes (`swap-drain` and `memguard swap-drain`): 0 drained/started, 1 error, 2 usage or
   config, 10 skipped, 11 already in progress, 12 aborted (10–12 are `SuccessExitStatus`).
@@ -410,8 +416,7 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
   (`memguard_swap.active_drain`), then judges swap on `swap_*_after_kb`
   (`memguard_swap.effective_swap_kb`) and leaves the device's pages still in swap out of any
   MemAvailable fall rate (the swap-in lowers both equally). Consumers: the heavy-op gate
-  ([rig-cli#693](https://git.hyperide.ai/ultrabricks/rig-cli/issues/693); the gate lives in
-  agent-tools, rig installs it) and the memguard daemon's (d) check.
+  (a gate that reads the state file; it lives outside this repo) and the memguard daemon's (d) check.
 - **Alternatives**: no `/proc/sys/vm` knob swaps pages back in (`drop_caches` drops clean page
   cache, `compact_memory` defragments, `swappiness`/`watermark_scale_factor` shape future
   reclaim only). `vm.swappiness` stays 10: lowering it does not return swapped pages and does
@@ -437,6 +442,50 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
     authentication required`).
   - `journalctl -t swap-drain` has one line per decision (`skip <reason>: …` or
     `drain start: …`, then `drain done|aborted in Ns …`).
+
+### Real-root verification of the system installers (ticket #26)
+
+Tests run both installers against a fake root and never as root:
+
+- `install.sh` of memguard accepts `MEMGUARD_ROOT=DIR` for a **staged install** too (no root
+  needed, writes the files and `etc/memguard/installed.sha256` under `DIR`, never calls
+  `systemctl` or `runuser`). `modules/memguard/tests/test_install_check.py` checks the seven files and
+  modes, the stamp lines (mode, sha256 of the rendered file, path), idempotency, drift repair, and
+  that `--check` exits 0 afterwards, also with `/etc/polkit-1/rules.d` unreadable (the stamp vouches).
+- `apple-hid-battery/install.sh` runs under `APPLE_HID_ROOT` / `APPLE_HID_KVER` with stub
+  `make`, `strip`, `depmod`, `modprobe`, `rmmod` (`modules/apple-hid-battery/tests/test_install.py`).
+- `planners/system_modules.py` is tested with `FakeProcess` (`tests/test_system_modules.py`).
+
+Only a real root on a disposable machine (container or VM with systemd for memguard, a VM with
+kernel headers and Secure Boot off for the HID module; never the workstation) can verify:
+
+1. memguard: files end up `root:root`; `/etc/polkit-1/rules.d` stays unreadable for the desktop
+   user and `install.sh --check` as that user still exits 0 through the stamp; `getent passwd`
+   resolves the detected desktop user; `systemctl daemon-reload`, `enable --now swap-drain.timer` and
+   `restart` work; the closing `runuser -u <user> -- memguard swap-drain --dry-run` runs; polkitd
+   accepts the rule.
+2. apple-hid-battery: `make -C … KDIR=/lib/modules/<k>/build` builds the real `.ko`; `depmod -a`,
+   `modprobe` load it and `/sys/kernel/livepatch/livepatch_hid_battery_offset/enabled` reads `1`
+   (an unsigned module needs Secure Boot off).
+
+Manual checklist, as root in the disposable machine, from a checkout of this repo:
+
+- [ ] `sudo modules/memguard/install.sh` exits 0 and prints `installed` for the seven files plus
+      `installed /etc/memguard/installed.sha256`.
+- [ ] `ls -l /etc/memguard/installed.sha256 /usr/local/sbin/swap-drain` shows `root root`;
+      `cat /etc/memguard/installed.sha256` has seven `mode sha256 path` lines.
+- [ ] `modules/memguard/install.sh --check` as an unprivileged user exits 0
+      (`memguard: nothing to change`); `echo $?` prints 0.
+- [ ] `sudo modules/memguard/install.sh` again prints `memguard: nothing to change`.
+- [ ] `systemctl is-enabled swap-drain.timer` prints `enabled`; `systemctl list-timers swap-drain`
+      shows the next run.
+- [ ] `sudo modules/apple-hid-battery/install.sh` exits 0, then
+      `modules/apple-hid-battery/install.sh --check` exits 0 and
+      `cat /sys/kernel/livepatch/livepatch_hid_battery_offset/enabled` prints `1`
+      (skip on a kernel >= 7.3: the check then wants the module absent).
+- [ ] `sudo modules/apple-hid-battery/install.sh` again prints `apple-hid-battery: nothing to change`.
+
+Ticket #26 stays open until that checklist has run on a disposable root.
 
 ### Per-machine profile: `machines/msi-pulse-gl66/`
 
@@ -476,24 +525,36 @@ Apple Magic Keyboard Touch ID (`004C:0321`, `hid_apple`) and Magic Trackpad 2 (`
 `hid_magicmouse`) over Bluetooth report 100 % / 0 % battery because
 `hidinput_query_battery_capacity()` in `hid-input.c` reads `buf[1]`, while Apple's report
 `0x90` is `[id, flags, charge]`. Upstream fix d07644524b65 (7.3) is absent in Ubuntu
-7.0.0-15/-38. Source session "🍎 MAGIC" 2026-10-09T23:51Z, transcript
-`~/.omp/agent/sessions/-tmp/2026-10-09T23-51-08-062Z_01a12313-e21e-7499-8c19-02a237636fc2.jsonl`;
-the C source and Makefile recovered from it are in the repo verbatim.
+7.0.0-15/-38. The C source and Makefile, recovered from the session that diagnosed it, are in the
+repo verbatim.
 
 - Fix: kernel livepatch (klp object `hid`) replacing that one function; it locates the
   battery field in the report and reads `buf[1 + report_offset / 8]`, scaled by
   `battery_min/max`. Nothing else in the kernel changes; no ABI change.
-- Build: never locally — `build.sh` runs on a Runpod pod via `runpod-run` (installs
-  `linux-headers-<k>` for every installed kernel, `make -C <headers> M=$PWD modules`,
-  `strip --strip-debug`); `--local` builds with the host headers for the running kernel.
+- Build: `install.sh` builds on the host, only for kernels that have `linux-headers-<k>` and no
+  module yet (it copies the C file and Makefile to a temp dir, `make KDIR=<headers>`,
+  `strip --strip-debug`); a kernel without headers is skipped with a message, except the
+  running one, which is an error. A `.ko` built elsewhere (a pod) can be dropped into
+  `/lib/modules/<k>/updates/` and the installer then skips that kernel.
 - Install (`install.sh`, root): `.ko` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`
-  for each kernel, `depmod -a`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`.
+  for each kernel with `depmod -a <k>`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`,
+  then `depmod -a <running>` and `modprobe` into the running kernel (a loaded but disabled
+  livepatch is `rmmod`-ed first, since `modprobe` does not re-enable it; the installer fails
+  when `enabled` is still not `1`). Idempotent: a second run prints "nothing to change".
   Rollback: `echo 0 > /sys/kernel/livepatch/livepatch_hid_battery_offset/enabled`, then
   `rmmod`. Unsigned → requires Secure Boot disabled (above).
-- `status.sh`: module in `lsmod` and `/sys/kernel/livepatch/*/enabled` = 1 → 0; present but
-  disabled → 3.
-- Self-remove: on a running kernel ≥ 7.3 (upstream fix present) the module is a no-op —
-  `install.sh` removes the `.ko` and the modules-load entry, `status.sh` exits 0.
+- `install.sh --check` (read-only, no root; the module's `check` in `module.toml`): the running
+  kernel has the `.ko`, the modules-load entry names the module, and
+  `/sys/kernel/livepatch/livepatch_hid_battery_offset/enabled` is `1` → 0; otherwise 3 with the
+  reasons. It does not compare the `.ko` with the C source: rebuilding after a source change
+  means deleting the stale `.ko` first. `APPLE_HID_ROOT` / `APPLE_HID_KVER` redirect it for tests.
+- Self-remove: on a kernel ≥ 7.3 (upstream fix present) the module is a no-op —
+  `install.sh` removes that kernel's `.ko` (and runs `depmod -a <k>`); the modules-load entry
+  goes only when no installed kernel carries the module any more (it is global, so booting a
+  fixed kernel while an old one keeps the module logs one harmless "module not found" from
+  `systemd-modules-load`). `--check` on a fixed kernel only requires its own `.ko` to be gone.
+- Per machine: `enabled = false` in `module.toml`; a machine with Apple HID devices sets
+  `[modules.apple-hid-battery] enabled = true` in `machines/<host>/machine.toml`.
 
 ### Principle: every system change lands here the same day
 
@@ -511,25 +572,22 @@ model of `ubuntu-tweak-cli.md` with one source kind and one action:
 
 ```toml
 # modules/memguard/module.toml
-description = "macOS-like memory-pressure guard: warn, freeze, dialog, kill"
+description = "macOS-like memory-pressure guard: gated swap-drain, memguard CLI, polkit rule"
 [source]
 kind = "system"                # install.sh run as root, idempotent, prints what it changed
-[system]
 install = "install.sh"         # ubuntu-tweak apply --commit runs: sudo install.sh
-status = "status.sh"           # exit 0 = installed and active, 3 = drift (used by check())
-[deps]
-apt = ["earlyoom", "python3-gi", "gir1.2-adw-1", "systemd-oomd"]
+check = "install.sh --check"   # read-only: exit 0 = installed and matching, 3 = drift
 ```
 
-The `system` action's `check()` runs `status.sh`; `run()` runs `sudo install.sh`. Until the
-CLI lands, the top-level `install.sh --system <module>` runs the same script (`install.sh`
-today only links extensions; the flag is additive).
+The `system` action (`planners/system_modules.py`, see `ubuntu-tweak-cli.md`) runs `check`
+to decide, and `sudo install.sh` to fix. Until the CLI lands, `sudo modules/<m>/install.sh`
+is the same step by hand.
 
 | Module | Files → target |
 |---|---|
 | `modules/memguard/` | `memguard.py` → `/usr/local/sbin/memguard`; `memguard.service` → `/etc/systemd/system/`; `memguard.toml` → `/etc/memguard/memguard.toml`; `policy.d/10-desktop.toml`, `20-docker.toml`, `00-protected.toml` → `/etc/memguard/policy.d/`; `memguard-dialog.py` → `/usr/local/libexec/memguard/dialog`; `memguard-dialog.service` → `/etc/systemd/user/`; `memguard` (CLI) → `/usr/local/bin/memguard`; `docker-name` → `/usr/local/libexec/memguard/`; `earlyoom.default` → `/etc/default/earlyoom`; `oomd/-.slice.conf` → `/etc/systemd/system/-.slice.d/90-memguard.conf`; `oomd/oomd.conf` → `/etc/systemd/oomd.conf.d/90-memguard.conf`; `docker-limited.slice` → `/etc/systemd/system/`; `92-memguard.sysctl.conf` → `/etc/sysctl.d/92-memguard.conf`; `swap-drain` → `/usr/local/sbin/`, `swap-drain.service` → `/etc/systemd/system/` (no timer); `memguard_swap.py` → `/usr/local/lib/memguard/`; `50-memguard-swap-drain.rules` → `/etc/polkit-1/rules.d/`; `mem-sentinel`, `mem-sentinel.service` → `/usr/local/sbin/`, `/etc/systemd/system/` (until the daemon replaces it); `logrotate` → `/etc/logrotate.d/memguard` |
 | `modules/hang-capture/` | `90-lockup-capture.conf`, `90-dirty-writeback.conf`, `91-hang-evidence.conf` → `/etc/sysctl.d/`; `hw-watchdog.service` → `/etc/systemd/system/`; `90-hw-watchdog.conf` → `/etc/systemd/system.conf.d/`; `90-hang.conf` → `/etc/systemd/journald.conf.d/`; `hang-probe.sh` → `/usr/local/sbin/hang-probe`; `hang-probe.service` → `/etc/systemd/system/`; `after-hang.sh` → `/usr/local/sbin/after-hang`; `logrotate` → `/etc/logrotate.d/hang-probe` |
-| `modules/apple-hid-battery/` | `livepatch_hid_battery_offset.c`, `Makefile` (source, in repo); `build.sh` → `.ko` per kernel; `install.sh` → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`; `status.sh` |
+| `modules/apple-hid-battery/` | `livepatch_hid_battery_offset.c`, `Makefile` (source, in repo); `install.sh` builds the `.ko` per kernel with headers and installs it → `/lib/modules/<k>/updates/livepatch_hid_battery_offset.ko`, `/etc/modules-load.d/livepatch-hid-battery-offset.conf`; `install.sh --check` |
 | `machines/msi-pulse-gl66/` | per-machine profile, applied only when `dmidecode -s system-product-name` matches `profile.toml` `match`: `90-usb-stability.rules` → `/etc/udev/rules.d/` (keep hubs, JMS578 bridge, both xHCI awake; never applied so far); `usb-storage-quirks.modprobe.conf`, `nvidia-runtime-pm.modprobe.conf` → `/etc/modprobe.d/` + `update-initramfs -u -k all`; `kernel-15.sh` (applied, current state: pins 7.0.0-15); `BIOS.md`; `inventory/` (see *Per-machine profile*) |
 
 Every installed file carries a header `# installed by ubuntu-tweaks/<module>`; `status.sh`

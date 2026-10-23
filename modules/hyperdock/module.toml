@@ -1,0 +1,23 @@
+description = "macOS-style dock"
+order = 80   # init step 8 (the dock), after Firefox (step 7)
+
+[source]
+kind = "submodule"
+path = "gnome-extensions/hyperdock"
+
+[extension]
+conflicts = ["ubuntu-dock@ubuntu.com"]
+retire = ["compiz-alike-magic-lamp-effect@hermes83.github.com"]
+
+[[settings]]
+file = "dock.ini"
+schema = "org.gnome.shell.extensions.dash2dock-lite"  # its metadata.json has `schema-id`, not `settings-schema`
+mode = "enforce"
+
+[[seeds]]
+key = "folder-stacks"
+provider = "screenshots-stack"
+
+[[migrations]]
+from_uuid = "dash2dock-lite@icedman.github.com"
+from_path = "/org/gnome/shell/extensions/dash2dock-lite/"

@@ -3,7 +3,7 @@
 # 50-memguard-swap-drain.rules).
 [Unit]
 Description=memguard swap-drain: gated, abortable swap-to-RAM drain
-Documentation=https://github.com/alex-mextner/ubuntu-tweaks/blob/main/docs/specs/memguard.md
+Documentation=file:///usr/local/lib/memguard/memguard_swap.py
 
 [Service]
 Type=oneshot
@@ -19,4 +19,4 @@ SyslogIdentifier=swap-drain
 # is back on before it exits.
 KillMode=mixed
 TimeoutStopSec=90
-# No PrivateTmp=: the heavy lock /tmp/3d-cli-heavy.lock must be the real /tmp.
+# No PrivateTmp=: the heavy_locks files (/tmp/...) must be the real /tmp.

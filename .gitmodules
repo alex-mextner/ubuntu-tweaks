@@ -1,0 +1,4 @@
+[submodule "gnome-extensions/hyperdock"]
+	path = gnome-extensions/hyperdock
+	url = https://github.com/alex-mextner/hyperdock.git
+	branch = mac-tahoe

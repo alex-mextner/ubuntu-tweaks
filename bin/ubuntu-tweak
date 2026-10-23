@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Launcher: runs the ubuntu_tweaks package from the checkout this file lives in (also when
+reached through a symlink such as ~/.local/bin/ubuntu-tweak).
+
+PyGObject (`gi`) is a distro package, so a pyenv/uv/venv ``python3`` first in PATH does not have
+it. Without `gi` in the running interpreter the launcher re-executes itself once under the
+system interpreter (``UBUNTU_TWEAK_SYSTEM_PYTHON``, default ``/usr/bin/python3``). When that has
+no `gi` either the launcher still runs: ``doctor`` (which installs ``python3-gi``) and the cheap
+commands work, and a command that needs `gi` ends with a message naming
+``sudo apt install python3-gi`` (``cli.main``). The loop guard (``UBUNTU_TWEAK_REEXEC``) holds the
+pid: ``exec`` keeps the pid, so only a re-exec made by this very process is recognised and a stale
+value inherited from the shell is ignored.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+REEXEC_GUARD = "UBUNTU_TWEAK_REEXEC"
+SYSTEM_PYTHON = os.environ.get("UBUNTU_TWEAK_SYSTEM_PYTHON", "/usr/bin/python3")
+
+
+def reexec_with_gi() -> None:
+    try:
+        import gi  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return
+    if (
+        os.environ.get(REEXEC_GUARD) != str(os.getpid())
+        and os.access(SYSTEM_PYTHON, os.X_OK)
+        and os.path.realpath(SYSTEM_PYTHON) != os.path.realpath(sys.executable)
+    ):
+        os.environ[REEXEC_GUARD] = str(os.getpid())
+        os.execv(SYSTEM_PYTHON, [SYSTEM_PYTHON, sys.argv[0], *sys.argv[1:]])
+
+
+reexec_with_gi()
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubuntu_tweaks.cli import main  # noqa: E402
+
+raise SystemExit(main())

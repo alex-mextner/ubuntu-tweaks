@@ -6,19 +6,28 @@
 #
 #   sudo modules/memguard/install.sh        show the diff of every change, then apply it
 #   modules/memguard/install.sh --dry-run   only show it (no root needed); exit 3 = changes pending
+#   modules/memguard/install.sh --check     same comparison for ubuntu-tweak (quiet footer):
+#                                           exit 0 = installed files match the repo, 3 = drift
 #
-# Idempotent: a second run prints "nothing to change". Spec: docs/specs/memguard.md.
+# MEMGUARD_ROOT=DIR prefixes every destination (tests; skips the systemd timer probe and the
+# user lookup). With it the install is *staged*: it needs no root, takes the user from
+# $MEMGUARD_USER (default: the current user), writes the files and the stamp
+# under DIR and never touches systemd or runuser. Idempotent: a second run prints
+# "nothing to change". Spec: docs/specs/memguard.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 dry=0
+check=0
+root=${MEMGUARD_ROOT:-}
 case "${1:-}" in
   --dry-run) dry=1 ;;
+  --check) dry=1; check=1 ;;
   "") ;;
-  -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
+  -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "usage: $0 [--dry-run|--check]" >&2; exit 2 ;;
 esac
-if [ "$dry" = 0 ] && [ "$(id -u)" != 0 ]; then
+if [ "$dry" = 0 ] && [ -z "$root" ] && [ "$(id -u)" != 0 ]; then
   echo "run with sudo (or --dry-run to only see the changes)" >&2
   exit 1
 fi
@@ -34,8 +43,41 @@ sys.path.insert(0, here)
 import memguard_swap
 memguard_swap.load_config(f"{here}/memguard.toml")
 EOF
-user=$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m; print(m.load_config(sys.argv[1] + "/memguard.toml")["user"])' "$here")
-getent passwd "$user" >/dev/null || { echo "memguard.toml: user '$user' does not exist" >&2; exit 1; }
+cfg_user=$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m; print(m.load_config(sys.argv[1] + "/memguard.toml")["user"])' "$here")
+
+# The desktop user: staged mode takes $MEMGUARD_USER or the current user; a real install takes
+# $SUDO_USER, else the $PKEXEC_UID account, else `user` of memguard.toml; a non-root dry run or
+# --check (run by the desktop user itself) falls back to the current user.
+user=
+if [ -n "$root" ]; then
+  user=${MEMGUARD_USER:-$(id -un)}
+else
+  [ "${SUDO_USER:-}" != root ] && user=${SUDO_USER:-}
+  if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    user=$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)
+  fi
+  [ -n "$user" ] || user=$cfg_user
+  if [ -z "$user" ] && [ "$(id -u)" != 0 ]; then user=$(id -un); fi
+fi
+if [ -z "$user" ]; then
+  echo "memguard.toml: user is not set and no SUDO_USER/PKEXEC_UID" >&2
+  exit 1
+fi
+if ! [[ $user =~ ^[A-Za-z_][A-Za-z0-9_.-]*\$?$ ]]; then
+  echo "memguard: refusing user name '$user'" >&2
+  exit 1
+fi
+[ -n "$root" ] || getent passwd "$user" >/dev/null || { echo "memguard: user '$user' does not exist" >&2; exit 1; }
+[ "$check" = 1 ] || echo "memguard: desktop user: $user"
+
+# memguard.toml with `user = "<resolved user>"` (the repo copy leaves it empty = detect).
+render_toml() {
+  if grep -q '^user = ' "$here/memguard.toml"; then
+    sed "s|^user = \"[^\"]*\"|user = \"$user\"|" "$here/memguard.toml"
+  else
+    sed "s|^\[swap\]\$|&\nuser = \"$user\"|" "$here/memguard.toml"
+  fi
+}
 
 # source : target : mode
 files=(
@@ -52,15 +94,28 @@ render=$(mktemp -d)
 trap 'rm -rf "$render"' EXIT
 changed=()
 pending=0
+stamp_lines=()
+stamp="$root/etc/memguard/installed.sha256"
 for entry in "${files[@]}"; do
   IFS=: read -r src dst mode <<<"$entry"
+  dst="$root$dst"
   out="$render/$src"
   case "$src" in
     *.rules) sed "s/@USER@/$user/g" "$here/$src" >"$out" ;;
+    # the installed copy carries the resolved user: swap-drain reads it at run time
+    memguard.toml) render_toml >"$out" ;;
     *) cp "$here/$src" "$out" ;;
   esac
-  if [ -e "$dst" ] && [ ! -r "$dst" ]; then
-    echo "? $dst: not readable without sudo (compared on the real run)"
+  stamp_lines+=("$mode $(sha256sum <"$out" | cut -d' ' -f1) $dst")
+  parent=$(dirname "$dst")
+  # Only the polkit rules directory is root-only by design; a stamp vouches for files inside it
+  # and nothing else, so any other unreadable file is reported as drift.
+  if [ -d "$parent" ] && [ ! -x "$parent" ] && [ "$parent" = "$root/etc/polkit-1/rules.d" ] &&
+    grep -qxF -- "${stamp_lines[-1]}" "$stamp" 2>/dev/null; then
+    continue
+  fi
+  if { [ -d "$parent" ] && [ ! -x "$parent" ]; } || { [ -e "$dst" ] && [ ! -r "$dst" ]; }; then
+    echo "? $dst: not readable without sudo and the install stamp does not vouch for it"
     pending=1
     continue
   fi
@@ -77,7 +132,8 @@ for entry in "${files[@]}"; do
   fi
   changed+=("$src:$dst:$mode")
 done
-timer_on=$(systemctl is-enabled swap-drain.timer 2>/dev/null || true)
+timer_on=enabled
+[ -n "$root" ] || timer_on=$(systemctl is-enabled swap-drain.timer 2>/dev/null || true)
 enable_timer=0
 if [ "$timer_on" != enabled ]; then
   enable_timer=1
@@ -88,7 +144,7 @@ if [ "${#changed[@]}" = 0 ] && [ "$enable_timer" = 0 ] && [ "$pending" = 0 ]; th
   echo "memguard: nothing to change"
   [ "$dry" = 1 ] && exit 0
 elif [ "$dry" = 1 ]; then
-  echo "memguard: dry run, nothing changed; apply with: sudo $here/install.sh"
+  [ "$check" = 1 ] || echo "memguard: dry run, nothing changed; apply with: sudo $here/install.sh"
   exit 3
 fi
 
@@ -101,6 +157,17 @@ for entry in "${changed[@]}"; do
   case "$dst" in *.service|*.timer) reload=1 ;; esac
   case "$dst" in *.timer) restart_timer=1 ;; esac
 done
+# The polkit rules directory is unreadable for the desktop user, so `--check` cannot compare that
+# file; it trusts this stamp (mode, sha256, path per file) written by the last root install.
+printf '%s\n' "${stamp_lines[@]}" >"$render/stamp"
+if ! cmp -s "$render/stamp" "$stamp" 2>/dev/null; then
+  install -D -m 644 "$render/stamp" "$stamp"
+  echo "installed $stamp"
+fi
+if [ -n "$root" ]; then
+  echo "memguard: staged install into $root; systemd and the user lookup are real-root only"
+  exit 0
+fi
 [ "$reload" = 1 ] && systemctl daemon-reload
 systemctl enable --now swap-drain.timer >/dev/null 2>&1
 # a rewritten timer (e.g. the old hourly one) keeps its old schedule until restarted

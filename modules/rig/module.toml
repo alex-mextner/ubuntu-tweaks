@@ -1,0 +1,19 @@
+description = "Optional (init step 10): rig cloned to ~/dev/rig-cli and linked into ~/.local/bin, the shared rig profile synced, `rig activate` run (skills, hooks, tmux, omp, sysmon, ctmux)"
+enabled = false          # a machine opts in: [modules.rig] enabled = true in machines/<host>/machine.toml
+order = 100              # step 10 of the init pipeline
+manual = "set [modules.rig] repo to the git URL of rig-cli; then do what the output names: a failed clone needs your git credentials for that forge; a directory where the checkout should go is yours to move; a profile conflict is `rig profile sync --take local|remote`"
+
+# User level: the installer clones into $HOME and writes ~/.local/bin and rig's own config, so it must
+# not run as root (`root = false`); `preview` prints its exact steps (and the `rig activate` preview).
+# Options: `[modules.rig]` keys repo, dir, profile_url, profile_sync, activate (see install.sh).
+[source]
+kind = "system"
+root = false
+# no default: the rig repository is private to its author's forge; set [modules.rig] repo = "<git URL>"
+install = "install.sh"
+check = "install.sh --check"
+preview = "install.sh --plan"
+
+# rig reads its YAML with PyYAML.
+[deps]
+apt = ["python3-yaml"]

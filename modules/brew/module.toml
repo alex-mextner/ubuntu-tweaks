@@ -1,0 +1,42 @@
+description = "Init step 4: Homebrew for Linux (pinned, checksum-verified installer), shell wiring and the profile's brew formulae"
+enabled = true
+order = 40      # init pipeline step 4 (x10)
+phase = "base"
+
+[source]
+kind = "builtin"
+
+# Root only to create the prefix owned by the user; the installer then needs no sudo.
+[[step]]
+name = "brew-prefix"
+prefix = "/home/linuxbrew/.linuxbrew"
+
+# The installer script is pinned to a Homebrew/install commit and refused unless its SHA-256 matches.
+# Bumping the pin: see docs/specs/ubuntu-tweak-cli.md, "Homebrew installer pin".
+[[step]]
+name = "brew-install"
+prefix = "/home/linuxbrew/.linuxbrew"
+url = "https://raw.githubusercontent.com/Homebrew/install/a2fe82ef3a9ec7a5c72a559c09676256d6f354f6/install.sh"
+sha256 = "5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148"
+
+[[post]]
+name = "shellenv"
+description = "wire `brew shellenv` into ~/.bashrc (zsh gets it from ~/.zprofile, module zsh)"
+after = "install"
+unless_linked = [".bashrc", ".profile", ".bash_profile"]   # a profile that links one of them wires brew itself
+run = ["/bin/sh", "-c", "printf '\\n# Homebrew (added by ubuntu-tweak)\\n[ -x /home/linuxbrew/.linuxbrew/bin/brew ] && eval \"$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\"\\n' >> \"$HOME/.bashrc\""]
+check = ["/bin/sh", "-c", "grep -qs 'brew shellenv' \"$HOME/.bashrc\" \"$HOME/.profile\" \"$HOME/.bash_profile\""]
+
+[[post]]
+name = "tools"
+description = "brew install uv and bun (what the passwords-app and Firefox modules run on) unless already on PATH"
+after = "shellenv"
+run = ["/home/linuxbrew/.linuxbrew/bin/brew", "install", "uv", "oven-sh/bun/bun"]
+check = ["/bin/sh", "-c", "PATH=\"/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH\"; command -v uv >/dev/null && command -v bun >/dev/null"]
+
+[[post]]
+name = "formulae"
+description = "brew install the formulae of packages.toml (`brew = [...]`)"
+after = "tools"
+run = ["/home/linuxbrew/.linuxbrew/bin/brew", "install", "{packages.brew}"]
+check = ["/home/linuxbrew/.linuxbrew/bin/brew", "list", "--formula", "{packages.brew}"]
