@@ -1,6 +1,6 @@
 # Spec: classic snaps in `packages.toml` (`snap_classic`)
 
-Ticket: [#91](https://github.com/alex-mextner/ubuntu-tweaks/issues/91). Extends *`packages.toml`* of
+Ticket: engine issue #91. Extends *`packages.toml`* of
 `ubuntu-tweak-cli.md`; nothing else in that section changes.
 
 ## Why
