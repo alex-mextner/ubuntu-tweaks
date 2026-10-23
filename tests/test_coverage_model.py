@@ -198,6 +198,30 @@ class EngineDefaultsTests(TempDirCase):
             classify(item, load_rules(ctx), {item.id: "files/.config/gh/config.yml"}).coverage, Coverage.TRACKED
         )
 
+    def test_installer_and_debconf_leftovers_in_etc_are_excluded_with_a_reason(self) -> None:
+        ctx = Context(self.tmp / "repo", Profile(self.tmp / "profile", "box"))
+        rules = load_rules(ctx)
+        for identifier in (
+            "etc:/etc/apt/sources.list.d/ubuntu.sources.curtin.orig",
+            "etc:/etc/systemd/system/snap.firefox.firefox.service",
+            "etc:/etc/systemd/system/snap-firefox-4793.mount",
+            "etc:/etc/systemd/system/cloud-init-hotplugd.socket",
+            "etc:/etc/default/alsa",
+            "etc:/etc/default/console-setup",
+            "etc:/etc/default/kdump-tools",
+            "etc:/etc/default/kexec",
+            "etc:/etc/default/kexec.d",
+            "etc:/etc/default/sysstat",
+        ):
+            finding = classify(Item("etc", identifier, "file"), rules, {})
+            self.assertEqual(finding.coverage, Coverage.EXCLUDED, identifier)
+            self.assertTrue(finding.reason, identifier)
+
+    def test_etc_default_grub_stays_a_finding_until_the_profile_claims_it(self) -> None:
+        ctx = Context(self.tmp / "repo", Profile(self.tmp / "profile", "box"))
+        item = Item("etc", "etc:/etc/default/grub", "file")
+        self.assertEqual(classify(item, load_rules(ctx), {}).coverage, Coverage.UNTRACKED)
+
 
 class DropInTests(TempDirCase):
     def setUp(self) -> None:

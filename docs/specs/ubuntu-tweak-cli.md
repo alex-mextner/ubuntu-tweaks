@@ -1778,6 +1778,33 @@ ticketed items alone (a human is deciding them), and `--json` has `"ticket": "#4
 `untracked` rule without a `ticket` or a `reason`, a ticket that is not `#N` / `owner/repo#N`, or a `ticket` on
 another class is invalid config (exit 2).
 
+**Adapter opinions.** `classify` runs only for an item that no rule of any layer matches and the profile does not
+declare; both always win. The three adapters that know more than a path or a name use `capture`'s own tables, so
+coverage and capture agree: what `capture` refuses or skips for a stated reason is `excluded` or `secret` here with
+that reason, never a silent `untracked`.
+
+- `dconf`: the decision order of `capture` (profile `exclude`, built-in `secret`/`identity`/`hardware`, a panel
+  `skip` rule, then unless a `machine` rule claims the key `state` and `auto`, no installed schema, last a secret
+  pattern in the value). `state`, `auto`, `excluded-by-rule` and no-schema keys are `excluded` with capture's reason;
+  `secret`, `identity`, `hardware` and a value matching a secret pattern are `secret`; the value is never in the
+  finding. A key `capture` would capture, into a bundle or the machine overlay, stays `untracked`. Volatile runtime
+  keys (`night-light-last-coordinates`, `last-selected-*`, `prompt-check`, `last-*`, window geometry) are `state`.
+- `files`: capture's file classifier over the entry, limited by capture's depth and size rules; only small text files
+  are read, never a secret-named file and never a socket or pipe. Every file credential-bearing: `secret` (reason
+  `credential store by name`, or `content matches: <kinds>`, never the match); only caches, state, logs, sockets,
+  bytecode: `excluded` (`cache-state: ...`); an empty directory: `excluded`; a symlink into a package manager's tree
+  (`~/.local/share/uv/tools/**`, `~/.local/lib/node_modules/**`, `~/.local/opt/**`, `~/Applications/**`): `excluded`
+  (`link created by <installer>; the package is declared elsewhere`); portable config only: `untracked`, the detail
+  ends with `portable config: capture can adopt`; portable config next to secrets or state, a large data directory
+  or a file it cannot read: `untracked`, the detail ends with `mixed: needs a rule`. An email address counts as a
+  secret pattern, as it does for `capture --commit` (so a `.gitconfig` with an `[user]` section is `secret`; link it
+  from `files/` to track it).
+- `etc`: installer and debconf leftovers are engine rules with reasons (`*.curtin.orig` in `sources.list.d`,
+  `snap.*` and `cloud-init-*` units, `/etc/default/{alsa,console-setup,kdump-tools,kexec,kexec.d,sysstat}`).
+  `/etc/default/grub` is deliberately not one: it stays a finding until the profile claims it. An area this user
+  cannot read stays `untracked` and its detail names the command that reads it (`needs root to read: sudo ls -l
+  /etc/sudoers.d`; `sudo dpkg --verify` for unreadable conffiles).
+
 **`coverage --check-profile [--online] [--json]`** is the profile CI's static gate: it scans nothing, writes nothing
 and needs no PyGObject. It reads the engine rules, every module's `[[coverage]]` (enabled or not), `coverage.toml`,
 `coverage.d/*.toml` and the machine overlays', reports every problem found (not just the first) and exits 0 clean, 2 invalid. It checks: each
