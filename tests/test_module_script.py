@@ -99,7 +99,7 @@ class Dispatcher(unittest.TestCase):
     def test_transient_install_is_tempfail(self):
         class Offline(FixedModule):
             def apply(self):
-                raise kit.Transient("cannot resolve host")
+                raise kit.TempFail("cannot resolve host")
 
         code, out, err = self.run_main(Offline([]), ["install"])
         self.assertEqual((code, out, err), (kit.EXIT_TEMPFAIL, "", "fixed: cannot resolve host\n"))

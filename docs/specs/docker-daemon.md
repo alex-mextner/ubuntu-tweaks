@@ -42,7 +42,8 @@ log-driver = "journald"
   while it is missing); `false` never adds it. The package comes from the NVIDIA apt repository declared in
   `apt-sources` plus `nvidia-container-toolkit` in `packages.toml`.
 - Merge rules: a table in the declared keys merges into the existing table (`runtimes.nvidia` does not remove a
-  `runtimes.mine`), any other value replaces. Removing an option later **never deletes** keys from daemon.json:
+  `runtimes.mine`), any other value replaces. A runtime the profile spells out itself
+  (`daemon.runtimes.nvidia`) wins over the module's default entry. Removing an option later **never deletes** keys from daemon.json:
   delete them by hand.
 
 ## Values for this PC and the laptop's origin
@@ -56,18 +57,27 @@ throttled long before the cap, and leave at least 28 GB to the desktop and its h
 `auto`: this PC has no `nvidia-container-runtime` yet, so nothing is written until the toolkit is installed. The
 laptop's numbers remain valid input (`6G / 8G / 1G` are accepted as they are).
 
+## Order within one `apply`
+
+`apt-sources` (phase `packages`, order 5) runs before the apt batch of `packages.toml`, which runs before this module
+(phase `system`, order 55), and `install` re-reads the machine when it starts: on a fresh machine the first `apply`
+adds the repository, installs `nvidia-container-toolkit`, and then writes `runtimes.nvidia` (no second pass needed).
+
 ## Behaviour of `install`
 
-1. Preconditions (nothing is written when one fails): docker installed; `nvidia_runtime = true` ⇒ the runtime exists.
-2. Slice: a differing file is replaced atomically (a foreign file of that name is first copied to
+1. Preconditions (nothing is written when one fails; the exit is 10, `needs manual`): docker installed;
+   `nvidia_runtime = true` ⇒ the runtime exists; an existing daemon.json is a JSON **object** (anything else is the
+   user's file and is never overwritten: `check` reports it as `manual`, drift 3).
+2. daemon.json is merged, rendered (4-space JSON) and checked with `dockerd --validate --config-file <tmp>` (any exit
+   other than 0, 126 or 127 is a rejection) **before the first write**: a rejection exits 1 and leaves the machine
+   exactly as it was, the slice included. A file whose parsed content already holds the declared keys is **not**
+   rewritten, whatever its formatting.
+3. Slice: a differing file is replaced atomically (a foreign file of that name is first copied to
    `/var/backups/ubuntu-tweaks/docker-daemon/<UTC timestamp>/`), then `systemctl daemon-reload`. A slice file that
    already matches but that systemd reports as `NeedDaemonReload=yes` gets the `daemon-reload` too (a previous
    run died between write and reload).
-3. daemon.json: parsed (a file that is not a JSON **object** is an error and is never overwritten), merged,
-   rendered (4-space JSON), checked with `dockerd --validate --config-file <tmp>` (any exit other than 0, 126 or 127 is a rejection and writes nothing), the
-   old file backed up, the new one written atomically. A file whose parsed content already holds the declared keys
-   is **not** rewritten, whatever its formatting.
-4. `systemctl reload docker` (SIGHUP) **only when daemon.json changed and docker is active**; an inactive docker reads
+4. daemon.json: the old file backed up, the new one written atomically.
+5. `systemctl reload docker` (SIGHUP) **only when daemon.json changed and docker is active**; an inactive docker reads
    the file at its next start. The module **never restarts** docker (a restart stops containers unless
    `live-restore` is on).
 

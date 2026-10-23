@@ -4,7 +4,7 @@ enabled = false
 # Repositories must exist before the apt batch of the packages phase (order 100 by default) installs from them.
 phase = "packages"
 order = 5
-manual = "another file declares one of these repositories together with other ones (named above): remove those lines by hand, then run apply again"
+manual = "a file named above needs your hand: remove the duplicate lines of a hand-written file that also holds other repositories, or declare the dropped source again (enabled = false removes it), then run apply again"
 
 [source]
 kind = "system"

@@ -165,21 +165,37 @@ class DaemonJson(Staged):
         (self.root / "etc/docker/daemon.json").write_text('{"live-restore":true}')
         self.assertEqual(self.run_script("check", daemon={"live-restore": True}).returncode, 0)
 
-    def test_invalid_json_is_never_overwritten(self):
+    def test_invalid_json_is_a_manual_step_and_is_never_overwritten(self):
         path = self.root / "etc/docker/daemon.json"
         path.write_text('{"broken": ')
-        for command in ("check", "install"):
-            result = self.run_script(command, **PC)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("not valid JSON", result.stderr)
+        checked = self.run_script("check", **PC)
+        self.assertEqual(checked.returncode, 3)
+        self.assertIn("not valid JSON", checked.stdout)
+        self.assertIn("not valid JSON", self.run_script("plan", **PC).stdout)
+        installed = self.run_script("install", **PC)
+        self.assertEqual(installed.returncode, 10)
+        self.assertIn("not valid JSON", installed.stdout)
         self.assertEqual(path.read_text(), '{"broken": ')
+        self.assertFalse((self.root / "etc/systemd/system").exists())
 
-    def test_dockerd_validation_failure_writes_nothing(self):
+    def test_a_json_array_is_the_same_manual_step(self):
+        (self.root / "etc/docker/daemon.json").write_text("[1]")
+        self.assertEqual(self.run_script("install", **PC).returncode, 10)
+
+    def test_dockerd_validation_failure_writes_nothing_not_even_the_slice(self):
         self.env_extra = {"FAKE_DOCKERD_REJECT": "1"}
-        result = self.run_script("install", daemon={"nonsense": 1})
+        result = self.run_script("install", daemon={"nonsense": 1}, **PC)
         self.assertEqual(result.returncode, 1)
         self.assertIn("rejects", result.stderr)
-        self.assertFalse((self.root / "etc/docker/daemon.json").exists())
+        self.assertEqual(self.tree(), ["usr/bin/dockerd"])  # the fake dockerd only
+        self.assertEqual(self.calls("systemctl daemon-reload"), [])
+
+    def test_a_runtime_the_profile_spells_out_wins_over_the_default_entry(self):
+        self.install_nvidia()
+        custom = {"path": "/opt/nvidia/runtime", "args": ["--debug"]}
+        self.assertEqual(self.run_script("install", daemon={"runtimes": {"nvidia": custom}}).returncode, 0)
+        self.assertEqual(self.daemon()["runtimes"]["nvidia"], custom)
+        self.assertEqual(self.run_script("check", daemon={"runtimes": {"nvidia": custom}}).returncode, 0)
 
     def test_a_failed_reload_is_an_error(self):
         self.env_extra = {"FAKE_DOCKER_ACTIVE": "1", "FAKE_SYSTEMCTL_FAIL": "reload"}

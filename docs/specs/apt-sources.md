@@ -66,7 +66,8 @@ verifies wins; `status` and the install output say which one (`key from key_urls
 HTTP 429/502/503/504) are *transient*; a mismatch, HTTP 404, an unreadable key are
 *permanent*. A source whose candidates all failed for transient causes only makes the install exit **75**
 (`EX_TEMPFAIL`; the system-module planner turns an installer exit 75 into a `Transient`, which the engine retries
-with backoff: `tests/test_system_modules.py`); any permanent cause makes it exit 1. A key already installed and
+with backoff: `tests/test_system_modules.py`); any permanent cause makes it exit 1. A source may have only `key_cached` (a vendor that publishes no key URL: the pin is then only as independent as the
+copy's provenance, which the profile's comment states). A key already installed and
 matching the pin is **never downloaded again**, so a converged machine works offline. Root unavailable is the
 engine's *root remainder* (the exact `sudo` command is printed); there is no user-level alternative to `/etc/apt`.
 
@@ -88,6 +89,9 @@ the migrated entry referenced are left where they are.
 
 Sources the module does not manage (`ubuntu.sources`, a hand-added repository nobody declared) are left alone and
 listed by `status` as `unmanaged`.
+A file that carries the module's marker but belongs to a source the profile no longer declares (the entry was deleted
+instead of set to `enabled = false`) is a `manual` finding: the module proves it owns the file, yet never removes a
+repository because a line vanished from the profile. Declare the source again, or declare it with `enabled = false`.
 
 ## `enabled = false`
 

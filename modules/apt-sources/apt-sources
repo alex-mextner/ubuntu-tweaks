@@ -38,7 +38,7 @@ from ubuntu_tweaks.module_script import (  # noqa: E402
     Module,
     ModuleError,
     NeedsManual,
-    Transient,
+    TempFail,
     main,
     module_config,
     read_text_or_none,
@@ -81,6 +81,7 @@ OPTIONS = {
     "pin",
 }
 KEY_FORMATS = ("asc", "gpg")
+FPR_FIELD = 9  # `gpg --with-colons`: the fingerprint is the tenth field of an `fpr` record
 ARCH_NAMES = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "armhf"}
 
 
@@ -356,6 +357,11 @@ class Change:
     key: bool = False  # the content comes from the key candidates, not from `text`
     needs: tuple[str, ...] = ()
 
+    @property
+    def shared(self) -> bool:
+        """A removal of a file several sources declare: it waits until all of them converged."""
+        return len(self.needs) > 1
+
 
 def apply_order(change: Change) -> int:
     """Key first (a source never appears without its key), files next, removals (legacy, disabled) last."""
@@ -419,7 +425,7 @@ class Gpg:
             elif kind == "sub":
                 expect = False
             elif kind == "fpr" and expect:
-                found.add(line.split(":")[9].upper())
+                found.add(line.split(":")[FPR_FIELD].upper())
                 expect = False
         return frozenset(found)
 
@@ -489,13 +495,18 @@ class AptSources(Module):
         for path in files:
             if path.name in managed_names or path in claimed:
                 continue
-            marked = (read_text_or_none(path) or "").startswith(MARKER)
-            why = (
-                "carries the ubuntu-tweaks marker but is not declared"
-                if marked
-                else "not declared in [modules.apt-sources]"
-            )
-            result.unmanaged.append(Finding(True, f"unmanaged {self._shown(path)}", f"left alone ({why})"))
+            if (read_text_or_none(path) or "").startswith(MARKER):
+                result.manual.append(
+                    Finding(
+                        False,
+                        f"{self._shown(path)} was written by this module but is no longer declared",
+                        "declare the source again, or declare it with enabled = false to have it removed",
+                        manual=True,
+                    )
+                )
+                continue
+            detail = "left alone (not declared in [modules.apt-sources])"
+            result.unmanaged.append(Finding(True, f"unmanaged {self._shown(path)}", detail))
         enabled_names = {source.name for source in enabled}
         result.refresh = [name for name in self._pending() if name in enabled_names]
         if result.refresh:
@@ -664,7 +675,7 @@ class AptSources(Module):
         lines = [f"  back up {shown} to {backup}/{change.path.name}"] if change.backup and change.path.exists() else []
         if change.action == "remove":
             note = f" ({change.note})" if change.note else ""
-            if len(change.needs) > 1:
+            if change.shared:
                 note += f", only after {', '.join(change.needs)} converged"
             return [*lines, f"  remove {shown}{note}"]
         old = read_text_or_none(change.path)
@@ -797,10 +808,12 @@ class AptSources(Module):
         deferred: list[Change] = []
         for source in self._sources:
             changes = by_source.get(source.name, [])
-            deferred += [change for change in changes if len(change.needs) > 1]
-            changes = [change for change in changes if len(change.needs) <= 1]
+            shared = [change for change in changes if change.shared]
+            deferred += shared
+            changes = [change for change in changes if not change.shared]
             if not changes:
-                sys.stdout.write(f"ok      {source.name}: unchanged\n")
+                if not shared:
+                    sys.stdout.write(f"ok      {source.name}: unchanged\n")
                 continue
             try:
                 done, wrote = self._converge(source, changes)
@@ -826,7 +839,7 @@ class AptSources(Module):
         if failures:
             summary = f"{len(failures)} failure(s): " + "; ".join(f"{f.name}: {f.cause}" for f in failures)
             if all(failure.transient for failure in failures):
-                raise Transient(summary)
+                raise TempFail(summary)
             raise ModuleError(summary)
         if result.manual:
             raise NeedsManual("; ".join(f"{item.subject}: {item.detail}" for item in result.manual))

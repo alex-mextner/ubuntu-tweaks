@@ -4,7 +4,7 @@ enabled = false
 # After the packages phase (docker.io / docker-ce come from packages.toml); no `requires = ["apt-sources"]`: a broken
 # unrelated repository must not block the memory cap, and the module reads the live state (the nvidia runtime binary).
 order = 55
-manual = "install docker (docker.io in packages.toml, or docker-ce through the apt-sources docker repository), and nvidia-container-toolkit when nvidia_runtime = true, then run apply again"
+manual = "install docker (docker.io in packages.toml, or docker-ce through the apt-sources docker repository), and nvidia-container-toolkit when nvidia_runtime = true, and fix /etc/docker/daemon.json by hand if it is not a JSON object, then run apply again"
 
 [source]
 kind = "system"

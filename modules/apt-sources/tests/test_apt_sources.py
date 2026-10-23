@@ -466,6 +466,22 @@ class Migration(Staged):
         self.assertIn("ubuntu.sources", status.stdout)
 
 
+class Undeclared(Staged):
+    def test_a_file_this_module_wrote_for_a_source_that_was_dropped_is_a_manual_step(self):
+        item = self.good()
+        self.run_script("install", [item])
+        written = self.path("etc/apt/sources.list.d/mozilla.sources")
+        checked = self.run_script("check", [])
+        self.assertEqual(checked.returncode, 3)
+        self.assertIn("no longer declared", checked.stdout)
+        installed = self.run_script("install", [])
+        self.assertEqual(installed.returncode, 10)
+        self.assertIn("mozilla.sources", installed.stdout)
+        self.assertTrue(written.exists(), "never removed without the owner saying enabled = false")
+        self.assertEqual(self.run_script("install", [{**item, "enabled": False}]).returncode, 0)
+        self.assertFalse(written.exists())
+
+
 class Disabled(Staged):
     def test_a_disabled_source_is_absent_and_needs_no_key(self):
         item = source("docker", enabled=False, fingerprint="")

@@ -36,7 +36,7 @@ Public API:
 - ``main(module, argv, *, out, err) -> int``: the ``check`` / ``status`` / ``plan`` / ``install`` dispatcher
   (``--check`` and ``--dry-run`` are accepted as ``check`` and ``plan``);
   ``Module.plan()`` (default: nothing) is the read-only preview of what ``install`` will do.
-- ``Transient(message)``: raised by ``apply()`` when it failed only for a network, lock or busy cause; ``main``
+- ``TempFail(message)``: raised by ``apply()`` when it failed only for a network, lock or busy cause; ``main``
   exits ``EXIT_TEMPFAIL`` (75), which the engine retries with backoff.
 """
 
@@ -80,7 +80,7 @@ class NeedsManual(Exception):
     """The install is blocked on a human step (exit 10); the message names it."""
 
 
-class Transient(Exception):
+class TempFail(Exception):
     """The install failed only for a network, lock or busy cause (exit 75); the message is shown as is."""
 
 
@@ -249,7 +249,7 @@ def main(module: Module, argv: Sequence[str], *, out: TextIO, err: TextIO) -> in
     except NeedsManual as blocked:
         out.write(f"needs manual: {blocked}\n")
         return EXIT_NEEDS_MANUAL
-    except Transient as error:
+    except TempFail as error:
         err.write(f"{script}: {error}\n")
         return EXIT_TEMPFAIL
     except (ModuleError, UbuntuTweakError, OSError) as error:

@@ -81,11 +81,11 @@ class Options:
         return f"{self.slice_name}.slice"
 
 
-def size_bytes(value: str) -> float:
+def size_bytes(option: str, value: str) -> float:
     """Bytes of ``24G`` / ``512M`` / ``infinity`` (``math.inf``)."""
     found = SIZE.fullmatch(value)
     if not found:
-        raise ModuleError(f"[modules.docker-daemon] {value!r} is not a size (like 24G, 512M or infinity)")
+        raise ModuleError(f"[modules.docker-daemon] {option} = {value!r} is not a size (like 24G, 512M or infinity)")
     return math.inf if value == "infinity" else int(found.group(1)) * UNITS[found.group(2)]
 
 
@@ -111,7 +111,7 @@ def parse_options(options: Mapping[str, object]) -> Options:
             continue
         if not isinstance(value, str):
             raise ModuleError(f'[modules.docker-daemon] {option} must be a string like "24G"')
-        sizes[option] = size_bytes(value)
+        sizes[option] = size_bytes(option, value)
         limits[prop] = value
     if sizes.get("memory_high", 0) > sizes.get("memory_max", math.inf):
         raise ModuleError("[modules.docker-daemon] memory_high must not exceed memory_max")
@@ -168,7 +168,7 @@ class Inspection:
     daemon_reload: bool = False  # systemd has to re-read the unit (just written, or it says NeedDaemonReload=yes)
     daemon_write: Write | None = None
     cgroup_changes: bool = False
-    docker_active: bool = False
+    reload_docker: bool = False  # daemon.json changes and docker is active
 
     @property
     def clean(self) -> bool:
@@ -207,31 +207,40 @@ class DockerDaemon(Module):
     def _docker_active(self) -> bool:
         return self._process.query(["systemctl", "is-active", "docker"], timeout=20).returncode == 0
 
-    def _read_daemon(self) -> tuple[dict[str, object], str | None]:
-        """``(document, raw text)``; ``({}, None)`` when the file is absent. A file that is not a JSON object is an error:
-        it is the user's and must not be overwritten."""
+    def _read_daemon(self) -> tuple[dict[str, object], str | None, str | None]:
+        """``(document, raw text, problem)``; ``({}, None, None)`` when the file is absent. A file that is not a JSON
+        object is the user's: ``problem`` says so and nothing is ever written over it."""
         path = self._p(DAEMON_JSON)
         text = read_text_or_none(path)
         if text is None:
-            return {}, None
+            return {}, None, None
         if not text.strip():
-            return {}, text
+            return {}, text, None
         try:
             document = json.loads(text)
         except json.JSONDecodeError as error:
-            raise ModuleError(
-                f"{self._shown(path)} is not valid JSON ({error}): fix it by hand, the module never overwrites it"
-            ) from error
+            return (
+                {},
+                text,
+                f"{self._shown(path)} is not valid JSON ({error}): fix it by hand, the module never overwrites it",
+            )
         if not isinstance(document, dict):
-            raise ModuleError(f"{self._shown(path)} must hold a JSON object")
-        return document, text
+            return (
+                {},
+                text,
+                f"{self._shown(path)} must hold a JSON object: fix it by hand, the module never overwrites it",
+            )
+        return document, text, None
 
-    def wanted_daemon(self) -> dict[str, object]:
-        wanted: dict[str, object] = copy.deepcopy(dict(self._options.daemon))
+    def wanted_daemon(self, nvidia: bool) -> dict[str, object]:
+        """The keys the profile declares; a runtime the profile spells out itself (``daemon.runtimes.nvidia``) wins over
+        the module's default entry."""
+        wanted: dict[str, object] = {}
+        if nvidia and self._options.nvidia != "no":
+            wanted = {"runtimes": {"nvidia": dict(NVIDIA_ENTRY)}}
+        wanted = merge(wanted, copy.deepcopy(dict(self._options.daemon)))
         if self._options.limits:
             wanted["cgroup-parent"] = self._options.slice_unit
-        if self._options.nvidia == "yes" or (self._options.nvidia == "auto" and self._nvidia_present()):
-            wanted = merge(wanted, {"runtimes": {"nvidia": NVIDIA_ENTRY}})
         return wanted
 
     def _unit_stale(self) -> bool:
@@ -272,9 +281,13 @@ class DockerDaemon(Module):
             result.facts.append(Finding(True, f"{NVIDIA_RUNTIME} {state}"))
         if self._options.limits:
             self._inspect_slice(result)
-        document, text = self._read_daemon()
-        merged = merge(document, self.wanted_daemon())
+        document, text, problem = self._read_daemon()
         shown = self._shown(self._p(DAEMON_JSON))
+        if problem:
+            result.facts.append(Finding(False, f"{shown} is a JSON object", problem, manual=True))
+            result.blocked = result.blocked or problem
+            return result
+        merged = merge(document, self.wanted_daemon(nvidia))
         result.facts.append(
             Finding(merged == document, f"{shown} carries the declared keys", "" if text is not None else "missing")
         )
@@ -283,7 +296,7 @@ class DockerDaemon(Module):
                 self._p(DAEMON_JSON), text, render_json(merged), backup=text is not None and bool(text.strip())
             )
             result.cgroup_changes = merged.get("cgroup-parent") != document.get("cgroup-parent")
-            result.docker_active = self._docker_active()
+            result.reload_docker = self._docker_active()
         return result
 
     def _inspect_slice(self, result: Inspection) -> None:
@@ -321,7 +334,7 @@ class DockerDaemon(Module):
             lines.append("  systemctl daemon-reload")
         if result.daemon_write:
             lines += self._plan_write(result.daemon_write, backup, " (keys that are not declared stay as they are)")
-            if result.docker_active:
+            if result.reload_docker:
                 lines.append("  systemctl reload docker (SIGHUP; the daemon is never restarted)")
             else:
                 lines.append("  docker is not active: no reload, the file is read at its next start")
@@ -377,14 +390,15 @@ class DockerDaemon(Module):
         if result.clean:
             sys.stdout.write("nothing to change\n")
             return
+        if result.daemon_write:
+            self._validate(result.daemon_write.new)  # before the first write: a rejection leaves the machine as it was
         if result.slice_write:
             self._write(result.slice_write)
         if result.daemon_reload:
             self._run(["systemctl", "daemon-reload"])
         if result.daemon_write:
-            self._validate(result.daemon_write.new)
             self._write(result.daemon_write)
-            if result.docker_active:
+            if result.reload_docker:
                 self._run(["systemctl", "reload", "docker"])
                 sys.stdout.write("reloaded docker (SIGHUP)\n")
             else:
