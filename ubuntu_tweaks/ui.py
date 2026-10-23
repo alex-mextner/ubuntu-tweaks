@@ -35,6 +35,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TextIO
 
+LANG_ENV = "UBUNTU_TWEAK_LANG"  # the language of the explanations when --lang is not given
 ANSI = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 MIN_WIDTH, MAX_WIDTH = 40, 120
@@ -480,6 +481,43 @@ _TEXT: dict[str, dict[str, str]] = {
         "update.preview_footer": "Nothing changed. This was a preview; run `ubuntu-tweak update --commit` to pull and apply.",
         "warnings": "Warnings",
         "staged": "Staged until the extension code is installed (not an error, nothing to do: the same `apply --commit` applies them)",
+        "finish.title": "Finish setup",
+        "finish.intro": "Only what is still left for you. Everything the machine can do it does itself.",
+        "finish.checking": "Checking what is left (the plan takes a few seconds)…",
+        "finish.state.done": "done",
+        "finish.state.pending": "waiting for you",
+        "finish.state.wait": "WAIT",
+        "finish.state.blocked": "after another step",
+        "finish.state.failed": "failed",
+        "finish.gate.go": "GO: nothing blocks it, it can run now",
+        "finish.gate.wait": "WAIT: {why}",
+        "finish.gate.wait_plain": "WAIT",
+        "finish.pause_again": "Press Enter to start, s to skip this step or q to quit.",
+        "finish.interrupted": "Interrupted (Ctrl-C).",
+        "finish.exit_code": "exit code {code}",
+        "finish.reapply": "{title} is done: the apply step has more to do now, so it runs again",
+        "finish.optional": "(optional)",
+        "finish.why": "Why:",
+        "finish.action": "You do:",
+        "finish.blocked_by": "first: {titles}",
+        "finish.pause": "Enter: start, s: skip, q: quit (never type a password here) > ",
+        "finish.prepare": "The machine prepares everything itself…",
+        "finish.prepare_failed": "The machine part failed: {detail}",
+        "finish.run_failed": "The step's command exited with {code}.",
+        "finish.step_done": "Done: {title}",
+        "finish.step_not_done": "Not done yet: {title}. {detail}",
+        "finish.gave_up": "{title}: two tries in this run, not trying again. Run it again once the cause is fixed.",
+        "finish.gate_error": "could not check the condition to run ({command} returned {code}): {detail}",
+        "finish.needs_terminal": "Nothing was run: this needs a terminal. Open one and run: {command}",
+        "finish.summary.title": "Summary",
+        "finish.summary.all": "All done: nothing is left for you.",
+        "finish.summary.left": "Left: {n}.",
+        "finish.summary.wait": "Waiting for: {titles}.",
+        "finish.summary.again": "Run it again when you are ready: {command}",
+        "finish.apply.interrupted": "the last apply run was interrupted",
+        "finish.apply.no_gi": "PyGObject (python3-gi) is missing: the sudo step installs it",
+        "finish.apply.plan_error": "the plan could not be computed: {detail}",
+        "finish.apply.left": "root actions: {root}; failed items of the last run: {problems}",
     },
     "ru": {
         "header.machine": "машина",
@@ -554,12 +592,49 @@ _TEXT: dict[str, dict[str, str]] = {
         "update.preview_footer": "Ничего не изменено. Это предпросмотр; `ubuntu-tweak update --commit` обновит код и применит план.",
         "warnings": "Предупреждения",
         "staged": "Отложено до установки кода расширения (не ошибка, ничего делать не нужно: тот же `apply --commit` применит)",
+        "finish.title": "Завершение настройки",
+        "finish.intro": "Здесь только то, что осталось именно тебе. Всё, что может сама машина, она делает сама.",
+        "finish.checking": "Проверяю, что ещё осталось (план считается несколько секунд)…",
+        "finish.state.done": "готово",
+        "finish.state.pending": "ждёт тебя",
+        "finish.state.wait": "WAIT",
+        "finish.state.blocked": "после другого шага",
+        "finish.state.failed": "не вышло",
+        "finish.gate.go": "GO: ничего не мешает, можно запускать",
+        "finish.gate.wait": "WAIT: {why}",
+        "finish.gate.wait_plain": "WAIT",
+        "finish.pause_again": "Нажми Enter, чтобы начать, s, чтобы пропустить шаг, или q, чтобы выйти.",
+        "finish.interrupted": "Прервано (Ctrl-C).",
+        "finish.exit_code": "код выхода {code}",
+        "finish.reapply": "{title} выполнено: у шага применения появилась новая работа, он запустится снова",
+        "finish.optional": "(по желанию)",
+        "finish.why": "Зачем:",
+        "finish.action": "Что делаешь ты:",
+        "finish.blocked_by": "сначала: {titles}",
+        "finish.pause": "Enter: начать, s: пропустить, q: выйти (не вводи здесь password/пароль) > ",
+        "finish.prepare": "Машина готовит всё сама…",
+        "finish.prepare_failed": "Машинная часть не удалась: {detail}",
+        "finish.run_failed": "Команда шага завершилась с кодом {code}.",
+        "finish.step_done": "Готово: {title}",
+        "finish.step_not_done": "Пока не готово: {title}. {detail}",
+        "finish.gave_up": "{title}: две попытки за этот запуск, дальше не пробую. Запусти ещё раз, когда разберёшься с причиной.",
+        "finish.gate_error": "не удалось проверить условие запуска ({command} вернул {code}): {detail}",
+        "finish.needs_terminal": "Ничего не запущено: нужен терминал. Открой терминал и выполни: {command}",
+        "finish.summary.title": "Итог",
+        "finish.summary.all": "Всё готово: тебе больше ничего делать не нужно.",
+        "finish.summary.left": "Осталось шагов: {n}.",
+        "finish.summary.wait": "Пока ждём: {titles}.",
+        "finish.summary.again": "Когда будешь готов, запусти снова: {command}",
+        "finish.apply.interrupted": "прошлый запуск apply оборвался",
+        "finish.apply.no_gi": "нет PyGObject (python3-gi): его поставит шаг с sudo",
+        "finish.apply.plan_error": "не удалось посчитать план: {detail}",
+        "finish.apply.left": "действий с root: {root}; сбоев прошлого запуска: {problems}",
     },
 }
 
 
 def lang() -> str:
-    chosen = _config.lang or os.environ.get("UBUNTU_TWEAK_LANG") or "en"
+    chosen = _config.lang or os.environ.get(LANG_ENV) or "en"
     return chosen if chosen in _TEXT else "en"
 
 

@@ -8,3 +8,19 @@ kind = "system"
 root = false
 install = "firefox install"
 check = "firefox check"
+
+# The AMO key belongs to the owner's Mozilla account: `ubuntu-tweak finish` opens the page, takes both halves with hidden
+# input and stores them in the Secret Service; the next apply signs the extension with them.
+[[finish]]
+id = "amo-key"
+title = "Create the Mozilla (AMO) signing key"
+title_ru = "Создать ключ подписи Mozilla (AMO)"
+why = "Firefox only accepts a signed passwords-app extension, and Mozilla signs it with an API key of your own account."
+why_ru = "Firefox принимает расширение passwords-app только подписанным, а подписывает его Mozilla по ключу API твоего аккаунта."
+action = "In the page that opens press Generate new credentials, then paste the JWT issuer and the JWT secret here (hidden input, nothing is shown or saved to a file)."
+action_ru = "На открывшейся странице нажми Generate new credentials, затем вставь сюда JWT issuer и JWT secret (ввод скрыт, ничего не показывается и не пишется в файл)."
+check = ["./finish", "check"]
+prepare = ["./finish", "prepare"]
+run = ["./finish", "run"]
+requires = ["apply"]
+reapply = true   # with the key in place the next apply signs the extension and force-installs it (root)

@@ -17,9 +17,9 @@ never needs ``git`` there. The release channel and schedule are ticket #19, not 
 from __future__ import annotations
 
 import argparse
-import sys
 
 from ubuntu_tweaks import ui
+from ubuntu_tweaks.commands._support import apply_command
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT
 from ubuntu_tweaks.process import run as run_command, run_streamed
@@ -46,19 +46,6 @@ def _code_state(ctx: Context) -> str:
     repo = ["git", "-C", str(ctx.repo_root)]
     head = run_command([*repo, "rev-parse", "HEAD"], capture=True)
     return head + run_command([*repo, "submodule", "status"], capture=True)
-
-
-def _apply_command(ctx: Context, *, no_sudo: bool) -> list[str]:
-    command = [sys.executable, str(ctx.repo_root / "bin" / "ubuntu-tweak"), "apply", "--commit"]
-    command += ["--machine", ctx.profile.machine]
-    if ctx.profile.exists:
-        command += ["--profile", str(ctx.profile.root)]
-    if ctx.only:
-        command += ["--only", ",".join(sorted(ctx.only))]
-    if no_sudo:
-        command.append("--no-sudo")
-    command += ui.cli_flags()
-    return command
 
 
 def _note(text: str, *, kind: str = "info") -> None:
@@ -90,7 +77,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
     if not _is_git_checkout(ctx):
         _note(f"{ctx.repo_root} is not a git checkout: skipping the pull and the submodule update.", kind="manual")
-        return run_streamed(_apply_command(ctx, no_sudo=args.no_sudo))
+        return run_streamed(apply_command(ctx, no_sudo=args.no_sudo))
     before = _code_state(ctx)
     if ui.rich():
         _note(f"Step 1/2: {' '.join(PULL)}; {' '.join(SUBMODULES)}")
@@ -98,7 +85,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     run_command(SUBMODULES, cwd=ctx.repo_root)
     if ui.rich():
         _note("Step 2/2: apply --commit with the updated code")
-    code = run_streamed(_apply_command(ctx, no_sudo=args.no_sudo))
+    code = run_streamed(apply_command(ctx, no_sudo=args.no_sudo))
     if _code_state(ctx) != before:
         _note(RELOGIN_HINT, kind="manual")
     return code

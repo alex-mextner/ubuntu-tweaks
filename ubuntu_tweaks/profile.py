@@ -40,6 +40,9 @@ Public API:
 - ``Config`` (frozen): ``data`` (the merged tree; treat as read-only), ``origins`` (leaf path ->
   ``Layer``); ``table(*path)``, ``get(*path, default=None)``, ``origin(*path)``,
   ``module_enabled(name)``.
+- ``module_config_json(config, name, default_repo=None) -> str | None``: the merged
+  ``[modules.<name>]`` options (without ``enabled``) as compact JSON, the value of ``identity.MODULE_CONFIG_ENV`` for a module's scripts
+  (system-module installers and ``[[finish]]`` commands); ``None`` when there are none.
 - ``merge_layers(layers, *, union_lists=False) -> Config``: ``layers`` is ordered
   ``[(Layer, table), ...]``, last wins; tables merge, scalars replace, lists replace (or union
   with ``union_lists=True``, shared order first).
@@ -55,6 +58,7 @@ Public API:
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 import socket
@@ -595,3 +599,12 @@ class Profile:
                     if reason := document.item_reason((), key, name):
                         reasons[key, name] = reason
         return reasons
+
+
+def module_config_json(config: Config, name: str, default_repo: str | None = None) -> str | None:
+    """The merged ``[modules.<name>]`` table without ``enabled`` as compact JSON; ``None`` when empty.
+    ``default_repo`` (the manifest's ``[source] repo``) is the option ``repo`` unless the profile sets one."""
+    options = {key: value for key, value in config.table("modules", name).items() if key != "enabled"}
+    if default_repo is not None:
+        options.setdefault("repo", default_repo)
+    return json.dumps(options, sort_keys=True, separators=(",", ":"), default=str) if options else None

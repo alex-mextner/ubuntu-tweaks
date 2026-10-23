@@ -20,6 +20,7 @@ from tests.test_ui import UiCase, strip
 from ubuntu_tweaks import reconcile, ui
 from ubuntu_tweaks.cli import build_parser, main
 from ubuntu_tweaks.commands import status
+from ubuntu_tweaks.commands._support import apply_command
 
 
 class CommandOutputTests(UiCase, CommandScenario):
@@ -90,10 +91,8 @@ class CommandOutputTests(UiCase, CommandScenario):
         self.assertEqual(len(document["missing"]), 3)
 
     def test_the_update_child_process_gets_the_output_flags(self) -> None:
-        from ubuntu_tweaks.commands import update
-
         ui.configure(color="always", plain=False, lang="ru")
-        command = update._apply_command(self.context(), no_sudo=True)
+        command = apply_command(self.context(), no_sudo=True)
         self.assertEqual(command[-5:], ["--no-sudo", "--color", "always", "--lang", "ru"])
         args = build_parser().parse_args(command[2:])
         self.assertEqual((args.color, args.lang, args.commit), ("always", "ru", True))

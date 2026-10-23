@@ -29,7 +29,6 @@ Public API:
 
 from __future__ import annotations
 
-import json
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
@@ -37,14 +36,14 @@ from pathlib import Path
 from ubuntu_tweaks.actions import EX_TEMPFAIL, Action, ActionFailed, ManualStepRequired, Phase, Transient
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.manifest import Fallback, Manifest, SourceKind, module_defaults
-from ubuntu_tweaks.profile import Config
+from ubuntu_tweaks.identity import MODULE_CONFIG_ENV
+from ubuntu_tweaks.profile import module_config_json
 from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.settings import SettingsBackend
 
 CHECK_TIMEOUT_SECONDS = 60
 DRIFT_EXIT = 3
 NEEDS_MANUAL_EXIT = 10  # an installer's "I cannot finish without you": reported, not a failure
-MODULE_CONFIG_ENV = "UBUNTU_TWEAK_MODULE_CONFIG"
 MISSING_EXIT = 127  # Process.query's answer for a binary that does not exist
 UNRUNNABLE_EXIT = 126  # ... for one that cannot be executed (no exec bit, permission denied)
 TIMEOUT_EXIT = 124  # ... for a command that outlived its timeout
@@ -199,15 +198,6 @@ class _FallbackInstall(Action):
 
     def run(self) -> None:
         self._primary.run_fallback(self._fallback)
-
-
-def module_config_json(config: Config, name: str, default_repo: str | None = None) -> str | None:
-    """The merged ``[modules.<name>]`` table without ``enabled`` as compact JSON; ``None`` when empty.
-    ``default_repo`` (the manifest's ``[source] repo``) is the option ``repo`` unless the profile sets one."""
-    options = {key: value for key, value in config.table("modules", name).items() if key != "enabled"}
-    if default_repo is not None:
-        options.setdefault("repo", default_repo)
-    return json.dumps(options, sort_keys=True, separators=(",", ":"), default=str) if options else None
 
 
 def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> list[Action]:
