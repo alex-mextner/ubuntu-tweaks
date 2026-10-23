@@ -162,7 +162,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_system_takes_no_extension_settings_seeds_or_migrations(self) -> None:
         base = '[source]\nkind = "system"\ninstall = "i.sh"\ncheck = "i.sh --check"\n'
-        self.assertInvalid(base + "[extension]\n", r"\[extension\] is only for submodule and local")
+        self.assertInvalid(base + "[extension]\n", r"\[extension\] is only for submodule, local and builtin")
         self.assertInvalid(base + '[[settings]]\nfile = "a.ini"\n', "system module takes no")
 
     def test_builtin_settings_need_a_schema(self) -> None:

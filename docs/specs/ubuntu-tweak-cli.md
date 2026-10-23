@@ -320,7 +320,7 @@ enabled = true                 # default; profile.toml / machine.toml override i
 kind = "submodule"            # submodule | local | builtin | system   (ego: reserved, #20)
 path = "gnome-extensions/hyperdock"
 
-[extension]                    # submodule and local only
+[extension]                    # submodule and local; builtin only with `enable`
 conflicts = ["ubuntu-dock@ubuntu.com"]                       # disabled while enabled
 retire = ["compiz-alike-magic-lamp-effect@hermes83.github.com"]  # dropped from enabled
 
@@ -431,6 +431,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 6 | passwords-app: install, enable unit, native host, polkit action | `passwords-app` (60), `passwords-app-polkit` (61) |
 | 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
+| 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -461,6 +462,9 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `firefox-autologin` | 72 | `system` | on |
 | `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
+| `quicklook` | 85 | `packages` | on |
+| `gsconnect` | 90 | `packages` | off |
+| `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `rig` | 100 | `system` | off |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
@@ -566,6 +570,32 @@ fail on tools the pipeline is about to install. `update` runs `git pull` and the
 a git checkout (`<repo>/.git` exists); a tree without it (an unpacked tarball) prints that it skips them and runs
 `apply`, so it never needs `git` there. The `submodule` planner agrees: in a tree without `.git` a non-empty
 submodule directory counts as present and an empty one is a manual step (never a `git` call).
+
+### Extensions the system ships, and extra extensions of the laptop
+
+`[extension] enable = ["<uuid>", ...]` is allowed on a `builtin` module (a submodule or local module's uuid is its
+`metadata.json`'s, so `enable` is refused there): the toggle planner then enables those uuids in the user's
+`enabled-extensions` (and removes them from `disabled-extensions`) while the module is enabled, exactly as for a code
+module, and `status` does not list them as extensions no module declares. The code comes from the module's
+`[install] apt`; the Shell reads new extension code at login, so a fresh install needs one re-login.
+
+| Module | What | Default |
+|---|---|---|
+| `gsconnect` | apt `gnome-shell-extension-gsconnect` (71, GNOME 46-50), `python3-nautilus`, `sshfs`; enables `gsconnect@andyholmes.github.io`. Pairing keys are per machine (`~/.config/gsconnect`), a phone is paired again on a new computer. | off (the profile of a person who uses KDE Connect turns it on) |
+| `allowlockedremotedesktop` | the 3 KB extension `allowlockedremotedesktop@kamens.us` by Jonathan Kamens (GPL-2.0-or-later, vendored in `gnome-extensions/` with its `COPYING`; upstream https://github.com/jikamens/allow-locked-remote-desktop) as a `local` module: it keeps GNOME Remote Desktop connections alive while the screen is locked. That weakens the lock screen for anybody who can reach the remote desktop port, so it is off unless a profile asks for it. | off |
+
+Both exist because the laptop `home` had them enabled (found by reading it live on 23 Oct).
+
+### Quick Look (`quicklook`)
+
+User request of 23 Oct ("space для предпросмотра в навигаторе по файлам я еще делал"): Space in Files (Nautilus) previews the
+selected file. No code of the user's own for it survives on this PC (not in any repository, branch, session or
+backup that was searched), so the module installs the GNOME solution instead of rebuilding one: apt
+`gnome-sushi` (the `org.gnome.NautilusPreviewer` D-Bus service Nautilus calls on Space) and `gstreamer1.0-libav`
+(H.264/AAC/MP3 playback in the preview). `kind = "builtin"`, default phase (`packages`), order 85, on by default,
+`[modules.quicklook] enabled = false` in `machine.toml` switches it off. It needs root only for the apt batch, which
+`apply --commit` already runs under the one sudo prompt. The bus name is activated on demand from the service file
+the package ships, so neither Files nor the session has to restart: press Space on a file after the apt run.
 
 ### Base modules
 

@@ -1,0 +1,7 @@
+description = "Allow Locked Remote Desktop: keep GNOME Remote Desktop connections working while the screen is locked (vendored, GPL-2.0-or-later)"
+enabled = false   # opt-in: it lets a remote user reach the machine while the local screen is locked; a profile turns it on
+order = 91
+
+[source]
+kind = "local"
+path = "gnome-extensions/allowlockedremotedesktop@kamens.us"
