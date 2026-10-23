@@ -43,7 +43,7 @@ log-driver = "journald"
   `apt-sources` plus `nvidia-container-toolkit` in `packages.toml`.
 - Merge rules: a table in the declared keys merges into the existing table (`runtimes.nvidia` does not remove a
   `runtimes.mine`), any other value replaces. A runtime the profile spells out itself
-  (`daemon.runtimes.nvidia`) wins over the module's default entry. Removing an option later **never deletes** keys from daemon.json:
+  (`daemon.runtimes.nvidia`) is merged over the module's default entry, so its keys win. Removing an option later **never deletes** keys from daemon.json:
   delete them by hand.
 
 ## Values for this PC and the laptop's origin

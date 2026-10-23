@@ -91,7 +91,8 @@ Sources the module does not manage (`ubuntu.sources`, a hand-added repository no
 listed by `status` as `unmanaged`.
 A file that carries the module's marker but belongs to a source the profile no longer declares (the entry was deleted
 instead of set to `enabled = false`) is a `manual` finding: the module proves it owns the file, yet never removes a
-repository because a line vanished from the profile. Declare the source again, or declare it with `enabled = false`.
+repository because a line vanished from the profile. Declare the source again, or declare it with `enabled = false`. The key and pin files of a dropped source stay
+where they are until it is declared (`enabled = false` removes them with the source file).
 
 ## `enabled = false`
 
