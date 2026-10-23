@@ -341,6 +341,8 @@ def decorate(text: str, family: str, *, stream: TextIO | None = None) -> str:
 _KIND_WHY: dict[str, dict[str, str]] = {
     "en": {
         "package": "apt/snap/flatpak packages that your modules or profile declare; never removes any",
+        "package-user": "uv/npm/bun/cargo/pipx tools that your profile declares, installed as you with no sudo; never removes any",
+        "package-manager": "a package manager that packages.toml needs is not installed; something else has to install it",
         "shell-rc": "created only while the file is absent; an existing file is never overwritten",
         "login-shell": "makes the shell your terminals start with the declared one (needs sudo)",
         "git-config": "writes one global git option from your profile",
@@ -374,6 +376,8 @@ _KIND_WHY: dict[str, dict[str, str]] = {
     },
     "ru": {
         "package": "пакеты apt/snap/flatpak, которые просят модули или профиль; ничего не удаляется",
+        "package-user": "инструменты uv/npm/bun/cargo/pipx из профиля; ставятся от вашего имени без sudo; ничего не удаляется",
+        "package-manager": "менеджер пакетов, нужный packages.toml, не установлен; его должен поставить кто-то другой",
         "shell-rc": "создаётся только если файла нет; существующий не перезаписывается",
         "login-shell": "делает объявленную оболочку оболочкой по умолчанию (нужен sudo)",
         "git-config": "записывает одну глобальную опцию git из профиля",

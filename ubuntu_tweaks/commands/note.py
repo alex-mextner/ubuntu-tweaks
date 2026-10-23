@@ -3,7 +3,7 @@
 Accessed via: ``bin/ubuntu-tweak note``.
 
 ``<target>`` is ``<bundle>:<dconf key path>`` (``dev-keyboard:org/gnome/desktop/wm/keybindings/close``),
-``packages:<apt|snap|flatpak>:<name>`` or ``system:<key>`` (``system:timezone``,
+``packages:<apt|snap|flatpak|brew|uv|npm|bun|cargo|pipx>:<name>`` or ``system:<key>`` (``system:timezone``,
 ``system:keyboard.layout``). The reason is the comment above a bundle or system key, or the trailing
 comment of a package; an empty reason removes it. Preview by default; ``--commit`` writes the one
 changed file atomically. ``--origin shared|overlay`` picks the layer when the target is in both
@@ -22,7 +22,10 @@ from ubuntu_tweaks.context import Context
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("note", help="add, change or remove the reason of a setting, key or package")
-    parser.add_argument("target", help="<bundle>:<dconf key path> | packages:<apt|snap|flatpak>:<name> | system:<key>")
+    parser.add_argument(
+        "target",
+        help="<bundle>:<dconf key path> | packages:<apt|snap|flatpak|brew|uv|npm|bun|cargo|pipx>:<name> | system:<key>",
+    )
     parser.add_argument("reason", help="the reason text (empty removes it)")
     parser.add_argument("--origin", choices=("shared", "overlay"), help="the layer to edit when the target is in both")
     parser.add_argument("--commit", action="store_true", help="write the change (default: preview only)")

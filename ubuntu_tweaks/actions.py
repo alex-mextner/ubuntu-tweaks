@@ -105,12 +105,18 @@ class Transient(ActionFailed):
     backoff; once the attempts are used it is a permanent failure that says it was transient."""
 
 
+class Permanent(ActionFailed):
+    """A failure that is never retried, whatever its text says (an install error that quotes a package named
+    ``pytest-timeout`` must not read as a timeout)."""
+
+
 EX_TEMPFAIL = 75  # sysexits.h: an installer's "try again later"
 _TRANSIENT_TEXT = re.compile(
     r"could not resolve|name or service not known|temporary failure|temporarily unavailable|timed out|timeout"
     r"|connection (?:reset|refused|closed)|network is unreachable|could not get lock|unable to acquire the dpkg"
     r"|dpkg frontend lock|resource temporarily unavailable|try again|http (?:429|502|503|504)"
-    r"|\b(?:429|502|503|504)\b.*(?:too many|bad gateway|unavailable|gateway)|rate limit|ssl: |tls handshake",
+    r"|\b(?:429|502|503|504)\b.*(?:too many|bad gateway|unavailable|gateway)|rate limit|ssl: |tls handshake"
+    r"|eai_again|enotfound|econnreset|etimedout|dns error|error sending request|spurious network error",
     re.IGNORECASE,
 )
 
@@ -119,6 +125,8 @@ def is_transient(error: BaseException) -> bool:
     """``Transient``, or an error whose text names a network / lock / busy cause (``returncode`` 75 counts too)."""
     if isinstance(error, Transient):
         return True
+    if isinstance(error, Permanent):
+        return False
     if getattr(error, "returncode", None) == EX_TEMPFAIL:
         return True
     return _TRANSIENT_TEXT.search(str(error)) is not None

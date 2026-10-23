@@ -353,6 +353,29 @@ class NoteTests(BundleCase):
         self.assertEqual(tomllib.loads(path.read_text())["apt"], ["tmux"])
         self.assertIn("# shell multiplexer", path.read_text())
 
+    def test_note_on_a_tool_package_finds_the_entry_by_its_name(self) -> None:
+        path = write(
+            self.root / "packages.toml",
+            'uv = ["glances[web]", "hyper-qa @ git+https://git.example.com/u/qa.git"]\nnpm = ["@openai/codex@0.5"]\n',
+        )
+        for target, reason in (
+            ("packages:uv:glances", "system monitor"),
+            ("packages:uv:Hyper_QA", "private qa tool"),
+            ("packages:npm:@openai/codex", "coding agent"),
+        ):
+            self.assertEqual(self.run_cli("note", target, reason, "--commit")[0], 0, target)
+        text = path.read_text()
+        self.assertIn('"glances[web]",  # system monitor', text)
+        self.assertIn('"hyper-qa @ git+https://git.example.com/u/qa.git",  # private qa tool', text)
+        self.assertIn('"@openai/codex@0.5",  # coding agent', text)
+        self.assertEqual(self.run_cli("note", "packages:uv:nothing", "x")[0], 2)
+        self.assertEqual(self.run_cli("note", "packages:uv:bad name;id", "x")[0], 2)
+
+    def test_note_on_a_brew_formula(self) -> None:
+        path = write(self.root / "packages.toml", 'brew = ["gh"]\n')
+        self.assertEqual(self.run_cli("note", "packages:brew:gh", "github cli", "--commit")[0], 0)
+        self.assertIn("# github cli", path.read_text())
+
     def test_note_on_a_system_value_is_the_comment_above_it(self) -> None:
         path = write(self.root / "system.toml", 'timezone = "Europe/Belgrade"\n')
         self.run_cli("note", "system:timezone", "where I live", "--commit")

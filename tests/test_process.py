@@ -116,6 +116,25 @@ class StreamedOutputTests(unittest.TestCase):
 
         self.assertEqual(out, "é")
 
+    def test_a_failure_carries_the_last_line_the_child_wrote_to_stderr(self) -> None:
+        script = "import sys; print('noise'); print('first', file=sys.stderr); print('dns error: could not resolve', file=sys.stderr); sys.exit(2)"
+        with self.assertRaises(CommandError) as raised:
+            self.shown(lambda: Process().execute([sys.executable, "-c", script]))
+        self.assertTrue(str(raised.exception).endswith("exited with status 2: dns error: could not resolve"))
+        self.assertEqual(raised.exception.returncode, 2)
+
+    def test_a_silent_failure_has_no_detail_suffix(self) -> None:
+        with self.assertRaises(CommandError) as raised:
+            self.shown(lambda: Process().execute([sys.executable, "-c", "import sys; sys.exit(4)"]))
+        self.assertTrue(str(raised.exception).endswith("exited with status 4"))
+
+    def test_the_detail_is_one_clipped_line(self) -> None:
+        script = "import sys; print('x' * 5000, file=sys.stderr); sys.exit(1)"
+        with self.assertRaises(CommandError) as raised:
+            self.shown(lambda: Process().execute([sys.executable, "-c", script]))
+        self.assertLess(len(str(raised.exception).splitlines()[0]), 600)
+        self.assertEqual(len(str(raised.exception).splitlines()), 1)
+
     def test_failures_keep_their_messages_and_status(self) -> None:
         with self.assertRaisesRegex(CommandError, "exited with status 3") as raised:
             self.shown(lambda: Process().execute([sys.executable, "-c", "import sys; print('before'); sys.exit(3)"]))
