@@ -1,0 +1,417 @@
+#!/usr/bin/python3 -B
+"""docker-daemon module: /etc/docker/daemon.json merged from the profile's options, plus a memory-capped slice.
+
+    docker-daemon check     exit 0 satisfied, 3 drift (read-only, no root)
+    docker-daemon status    the same facts, one line each
+    docker-daemon plan      what `install` is going to do, with a diff for every file (`--dry-run`)
+    docker-daemon install   as root (sudo): make them true
+
+Options (`[modules.docker-daemon]`): `daemon` (extra daemon.json keys, merged), `nvidia_runtime` ("auto" | true |
+false), `slice` (default "docker-limited"), `memory_high`, `memory_max`, `memory_swap_max`. With a memory limit
+the module writes /etc/systemd/system/<slice>.slice and sets daemon.json `cgroup-parent` to it. Keys of
+daemon.json the module does not manage stay as they are. Docker itself is not installed here (packages.toml or
+the apt-sources module does that): without it `install` ends in `needs manual`. docker is reloaded (SIGHUP, never
+restarted) only when daemon.json changed and docker is active. `DOCKER_DAEMON_ROOT=DIR` stages every path below
+DIR (tests; needs no root). `check`, `plan` and `install` all read one `inspect()`, so what the preview promises
+is what the installer does. Spec: docs/specs/docker-daemon.md.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+import re
+import shutil
+import sys
+import tempfile
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    main,
+    module_config,
+    read_text_or_none,
+    unified_diff_lines,
+    write_file,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+ROOT_ENV = "DOCKER_DAEMON_ROOT"
+DAEMON_JSON = "etc/docker/daemon.json"
+UNIT_DIR = "etc/systemd/system"
+BACKUP_DIR = "var/backups/ubuntu-tweaks/docker-daemon"
+MARKER = "# Managed by ubuntu-tweaks (docker-daemon)"
+BIN_DIRS = ("usr/bin", "usr/sbin", "usr/local/bin", "bin", "sbin")
+NVIDIA_RUNTIME = "nvidia-container-runtime"
+NVIDIA_ENTRY = {"path": NVIDIA_RUNTIME, "args": []}
+SLICE_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+SIZE = re.compile(r"(?:(\d+)([KMGT]?)|infinity)")
+UNITS = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+OPTIONS = {"daemon", "nvidia_runtime", "slice", "memory_high", "memory_max", "memory_swap_max"}
+LIMITS = (("memory_high", "MemoryHigh"), ("memory_max", "MemoryMax"), ("memory_swap_max", "MemorySwapMax"))
+VALIDATE_UNRUNNABLE = (126, 127)  # dockerd cannot be executed: nothing to validate with
+DOCKER_MISSING = (
+    "docker is not installed (dockerd not found): add docker.io to packages.toml or enable the apt-sources docker "
+    "repository, then run apply again"
+)
+NVIDIA_MISSING = f"{NVIDIA_RUNTIME} is not installed: install nvidia-container-toolkit, then run apply again"
+NEW_CONTAINERS_ONLY = "cgroup-parent only affects new containers (those created from now on); running containers keep their current cgroup"
+
+
+@dataclass(frozen=True)
+class Options:
+    daemon: Mapping[str, object]
+    nvidia: str  # "auto" | "yes" | "no"
+    slice_name: str
+    limits: Mapping[str, str]  # systemd property -> value; empty: no slice
+
+    @property
+    def slice_unit(self) -> str:
+        return f"{self.slice_name}.slice"
+
+
+def size_bytes(value: str) -> float:
+    """Bytes of ``24G`` / ``512M`` / ``infinity`` (``math.inf``)."""
+    found = SIZE.fullmatch(value)
+    if not found:
+        raise ModuleError(f"[modules.docker-daemon] {value!r} is not a size (like 24G, 512M or infinity)")
+    return math.inf if value == "infinity" else int(found.group(1)) * UNITS[found.group(2)]
+
+
+def parse_options(options: Mapping[str, object]) -> Options:
+    unknown = sorted(set(options) - OPTIONS)
+    if unknown:
+        raise ModuleError(f"[modules.docker-daemon] unknown option(s): {', '.join(unknown)}")
+    daemon = options.get("daemon", {})
+    if not isinstance(daemon, dict):
+        raise ModuleError("[modules.docker-daemon] daemon must be a table of daemon.json keys")
+    raw = options.get("nvidia_runtime", "auto")
+    if raw not in ("auto", True, False):
+        raise ModuleError('[modules.docker-daemon] nvidia_runtime must be "auto", true or false')
+    nvidia = "auto" if raw == "auto" else "yes" if raw else "no"
+    slice_name = options.get("slice", "docker-limited")
+    if not isinstance(slice_name, str) or not SLICE_NAME.fullmatch(slice_name):
+        raise ModuleError(f"[modules.docker-daemon] slice must match {SLICE_NAME.pattern} (no .slice suffix)")
+    limits: dict[str, str] = {}
+    sizes: dict[str, float] = {}
+    for option, prop in LIMITS:
+        value = options.get(option)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ModuleError(f'[modules.docker-daemon] {option} must be a string like "24G"')
+        sizes[option] = size_bytes(value)
+        limits[prop] = value
+    if sizes.get("memory_high", 0) > sizes.get("memory_max", math.inf):
+        raise ModuleError("[modules.docker-daemon] memory_high must not exceed memory_max")
+    parent = daemon.get("cgroup-parent")
+    if limits and parent is not None and parent != f"{slice_name}.slice":
+        raise ModuleError(
+            "[modules.docker-daemon] daemon.cgroup-parent conflicts with the memory slice: drop one of them"
+        )
+    return Options(daemon, nvidia, slice_name, limits)
+
+
+def render_slice(options: Options) -> str:
+    lines = [
+        f"{MARKER}: change [modules.docker-daemon] in the profile instead.",
+        "[Unit]",
+        "Description=Docker containers, memory-capped (ubuntu-tweaks docker-daemon)",
+        "",
+        "[Slice]",
+        "MemoryAccounting=yes",
+        *(f"{prop}={options.limits[prop]}" for _, prop in LIMITS if prop in options.limits),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def merge(current: Mapping[str, object], wanted: Mapping[str, object]) -> dict[str, object]:
+    """``current`` with every key of ``wanted`` set; nested tables merge, everything else is replaced; keys only in
+    ``current`` stay, in their order."""
+    merged = dict(current)
+    for key, value in wanted.items():
+        existing = merged.get(key)
+        merged[key] = merge(existing, value) if isinstance(existing, dict) and isinstance(value, dict) else value
+    return merged
+
+
+def render_json(document: Mapping[str, object]) -> str:
+    return json.dumps(document, indent=4, ensure_ascii=False) + "\n"
+
+
+@dataclass
+class Write:
+    """One file ``install`` writes: ``old`` is None when it does not exist yet."""
+
+    path: Path
+    old: str | None
+    new: str
+    backup: bool  # a non-empty file that is not this module's own is copied to the backup directory first
+
+
+@dataclass
+class Inspection:
+    facts: list[Finding] = field(default_factory=list)
+    blocked: str | None = None  # a human step: nothing is written while it stands
+    slice_write: Write | None = None
+    daemon_reload: bool = False  # systemd has to re-read the unit (just written, or it says NeedDaemonReload=yes)
+    daemon_write: Write | None = None
+    cgroup_changes: bool = False
+    docker_active: bool = False
+
+    @property
+    def clean(self) -> bool:
+        return self.blocked is None and not (self.slice_write or self.daemon_reload or self.daemon_write)
+
+
+class DockerDaemon(Module):
+    name = "docker-daemon"
+
+    def __init__(
+        self, root: Path, options: Options, process: Process, *, is_root: bool, clock: datetime | None = None
+    ) -> None:
+        self._root = root
+        self._options = options
+        self._process = process
+        self._is_root = is_root
+        self._stamp = (clock or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+
+    # -- facts about the machine -----------------------------------------------------------------------------
+
+    def _p(self, relative: str) -> Path:
+        return self._root / relative
+
+    def _shown(self, path: Path) -> str:
+        try:
+            return "/" + str(path.relative_to(self._root))
+        except ValueError:
+            return str(path)
+
+    def _find_dockerd(self) -> Path | None:
+        return next((p for p in (self._p(d) / "dockerd" for d in BIN_DIRS) if p.exists()), None)
+
+    def _nvidia_present(self) -> bool:
+        return any(os.access(self._p(directory) / NVIDIA_RUNTIME, os.X_OK) for directory in BIN_DIRS)
+
+    def _docker_active(self) -> bool:
+        return self._process.query(["systemctl", "is-active", "docker"], timeout=20).returncode == 0
+
+    def _read_daemon(self) -> tuple[dict[str, object], str | None]:
+        """``(document, raw text)``; ``({}, None)`` when the file is absent. A file that is not a JSON object is an error:
+        it is the user's and must not be overwritten."""
+        path = self._p(DAEMON_JSON)
+        text = read_text_or_none(path)
+        if text is None:
+            return {}, None
+        if not text.strip():
+            return {}, text
+        try:
+            document = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ModuleError(
+                f"{self._shown(path)} is not valid JSON ({error}): fix it by hand, the module never overwrites it"
+            ) from error
+        if not isinstance(document, dict):
+            raise ModuleError(f"{self._shown(path)} must hold a JSON object")
+        return document, text
+
+    def wanted_daemon(self) -> dict[str, object]:
+        wanted: dict[str, object] = copy.deepcopy(dict(self._options.daemon))
+        if self._options.limits:
+            wanted["cgroup-parent"] = self._options.slice_unit
+        if self._options.nvidia == "yes" or (self._options.nvidia == "auto" and self._nvidia_present()):
+            wanted = merge(wanted, {"runtimes": {"nvidia": NVIDIA_ENTRY}})
+        return wanted
+
+    def _unit_stale(self) -> bool:
+        result = self._process.query(
+            ["systemctl", "show", "-p", "NeedDaemonReload", "--value", self._options.slice_unit], timeout=20
+        )
+        return result.returncode == 0 and result.stdout.strip() == "yes"
+
+    # -- the one inspection ----------------------------------------------------------------------------------
+
+    def inspect(self) -> Inspection:
+        result = Inspection()
+        installed = self._find_dockerd() is not None
+        result.facts.append(
+            Finding(
+                installed,
+                "docker is installed (dockerd)",
+                "" if installed else "install docker.io (packages.toml) or docker-ce (apt-sources docker repository)",
+                manual=not installed,
+            )
+        )
+        if not installed:
+            result.blocked = DOCKER_MISSING
+        nvidia = self._nvidia_present()
+        if self._options.nvidia == "yes":
+            result.facts.append(
+                Finding(
+                    nvidia,
+                    f"{NVIDIA_RUNTIME} is installed",
+                    "" if nvidia else "install nvidia-container-toolkit",
+                    manual=not nvidia,
+                )
+            )
+            if not nvidia and result.blocked is None:
+                result.blocked = NVIDIA_MISSING
+        elif self._options.nvidia == "auto":
+            state = "present" if nvidia else "not installed: nvidia runtime skipped"
+            result.facts.append(Finding(True, f"{NVIDIA_RUNTIME} {state}"))
+        if self._options.limits:
+            self._inspect_slice(result)
+        document, text = self._read_daemon()
+        merged = merge(document, self.wanted_daemon())
+        shown = self._shown(self._p(DAEMON_JSON))
+        result.facts.append(
+            Finding(merged == document, f"{shown} carries the declared keys", "" if text is not None else "missing")
+        )
+        if merged != document:
+            result.daemon_write = Write(
+                self._p(DAEMON_JSON), text, render_json(merged), backup=text is not None and bool(text.strip())
+            )
+            result.cgroup_changes = merged.get("cgroup-parent") != document.get("cgroup-parent")
+            result.docker_active = self._docker_active()
+        return result
+
+    def _inspect_slice(self, result: Inspection) -> None:
+        path = self._p(f"{UNIT_DIR}/{self._options.slice_unit}")
+        old, new = read_text_or_none(path), render_slice(self._options)
+        result.facts.append(Finding(old == new, self._shown(path), "" if old is not None else "missing"))
+        if old != new:
+            result.slice_write = Write(path, old, new, backup=old is not None and not old.startswith(MARKER))
+            result.daemon_reload = True
+            return
+        stale = self._unit_stale()
+        result.facts.append(
+            Finding(
+                not stale,
+                f"systemd has loaded the current {self._options.slice_unit}",
+                "daemon-reload needed" if stale else "",
+            )
+        )
+        result.daemon_reload = stale
+
+    def findings(self) -> list[Finding]:
+        return self.inspect().facts
+
+    # -- plan ------------------------------------------------------------------------------------------------
+
+    def plan(self) -> list[str]:
+        result = self.inspect()
+        if result.blocked:
+            return [f"needs manual: {result.blocked}"]
+        lines: list[str] = []
+        backup = f"/{BACKUP_DIR}/<UTC timestamp>"
+        if result.slice_write:
+            lines += self._plan_write(result.slice_write, backup, "")
+        if result.daemon_reload:
+            lines.append("  systemctl daemon-reload")
+        if result.daemon_write:
+            lines += self._plan_write(result.daemon_write, backup, " (keys that are not declared stay as they are)")
+            if result.docker_active:
+                lines.append("  systemctl reload docker (SIGHUP; the daemon is never restarted)")
+            else:
+                lines.append("  docker is not active: no reload, the file is read at its next start")
+            if result.cgroup_changes:
+                lines.append(f"  note: {NEW_CONTAINERS_ONLY}")
+        return lines or ["nothing to change"]
+
+    def _plan_write(self, item: Write, backup: str, suffix: str) -> list[str]:
+        shown = self._shown(item.path)
+        lines = [f"  back up {shown} to {backup}/{item.path.name}"] if item.backup else []
+        lines.append(f"  write {shown}{suffix}")
+        return lines + unified_diff_lines(shown, item.old, item.new)
+
+    # -- install ---------------------------------------------------------------------------------------------
+
+    def _backup(self, path: Path) -> None:
+        target = self._p(f"{BACKUP_DIR}/{self._stamp}")
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target / path.name)
+
+    def _validate(self, text: str) -> None:
+        dockerd = self._find_dockerd()
+        if dockerd is None:
+            return
+        with tempfile.TemporaryDirectory(prefix="docker-daemon-") as directory:
+            candidate = Path(directory) / "daemon.json"
+            candidate.write_text(text)
+            result = self._process.query([str(dockerd), "--validate", "--config-file", str(candidate)], timeout=30)
+        if result.returncode not in (0, *VALIDATE_UNRUNNABLE):
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            raise ModuleError(
+                f"dockerd rejects the new daemon.json, nothing written: {detail[-1] if detail else 'no output'}"
+            )
+
+    def _run(self, argv: list[str]) -> None:
+        result = self._process.query(argv, timeout=60)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            raise ModuleError(f"{' '.join(argv)} failed ({result.returncode}): {detail[-1] if detail else 'no output'}")
+
+    def _write(self, item: Write) -> None:
+        if item.backup:
+            self._backup(item.path)
+        write_file(item.path, item.new, 0o644)
+        sys.stdout.write(f"wrote {self._shown(item.path)}\n")
+
+    def apply(self) -> None:
+        if not self._is_root:
+            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+        result = self.inspect()
+        if result.blocked:
+            raise NeedsManual(result.blocked)
+        if result.clean:
+            sys.stdout.write("nothing to change\n")
+            return
+        if result.slice_write:
+            self._write(result.slice_write)
+        if result.daemon_reload:
+            self._run(["systemctl", "daemon-reload"])
+        if result.daemon_write:
+            self._validate(result.daemon_write.new)
+            self._write(result.daemon_write)
+            if result.docker_active:
+                self._run(["systemctl", "reload", "docker"])
+                sys.stdout.write("reloaded docker (SIGHUP)\n")
+            else:
+                sys.stdout.write("docker is not active: the file is read at its next start\n")
+            if result.cgroup_changes:
+                sys.stdout.write(
+                    f"note: {NEW_CONTAINERS_ONLY}; if a new container does not show up under "
+                    f"{self._options.slice_unit}, restart docker once yourself (the module never restarts it)\n"
+                )
+
+
+def build(env: Mapping[str, str]) -> DockerDaemon:
+    staged = env.get(ROOT_ENV)
+    options = parse_options(module_config(env))
+    return DockerDaemon(
+        Path(staged) if staged else Path("/"), options, Process(), is_root=bool(staged) or os.geteuid() == 0
+    )
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"docker-daemon: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

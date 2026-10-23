@@ -24,6 +24,7 @@ Public API:
 - ``Module`` (ABC): ``findings()`` (read-only) and ``apply()``.
 - ``NeedsManual(message)``, ``ModuleError(message)``.
 - ``write_file(path, data, mode)``: atomic write (``str`` or ``bytes``) whose final mode is set before the rename.
+- ``read_text_or_none(path)`` and ``unified_diff_lines(shown, old, new)``: the read and the diff every ``plan`` uses.
 - ``state_dir(home, env) -> Path``: ``<XDG_STATE_HOME or ~/.local/state>/ubuntu-tweaks``. The service modules
   pass an empty ``env``: their state must be found by a root script too, which never sees the user's variables.
 - ``environment(**overrides)``: context manager that sets variables for the child processes started inside
@@ -32,12 +33,16 @@ Public API:
   file (no symlink at the end), owned by ``uid``, at most ``limit`` bytes; anything else is ``ModuleError``.
 - ``keyring_secret(process, purpose) -> str | None``: ``secret-tool lookup application ubuntu-tweaks
   purpose <purpose>``; None when absent, empty or ``secret-tool`` is missing. Never printed or logged.
-- ``main(module, argv, *, out, err) -> int``: the ``check`` / ``status`` / ``plan`` / ``install`` dispatcher;
+- ``main(module, argv, *, out, err) -> int``: the ``check`` / ``status`` / ``plan`` / ``install`` dispatcher
+  (``--check`` and ``--dry-run`` are accepted as ``check`` and ``plan``);
   ``Module.plan()`` (default: nothing) is the read-only preview of what ``install`` will do.
+- ``Transient(message)``: raised by ``apply()`` when it failed only for a network, lock or busy cause; ``main``
+  exits ``EXIT_TEMPFAIL`` (75), which the engine retries with backoff.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import pwd
@@ -58,8 +63,11 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_DRIFT = 3
 EXIT_NEEDS_MANUAL = 10
+# sysexits.h EX_TEMPFAIL: the engine retries the installer with backoff (spec, *Reconcile and failover*)
+EXIT_TEMPFAIL = 75
 
 CONFIG_ENV = "UBUNTU_TWEAK_MODULE_CONFIG"
+ALIASES = {"--check": "check", "--dry-run": "plan"}
 USAGE = "usage: {name} check|status|plan|install"
 KEYRING_APPLICATION = "ubuntu-tweaks"
 
@@ -70,6 +78,10 @@ class ModuleError(Exception):
 
 class NeedsManual(Exception):
     """The install is blocked on a human step (exit 10); the message names it."""
+
+
+class Transient(Exception):
+    """The install failed only for a network, lock or busy cause (exit 75); the message is shown as is."""
 
 
 @dataclass(frozen=True)
@@ -155,6 +167,26 @@ def write_file(path: Path, data: str | bytes, mode: int = 0o644) -> None:
         raise
 
 
+def read_text_or_none(path: Path) -> str | None:
+    """Text of a file, ``None`` when it does not exist (any other read error still raises)."""
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+
+
+def unified_diff_lines(shown: str, old: str | None, new: str, *, indent: str = "    ") -> list[str]:
+    """The ``plan`` view of one text file: a unified diff (``/dev/null`` as the old side of a new file), indented."""
+    lines = difflib.unified_diff(
+        (old or "").splitlines(),
+        new.splitlines(),
+        fromfile=shown if old is not None else "/dev/null",
+        tofile=shown,
+        lineterm="",
+    )
+    return [f"{indent}{line}" for line in lines]
+
+
 def state_dir(home: Path, env: Mapping[str, str]) -> Path:
     configured = env.get("XDG_STATE_HOME")
     return (Path(configured) if configured else home / ".local/state") / "ubuntu-tweaks"
@@ -200,10 +232,11 @@ def keyring_secret(process: Process, purpose: str) -> str | None:
 
 def main(module: Module, argv: Sequence[str], *, out: TextIO, err: TextIO) -> int:
     script = module.name
-    if len(argv) != 1 or argv[0] not in ("check", "status", "plan", "install"):
+    words = [ALIASES.get(word, word) for word in argv]
+    if len(words) != 1 or words[0] not in ("check", "status", "plan", "install"):
         err.write(USAGE.format(name=script) + "\n")
         return EXIT_USAGE
-    command = argv[0]
+    command = words[0]
     try:
         if command == "install":
             module.apply()
@@ -216,6 +249,9 @@ def main(module: Module, argv: Sequence[str], *, out: TextIO, err: TextIO) -> in
     except NeedsManual as blocked:
         out.write(f"needs manual: {blocked}\n")
         return EXIT_NEEDS_MANUAL
+    except Transient as error:
+        err.write(f"{script}: {error}\n")
+        return EXIT_TEMPFAIL
     except (ModuleError, UbuntuTweakError, OSError) as error:
         err.write(f"{script}: {error}\n")
         return EXIT_FAILED

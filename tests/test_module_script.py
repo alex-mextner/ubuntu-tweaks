@@ -96,6 +96,20 @@ class Dispatcher(unittest.TestCase):
         code, out, _ = self.run_main(FixedModule([], blocked="AMO key"), ["install"])
         self.assertEqual((code, out), (kit.EXIT_NEEDS_MANUAL, "needs manual: AMO key\n"))
 
+    def test_transient_install_is_tempfail(self):
+        class Offline(FixedModule):
+            def apply(self):
+                raise kit.Transient("cannot resolve host")
+
+        code, out, err = self.run_main(Offline([]), ["install"])
+        self.assertEqual((code, out, err), (kit.EXIT_TEMPFAIL, "", "fixed: cannot resolve host\n"))
+        self.assertEqual(kit.EXIT_TEMPFAIL, 75)
+
+    def test_check_and_dry_run_flags_are_aliases(self):
+        module = FixedModule([kit.Finding(False, "b")])
+        self.assertEqual(self.run_main(module, ["--check"]), (kit.EXIT_DRIFT, "missing b\n", ""))
+        self.assertEqual(self.run_main(module, ["--dry-run"]), (kit.EXIT_OK, "", ""))
+
     def test_usage(self):
         for argv in ([], ["nope"], ["check", "extra"]):
             code, _, err = self.run_main(FixedModule([]), argv)
@@ -188,6 +202,26 @@ class WriteFile(unittest.TestCase):
             kit.write_file(target, json.dumps({"k": 1}), 0o600)
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
             self.assertEqual([p.name for p in target.parent.iterdir()], ["b.conf"])
+
+
+class PlanHelpers(unittest.TestCase):
+    def test_read_text_or_none(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "f"
+            self.assertIsNone(kit.read_text_or_none(path))
+            path.write_text("x")
+            self.assertEqual(kit.read_text_or_none(path), "x")
+
+    def test_unified_diff_lines_for_a_new_and_a_changed_file(self):
+        self.assertEqual(
+            kit.unified_diff_lines("/etc/a", None, "one\n"),
+            ["    --- /dev/null", "    +++ /etc/a", "    @@ -0,0 +1 @@", "    +one"],
+        )
+        changed = kit.unified_diff_lines("/etc/a", "one\ntwo\n", "one\n2\n")
+        self.assertEqual(changed[:2], ["    --- /etc/a", "    +++ /etc/a"])
+        self.assertIn("    -two", changed)
+        self.assertIn("    +2", changed)
+        self.assertEqual(kit.unified_diff_lines("/etc/a", "same\n", "same\n"), [])
 
 
 if __name__ == "__main__":

@@ -465,6 +465,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 
 | Module | `order` | Phase of its install actions | Default |
 |---|---|---|---|
+| `apt-sources` | 5 | `packages` (before the apt batch of `packages.toml`) | off |
 | `base-tools` | 10 | `base` | on |
 | `zsh` | 11 | `base` | on |
 | `clipboard` | 20 | `base` | on |
@@ -473,6 +474,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `shell-rc` | 36 | `base` | on |
 | `brew` | 40 | `base` | on |
 | `ssh-server` | 50 | `system` | on |
+| `docker-daemon` | 55 | `system` | off |
 | `passwords-app` | 60 | `system` | on |
 | `passwords-app-polkit` | 61 | `system` | on |
 | `firefox` | 70 | `system` | on |
@@ -733,6 +735,8 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (the exact command is under *Firefox*): without it the bridge step waits for you (the other steps still run; `needs manual`, re-run `apply` after storing it) |
 | gh login or clone | `dotfiles` | the repository is found through your gh login | `gh auth login`; set `[modules.dotfiles] repo` or pass `--dotfiles-repo OWNER/NAME`; move a directory that is in the way; resolve a diverged checkout |
 | rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
+| a source file that mixes repositories | `apt-sources` | a hand-written file declares a declared repository together with other ones; the module never edits it | remove those lines from the file the output names, then run `apply` again |
+| docker or the nvidia toolkit missing | `docker-daemon` | the module configures docker, it does not install it | add `docker.io` (or docker-ce via the `apt-sources` docker repository) and, for `nvidia_runtime = true`, `nvidia-container-toolkit` to `packages.toml`, then run `apply` again |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
 
 ### One command on a fresh machine
@@ -771,6 +775,8 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `firefox-autologin` | `system`, user | start Firefox, wait for the extension, open the sign-in page once so passwords-app fills it |
 | `firefox-passkey-qr` | `system`, user | the `firefox-passkey-qr` installer run with `--yes`; `enabled = false`, a machine enables it |
 | `earlyoom` | `system` (root), rootless fallback | the package, `/etc/default/earlyoom` from typed `[modules.earlyoom]` options, the service; spec: `docs/specs/earlyoom.md` |
+| `apt-sources` | `system` (root), `enabled = false` | the profile's extra apt repositories as deb822 files with fingerprint-pinned keys (*`docs/specs/apt-sources.md`*) |
+| `docker-daemon` | `system` (root), `enabled = false` | docker's daemon.json merged from profile options plus a memory-capped container slice (*`docs/specs/docker-daemon.md`*) |
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
@@ -1952,10 +1958,10 @@ check = "ssh-server check"
 
 | Script command | Contract |
 |---|---|
-| `check` | Read-only, needs no root. Exit 0 = every fact holds, 3 = drift (the unmet facts are printed, one line each), anything else = the checker broke (the checker protocol in *Source kinds*). |
+| `check` (`--check`; `plan` is also `--dry-run`) | Read-only, needs no root. Exit 0 = every fact holds, 3 = drift (the unmet facts are printed, one line each), anything else = the checker broke (the checker protocol in *Source kinds*). |
 | `status` | The same facts, all of them, one line each: `ok`, `missing` or `manual` (unmet and not fixable by `install`, e.g. a signing key that does not exist). Exit codes as `check`. Used by hand and by tests; the engine does not call it. |
 | `plan` | Optional, read-only: what `install` is going to do, one line each (`firefox-passkey-qr` prints its installer's `--dry-run` listing). Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
-| `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
+| `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 75 = failed only for a network / lock cause (`Transient`; the engine retries with backoff), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
 
 Options come from `[modules.<name>]` in `profile.toml` / `machine.toml` (merged as everywhere):
 the engine passes the table minus `enabled` as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` to both
