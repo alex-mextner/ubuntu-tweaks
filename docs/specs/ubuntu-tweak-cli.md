@@ -1786,7 +1786,7 @@ file and manifest parses; an `untracked` rule has a valid `ticket` and a `reason
 into `dconf:/`, `file:~/`, `etc:/`, `apt:`, `snap:`, `flatpak:`, `brew:`, `pipx:`, `uv:`, `npm:`, `bun:`, `cargo:`,
 `unit:`, `autostart:`, `extension:`, `cron:`, `ssh:` or `git:`; `~/.config/x` and `file:/home/me/x` are flagged); no
 pattern is listed twice in one layer (the later one never applies) and no layer restates a lower layer's pattern with
-the same class as the nearest lower layer that lists it (redundant; another class is a real override). Only the rules
+the same class, reason and ticket as the nearest lower layer that lists it (redundant; another class, or the same class with its own reason or ticket, is a real override: a profile `secret` rule keeps the class and replaces the engine's generic reason with the real restore pointer). Only the rules
 that apply on this machine can duplicate or override each other: a disabled module's rules and the overlays of other
 machines (`machines/*/`) are still checked for syntax and patterns, so the CI runner's hostname does not matter. With
 `--online` each distinct ticket is asked of `gh issue
