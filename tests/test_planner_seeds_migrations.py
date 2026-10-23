@@ -174,8 +174,8 @@ class SeedPlannerTests(RepoCase):
         write(self.home / "Pictures", "a file, not a directory")
         plan = Plan.build(self.build(backend))
 
-        with self.assertRaisesRegex(SettingsError, "cannot create"):
-            plan.execute()
+        failed = plan.execute().failed
+        self.assertRegex(failed[0].message, "cannot create")
         self.assertEqual(backend.writes, [])
 
     def test_schema_not_installed_yet_is_planned_unsatisfied(self) -> None:

@@ -91,6 +91,16 @@ as any behavior change.
     `.profile`) are what the machine gets; the generic `shell-rc` step only fills in what neither the profile nor
     the repository has, and the git identity is taken from the profile, the machine, the repository's `.gitconfig`
     or `gh` instead of being left unset (*rc files from the repository*, *git and gh*).
+21. «важнее не чтобы агент ad hoc починил, а чтобы ubuntu-tweaks init/apply работали из коробки. Делай в apply
+    полноценную реконсиляцию с failover'ом» — `apply` and `init` are a level-triggered reconcile with failover:
+    one failing action never aborts the run; failures are classified, retried or routed to a declared fallback,
+    their dependents are marked blocked, everything independent still runs, and the run ends with a summary and a
+    stable exit code (*Reconcile and failover*). A fix an agent makes by hand on a machine is not done until the
+    engine, a module or the profile reproduces it.
+22. «надо не точечно конфиги в терминале и что там я ещё упомянул, надо комплексное решение по всем конфигам
+    системы и приложений» — one configuration-coverage system instead of one-off fixes: every configuration
+    location is tracked, excluded with a reason, secret or reported as untracked, through one adapter interface
+    (*Coverage*).
 
 ## Requirements
 
@@ -435,8 +445,9 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
-`ctmux` is not a module: it is a first-class rig tool (`tools.items.ctmux`), installed by `rig activate`
-inside step 10.
+`ctmux` is installed by `rig activate` inside step 10 (a first-class rig tool, `tools.items.ctmux`) and, for a profile
+that wants it without rig, by the profile module `ctmux` (*Profile modules*), which runs the same `install.sh` of
+ctmux-cli; both end in ctmux's own installer, whose `--check` keeps them idempotent.
 
 Any other tool of a person's own is a module of their profile (*Profile modules*) and takes any `order` it
 likes.
@@ -465,6 +476,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `quicklook` | 85 | `packages` | on |
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
+| `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
 | `rig` | 100 | `system` | off |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
@@ -1607,6 +1619,115 @@ Missing or Modified.
 - **Manual** (shown by `status`, never an exit-3 reason): the planners' warnings, things `apply` cannot
   decide or do for you (a missing git identity). The explained layout lists them in their own section
   (*Output*).
+
+### Reconcile and failover
+
+Request 21. `apply --commit` and `init --commit` are a **level-triggered reconcile**: observe the actual state of every
+declared item (`check()`), act on the difference, observe again (`check()` after `run()`), and repeat until the
+plan is empty or the bounded number of passes is used. The loop never trusts what it did, only what it observes, so a
+run is idempotent (a second one reports `0 changed`) and safe after a crash.
+
+**One failure never aborts the run.** `Plan.execute` catches the failure of an action, classifies it and goes on:
+
+| Class | Cause | What the engine does |
+|---|---|---|
+| transient | `Transient` raised by the action, or a `CommandError` whose output names a network / lock / busy cause (`could not resolve`, `temporary failure`, `timed out`, `connection reset|refused`, `could not get lock`, `dpkg frontend lock`, `try again`, `HTTP 429/502/503/504`), or an installer exit **75** (`EX_TEMPFAIL`) | retried with exponential backoff and full jitter (`RetryPolicy`: 3 attempts, base 2 s, cap 30 s); after the last attempt it is handled as permanent and the report says it was transient |
+| permanent | any other `ActionFailed` / `UbuntuTweakError` / `OSError`, or a `run()` that left `check()` false | not retried; the fallbacks are tried, then it is a **failed** item |
+| needs-human | `ManualStepRequired`, installer exit 10 | reported in the `Manual steps` block, not a failure |
+| root-unavailable | root is needed and `RootSession.require` raised `RootUnavailable` | the run does **not** stop: every user-level action still runs, the root actions are deferred and listed as the **root remainder** with the cause and the exact command |
+
+**Dependencies.** An action that cannot succeed because something it needs failed is **blocked**, not tried: its line
+says `blocked by <kind> <what>`. Two sources: the module manifest key `requires = ["module", ...]` (every action of
+a module is blocked when any action of a required module failed or was blocked), and the extension chain inside one
+module (a failed `submodule`, `compile-schemas`, `link` or `link-replace` blocks the later `enable` and settings
+actions of the same module: they cannot work without the code). Everything independent still runs.
+
+**Fallbacks.** A module of source kind `system` may declare alternatives to its installer:
+`[[fallback]] install = "install-user.sh"` (a program inside the module, like `[source] install`), optional
+`root` (default: same as `[source]`), optional `description`. When the primary installer fails permanently, or
+needs root and root is unavailable (or `--no-sudo` was not given but sudo failed), the fallbacks run in order, each
+verified by the module's own `check`; the first that makes `check` pass wins and the line says which strategy
+was used (`via fallback install-user.sh`). `--dry-run` lists the declared fallbacks under the action. Package
+managers: `packages.toml` may list `[fallback]` managers per manager (`apt = ["brew", "flatpak"]`): the names the
+primary manager could not install are offered to the next manager in order; a name a manager does not know is skipped,
+not failed.
+
+**Run journal.** `<state>/ubuntu-tweaks/run-journal.json` (next to the session logs) is written before the first
+action and after every action: run id, start time, the commit command, and per action its key, kind, text and status
+(`pending`, `done`, `failed`, `blocked`, `deferred`, `manual`) with the cause. A run that finds an unfinished journal
+(crash, Ctrl-C, power loss) says so first (`previous run was interrupted: N done, M pending`) and simply continues:
+convergence needs no replay because every action is re-observed. A finished journal is kept as the record of the
+last run; `status` prints its failed / blocked / deferred items under **Last run**.
+
+**Summary and exit code.** The run ends with `N changed` and one list per class (converged count, failed with the
+cause and the next command, blocked with the blocker, root remainder, needs-human). Exit codes: `0` everything
+declared and runnable converged (needs-human steps and root actions skipped by an explicit `--no-sudo` do not
+change it: the user or a human owns them), `7` (`ExitCode.PARTIAL`) at least one action failed or was blocked, `6` root was
+needed, could not be obtained and root actions remain, `3` the plan still holds an item after the last pass,
+`1` internal error. When several apply the order is 7, 6, 3. Everything is in the session log (*Session log*).
+
+**Self-heal.** Because the loop is level-triggered, a re-run puts back what was applied before and drifted (an
+extension the shell disabled, a replaced link, a stopped service). Unattended re-runs are the opt-in module
+`autoheal` (off by default; `[modules.autoheal] enabled = true` in the profile or machine overlay): a user systemd
+timer runs `ubuntu-tweak apply --commit --no-sudo` at login and daily. It never asks for root and never prompts;
+root actions are left for the next interactive `apply --commit`.
+
+### Coverage
+
+Request 22. Every configuration location of the machine falls into one class; the engine has one scanner and one
+adapter interface, and `ubuntu-tweak coverage` shows the table:
+
+| Class | Meaning |
+|---|---|
+| `tracked` | declared in the profile (bundles, files, packages, system, modules) and reconciled by `apply`, or owned by a module (`[[coverage]] class = "tracked"`) |
+| `excluded` | deliberately not tracked, with a written `reason` (cache, state, generated, machine-bound) |
+| `secret` | credentials: lives in the keychain / `passwords-app`, never in the profile; the scanner reports that it exists, never its value |
+| `untracked` | a finding: configuration nobody declared. `coverage` exits 3 while any remains |
+
+**Items.** An adapter *discovers* items: `Item(adapter, id, kind, detail)`, `id` is a stable string with a scheme:
+`dconf:/org/gnome/...` (a key whose user value differs from the schema default), `file:~/.config/<entry>` (a
+top-level entry of `~/.config`, `~/.local/share`, `~/.local/bin`, and the dotfiles of `$HOME`), `etc:/etc/...`
+(a changed conffile, `/etc/default`, system units, polkit, sudoers.d, apt sources: read without root where
+the file allows it, else reported as `needs root to read`), `apt:<name>` (manually installed packages), `snap:`,
+`flatpak:`, `brew:`, `pipx:`, `uv:`, `npm:`, `bun:`, `cargo:`, `unit:<name>` (enabled systemd user units and
+timers), `autostart:<name>`, `extension:<uuid>`, `cron:`, `ssh:`, `git:`.
+
+**Adapter interface** (`ubuntu_tweaks/adapters/<name>.py`, found like planners: dropping a file registers it):
+
+```python
+NAME = "files"                                   # the id scheme this adapter owns
+def discover(ctx: Context) -> Iterable[Item]     # what exists on the machine, read-only
+def classify(ctx: Context, item: Item, rules: Rules) -> Finding | None
+                                                 # None: not mine / no opinion; default rules apply
+def capture(ctx: Context, items: Sequence[Item]) -> Iterable[Proposal]
+                                                 # live -> profile text: only non-default values, with reasons,
+                                                 # grouped by purpose ("packages"-style bundles)
+def plan(ctx: Context, backend: SettingsBackend) -> Sequence[Action]
+                                                 # reconcile: actions with check()/run(), failover alternatives
+```
+Only `discover` is required; an adapter that is purely declarative needs none of the rest. `Finding(item, coverage,
+reason, owner)`; `owner` names the module or profile file that tracks it.
+
+**Declarative entries.** No Python is needed to cover an app: a module's `module.toml` or the profile's
+`coverage.toml` holds `[[coverage]]` tables:
+
+```toml
+[[coverage]]
+match = ["file:~/.config/Code/Cache*", "file:~/.config/Code/logs"]   # globs against item ids
+class = "excluded"                    # tracked | excluded | secret
+reason = "Electron cache and logs"    # required for excluded and secret
+```
+and `[[coverage.adapter]] adapter = "files" path = "~/.config/foo" format = "ini|json|toml|yaml|file|dir"` entries that
+make the generic `files` adapter reconcile the path (link or copy, key-level merge for the structured formats). Rules of
+the engine (`ubuntu_tweaks/coverage_defaults.toml`) < modules < profile < machine overlay; the first matching rule
+of the highest layer wins. Items the profile already declares are `tracked` without any rule: a bundle key, a
+linked file, a `packages.toml` name, a module's own files.
+
+**Commands.** `ubuntu-tweak coverage [--json] [--class untracked|tracked|excluded|secret] [--dry-run]` scans and
+prints the table with a count per class, exit 3 while `untracked` items remain (nothing else changes). `status` ends
+with the same summary line. `capture` proposes the untracked items grouped by purpose (it writes only with
+`--commit`, as always). `apply` / `init` reconcile everything tracked. The profile repository's CI runs
+`ubuntu-tweak coverage` and fails when the untracked count rises.
 
 ### Output
 

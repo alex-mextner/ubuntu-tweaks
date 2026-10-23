@@ -7,7 +7,8 @@ Public names (other modules code against these):
 
 - ``ExitCode``: ``OK`` 0, ``INTERNAL`` 1, ``INVALID_CONFIG`` 2, ``DRIFT`` 3,
   ``UNKNOWN_MODULE`` 4, ``REFUSED`` 5 (secret finding or unsafe path), ``NO_ROOT`` 6 (root is needed
-  and cannot be obtained, see ``elevation``).
+  and cannot be obtained, see ``elevation``), ``PARTIAL`` 7 (the run finished, but at least one action failed or was
+  blocked, see *Reconcile and failover*).
 - ``UbuntuTweakError``: base class; ``exit_code`` is a class attribute and ``fix`` an optional exact
   command or step that ``cli.main`` shows as the ``fix:`` hint of a terminal error.
 - ``ConfigError`` (2), ``UnknownModuleError`` (4), ``RefusedError`` (5); ``RootUnavailable`` (6) lives in
@@ -25,6 +26,7 @@ class ExitCode(IntEnum):
     UNKNOWN_MODULE = 4
     REFUSED = 5
     NO_ROOT = 6
+    PARTIAL = 7
 
 
 class UbuntuTweakError(Exception):

@@ -21,10 +21,8 @@ try:
     from ubuntu_tweaks.commands._support import rerun_command
     from ubuntu_tweaks.context import Context
     from ubuntu_tweaks.elevation import (
-        EARLIER_STEPS_RAN,
         SUDO_ASK,
         SUDO_CHECK,
-        Cause,
         Host,
         RootSession,
         RootUnavailable,
@@ -148,23 +146,23 @@ class ApplyRootTests(WiringScenario):
         self.assertEqual(self.events, ["run:timezone"])
         self.assertEqual((self.fake_process.executed, self.said.lines), ([], []))
 
-    def test_root_that_cannot_be_had_stops_before_any_action_with_a_typed_error(self) -> None:
+    def test_root_that_cannot_be_had_defers_the_root_actions_instead_of_stopping(self) -> None:
         self.the_host = host(no_new_privs=True)
         self.wanted = [RootStep(self.events)]
 
-        with self.assertRaises(RootUnavailable) as caught:
-            self.commit()
+        out = self.commit()
 
-        error = caught.exception
-        self.assertEqual((error.cause, error.fix), (Cause.NO_NEW_PRIVS, "ubuntu-tweak apply --commit"))
-        self.assertIn("Nothing was changed.", str(error))
+        self.assertIn("root is not available", out)
+        self.assertIn("Root remainder (1)", out)
+        self.assertIn("ubuntu-tweak apply --commit", out)
         self.assertEqual(self.events, [])
 
-    def commit_cloning_a_profile(self, late: Callable[[Path], Action] | None = None) -> None:
+    def commit_cloning_a_profile(self, late: Callable[[Path], Action] | None = None) -> str:
         profile = self.tmp / "later-profile"
         # by default a step that is only planned once the profile exists
         step = late(profile) if late else RootStep(self.events, ready=profile)
-        with contextlib.redirect_stdout(io.StringIO()):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
             reconcile.apply(
                 Context(self.repo, Profile(profile, "home")),
                 commit=True,
@@ -174,21 +172,20 @@ class ApplyRootTests(WiringScenario):
                 relocate=lambda: Location(profile),
                 root=self.root(),
             )
+        return out.getvalue()
 
     def test_a_rebuilt_plan_that_gains_root_actions_asks_then_not_at_the_start(self) -> None:
         self.commit_cloning_a_profile()
 
         self.assertEqual(self.events, ["clone", "sudo", "run:timezone"])
 
-    def test_root_missing_after_earlier_steps_ran_does_not_claim_nothing_changed(self) -> None:
+    def test_root_missing_after_earlier_steps_ran_still_finishes_the_rest(self) -> None:
         self.the_host = host(no_new_privs=True)
 
-        with self.assertRaises(RootUnavailable) as caught:
-            self.commit_cloning_a_profile()
+        out = self.commit_cloning_a_profile()
 
         self.assertEqual(self.events, ["clone"])
-        self.assertIn(EARLIER_STEPS_RAN, str(caught.exception))
-        self.assertNotIn("Nothing was changed", str(caught.exception))
+        self.assertIn("Root remainder", out)
 
     def test_a_root_action_the_cloned_profile_switches_off_never_asks(self) -> None:
         self.the_host = host(no_new_privs=True)  # asking would fail: it must not happen
@@ -211,21 +208,23 @@ class CommandRootTests(WiringScenario):
     def no_new_privs() -> contextlib.AbstractContextManager[object]:
         return mock.patch.object(Host, "detect", return_value=host(no_new_privs=True))
 
-    def test_apply_names_apply_commit_keeps_the_flags_and_offers_no_sudo(self) -> None:
+    def test_apply_names_apply_commit_keeps_the_flags_and_defers_the_root_actions(self) -> None:
         self.wanted = [RootStep(self.events, scope="eng")]
         args = argparse.Namespace(commit=True, no_sudo=False, only="eng")
+        out = io.StringIO()
         with (
             self.no_new_privs(),
             mock.patch.object(reconcile, "open_backend", return_value=self.fake),
-            contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaises(RootUnavailable) as caught,
+            contextlib.redirect_stdout(out),
         ):
-            apply.run(self.context(frozenset({"eng"})), args)
+            code = apply.run(self.context(frozenset({"eng"})), args)
 
-        self.assertEqual(caught.exception.fix, "ubuntu-tweak apply --commit --only eng")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Root remainder (1)", out.getvalue())
+        self.assertIn("ubuntu-tweak apply --commit --only eng", out.getvalue())
         self.assertIn(
             "Or skip the root actions (they are listed): ubuntu-tweak apply --commit --no-sudo --only eng",
-            str(caught.exception),
+            out.getvalue(),
         )
         self.assertEqual(self.events, [])
 
@@ -332,13 +331,13 @@ class CommandRootTests(WiringScenario):
         self.assertEqual(self.events, ["sudo", "install", "run:timezone"])
         self.assertEqual(self.fake_process.executed, [(SUDO_ASK, None)])
 
-    def test_init_where_root_is_impossible_names_init_commit(self) -> None:
+    def test_init_where_root_is_impossible_defers_root_and_names_init_commit(self) -> None:
         self.wanted = [RootStep(self.events)]
-        with self.no_new_privs(), self.assertRaises(RootUnavailable) as caught:
-            self.run_init()
+        with self.no_new_privs():
+            out = self.run_init()
 
-        self.assertEqual(caught.exception.fix, "ubuntu-tweak init --commit")
-        self.assertIn("ubuntu-tweak init --commit --no-sudo", str(caught.exception))
+        self.assertIn("Root remainder (1)", out)
+        self.assertIn("ubuntu-tweak init --commit", out)
         self.assertEqual(self.events, [])
 
     def test_init_no_sudo_and_preview_never_ask(self) -> None:

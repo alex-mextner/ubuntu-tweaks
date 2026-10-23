@@ -53,6 +53,7 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from ubuntu_tweaks.coverage import Layer, Rule, parse_rules
 from ubuntu_tweaks.dconf_path import is_dconf_dir_path
 from ubuntu_tweaks.actions import DEFAULT_ORDER, Phase
 from ubuntu_tweaks.errors import ConfigError
@@ -147,6 +148,16 @@ class Post:
 
 
 @dataclass(frozen=True)
+class Fallback:
+    """``[[fallback]]``: an alternative installer of a ``system`` module, tried when the primary fails for good or
+    needs root that is not available (spec, *Reconcile and failover*)."""
+
+    install: tuple[str, ...]
+    root: bool
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class Step:
     """``[[step]]``: a named built-in step (``ubuntu_tweaks/steps.py``) with its own arguments."""
 
@@ -172,6 +183,9 @@ class Manifest:
     steps: tuple[Step, ...] = ()
     post: tuple[Post, ...] = ()
     manual: str = ""  # how the user completes the step the installer reports as manual (exit 10)
+    requires: tuple[str, ...] = ()  # modules whose failure blocks this one (failover dependencies)
+    fallbacks: tuple[Fallback, ...] = ()  # system modules: alternative installers
+    coverage: tuple[Rule, ...] = ()  # [[coverage]] rules this module contributes (spec, *Coverage*)
     origin: Origin = "engine"  # "profile": the module lives in the profile's modules/ directory
 
 
@@ -391,6 +405,22 @@ def _argv(reader: _Reader, key: str) -> tuple[str, ...]:
     return argv
 
 
+def _parse_fallbacks(readers: list[_Reader], source: Source, where: _Reader) -> tuple[Fallback, ...]:
+    if readers and source.kind is not SourceKind.SYSTEM:
+        raise where.fail("[[fallback]] is only for system modules (an alternative to [source] install)")
+    fallbacks: list[Fallback] = []
+    for reader in readers:
+        reader.only("install", "root", "description")
+        fallbacks.append(
+            Fallback(
+                _command(reader, "install"),
+                reader.boolean("root", source.root),
+                reader.string("description") or "",
+            )
+        )
+    return tuple(fallbacks)
+
+
 def _parse_posts(readers: list[_Reader]) -> tuple[Post, ...]:
     posts: list[Post] = []
     for reader in readers:
@@ -443,6 +473,9 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         "step",
         "post",
         "manual",
+        "requires",
+        "fallback",
+        "coverage",
     )
     source_reader = root.sub("source")
     if source_reader is None:
@@ -489,6 +522,9 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         steps=steps,
         post=_parse_posts(root.array("post")),
         manual=root.string("manual") or "",
+        requires=root.strings("requires"),
+        fallbacks=_parse_fallbacks(root.array("fallback"), source, root),
+        coverage=tuple(parse_rules([item.table for item in root.array("coverage")], Layer.MODULE, where, name)),
         origin=origin,
     )
 

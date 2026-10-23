@@ -28,7 +28,8 @@ Assumptions:
   preset entries with the same key name make the override ambiguous: it is skipped with a warning.
   An override stays in the module layer, so bundles still win over it.
 
-Public API: ``build(ctx, backend)`` and ``warnings(ctx, backend)``.
+Public API: ``build(ctx, backend)``, ``warnings(ctx, backend)`` and ``declared_keys(ctx, backend)`` (the keys the
+profile declares, for the coverage scanner).
 """
 
 from __future__ import annotations
@@ -209,6 +210,20 @@ def build(ctx: Context, backend: SettingsBackend) -> Sequence[Action]:
         SeedKeyAction(backend, entry) if entry.seed else SetKeyAction(backend, entry)
         for entry in collapse(_resolve(ctx, backend)[0].entries)
     ]
+
+
+def declared_keys(ctx: Context, backend: SettingsBackend) -> dict[str, str]:
+    """``dconf key path -> owner`` for every key a module preset or an active bundle declares: a module's name for a
+    preset, the bundle's file for a bundle. A bundle key whose schema is not installed is declared all the same."""
+    resolution, bundles = _resolve(ctx, backend)
+    declared = {
+        entry.target.full: entry.scope if entry.phase is Phase.SETTINGS_MODULE else entry.source
+        for entry in collapse(resolution.entries)
+    }
+    for bundle in bundles.active():
+        for key in bundle.keys:
+            declared.setdefault(section_to_path(key.section) + key.key, bundle.source)
+    return declared
 
 
 def warnings(ctx: Context, backend: SettingsBackend) -> Sequence[str]:

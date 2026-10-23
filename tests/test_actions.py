@@ -2,7 +2,7 @@
 
 import unittest
 
-from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase, Plan
+from ubuntu_tweaks.actions import Action, ManualStepRequired, Phase, Plan
 
 
 class FakeAction(Action):
@@ -249,7 +249,9 @@ class ExecuteTests(unittest.TestCase):
         root.satisfied = True
         self.assertEqual(plan.execute(no_sudo=True).skipped, ())
 
-    def test_action_that_does_not_converge_fails_loudly(self) -> None:
-        plan = Plan.build([FakeAction("liar", Phase.LINK, broken=True)])
-        with self.assertRaisesRegex(ActionFailed, r"\[liar\] do liar: still not satisfied"):
-            plan.execute()
+    def test_action_that_does_not_converge_is_a_failure_and_the_run_goes_on(self) -> None:
+        plan = Plan.build([FakeAction("liar", Phase.LINK, broken=True), FakeAction("fine", Phase.LINK)])
+        result = plan.execute()
+        self.assertEqual(result.changed, 1)
+        self.assertEqual(len(result.failed), 1)
+        self.assertRegex(result.failed[0].message, r"\[liar\] do liar: still not satisfied")

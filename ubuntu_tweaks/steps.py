@@ -34,10 +34,12 @@ Steps (``[[step]] name = ...``, arguments as extra keys of the entry):
   installer would otherwise ask sudo for.
 - ``brew-install`` (``prefix``, ``url``, ``sha256``): downloads the pinned installer, refuses it unless
   its SHA-256 matches, runs it with ``NONINTERACTIVE=1``.
+- ``user-timer`` (``name``, ``command``, ``calendar``, default ``daily``): a user systemd service that runs
+  ``command`` at login plus a timer on ``calendar``, both enabled; user level, never root (the ``autoheal`` module).
 
 Public API: ``STEPS``, ``StepEnv``, ``StepFactory``, ``get_step(name)``, ``default_fetch``, and the action
 classes ``LoginShellAction``, ``RcFileAction``, ``GitConfigAction``, ``GitCredentialAction``,
-``GhLoginAction``, ``BrewPrefixAction``, ``BrewInstallAction``.
+``GhLoginAction``, ``BrewPrefixAction``, ``BrewInstallAction``, ``UserTimerAction``.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ import grp
 import hashlib
 import os
 import pwd
+import re
 import shutil
 import tempfile
 import urllib.request
@@ -55,6 +58,7 @@ from pathlib import Path
 
 from ubuntu_tweaks import git_identity
 from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
+from ubuntu_tweaks.atomic_write import atomic_write
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.git_identity import KEYS
 from ubuntu_tweaks.process import CommandError, Process
@@ -489,6 +493,81 @@ def _brew_install(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> l
     return [BrewInstallAction(env, _text_arg(args, "prefix", where, DEFAULT_BREW_PREFIX), url, sha256)]
 
 
+UNIT_ENABLED = "enabled"
+
+
+class UserTimerAction(Action):
+    """A user systemd service plus timer that runs a command at login and on a calendar (the ``autoheal`` module):
+    unattended, user level, never root. The check compares the unit files byte for byte and asks
+    ``systemctl --user is-enabled`` for both units."""
+
+    phase = Phase.BASE
+    kind = "user-timer"
+
+    def __init__(self, env: StepEnv, name: str, command: str, calendar: str) -> None:
+        self._env = env
+        self._name = name
+        self._calendar = calendar
+        self.key = f"user-timer:{name}"
+        self._service = (
+            f"[Unit]\nDescription=ubuntu-tweak {name} (unattended: user level, no root)\n\n"
+            f"[Service]\nType=oneshot\nExecStart={command}\n\n[Install]\nWantedBy=default.target\n"
+        )
+        self._timer = (
+            f"[Unit]\nDescription=ubuntu-tweak {name} timer\n\n"
+            f"[Timer]\nOnCalendar={calendar}\nPersistent=true\nRandomizedDelaySec=15m\n\n"
+            f"[Install]\nWantedBy=timers.target\n"
+        )
+
+    def _unit_dir(self) -> Path:
+        return self._env.home / ".config/systemd/user"
+
+    def describe(self) -> str:
+        shown = self._env.shown(self._unit_dir())
+        return f"user timer {self._name}: {shown}/{self._name}.service + .timer ({self._calendar}, and at login)"
+
+    def _files_match(self) -> bool:
+        directory = self._unit_dir()
+        try:
+            return (directory / f"{self._name}.service").read_text(encoding="utf-8") == self._service and (
+                directory / f"{self._name}.timer"
+            ).read_text(encoding="utf-8") == self._timer
+        except OSError:
+            return False
+
+    def _enabled(self, unit: str) -> bool:
+        result = self._env.process.query(["systemctl", "--user", "is-enabled", unit])
+        return result.ok and result.stdout.strip() == UNIT_ENABLED
+
+    def check(self) -> bool:
+        return self._files_match() and self._enabled(f"{self._name}.service") and self._enabled(f"{self._name}.timer")
+
+    def run(self) -> None:
+        directory = self._unit_dir()
+        atomic_write(directory / f"{self._name}.service", self._service.encode("utf-8"))
+        atomic_write(directory / f"{self._name}.timer", self._timer.encode("utf-8"))
+        _execute(self._env, ["systemctl", "--user", "daemon-reload"], "user-timer")
+        _execute(
+            self._env,
+            ["systemctl", "--user", "enable", f"{self._name}.service", f"{self._name}.timer"],
+            "user-timer",
+        )
+
+
+def _user_timer(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:
+    where = f"module {module} step user-timer"
+    _only_args(args, where, "name", "command", "calendar")
+    name = _text_arg(args, "name", where, module)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ConfigError(f"{where}: 'name' must be letters, digits, '.', '_' or '-', got {name!r}")
+    command = _text_arg(args, "command", where)
+    calendar = _text_arg(args, "calendar", where, "daily")
+    for label, value in (("command", command), ("calendar", calendar)):
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ConfigError(f"{where}: '{label}' must be one line without control characters")
+    return [UserTimerAction(env, name, command, calendar)]
+
+
 STEPS: dict[str, StepFactory] = {
     "login-shell": _login_shell,
     "shell-rc": _shell_rc,
@@ -497,6 +576,7 @@ STEPS: dict[str, StepFactory] = {
     "git-credential-helper": _git_credential_helper,
     "brew-prefix": _brew_prefix,
     "brew-install": _brew_install,
+    "user-timer": _user_timer,
 }
 
 

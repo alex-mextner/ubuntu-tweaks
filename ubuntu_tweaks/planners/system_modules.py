@@ -35,7 +35,7 @@ from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.manifest import Manifest, SourceKind, module_defaults
+from ubuntu_tweaks.manifest import Fallback, Manifest, SourceKind, module_defaults
 from ubuntu_tweaks.profile import Config
 from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.settings import SettingsBackend
@@ -104,7 +104,11 @@ class SystemModuleAction(Action):
             except ValueError:
                 continue
             break
-        return f"run {self._manifest.name}: {shlex.join(shown)}" + self._preview()
+        listed = "".join(
+            f"\n        fallback{'' if fallback.root else ' (no root)'}: {shlex.join(fallback.install)}"
+            for fallback in self._manifest.fallbacks
+        )
+        return f"run {self._manifest.name}: {shlex.join(shown)}" + self._preview() + listed
 
     def _preview(self) -> str:
         """What the installer would do, from the manifest's read-only ``preview`` command, indented under
@@ -144,7 +148,9 @@ class SystemModuleAction(Action):
         )
 
     def run(self) -> None:
-        argv = self._install_argv()
+        self._execute(self._install_argv())
+
+    def _execute(self, argv: list[str]) -> None:
         try:
             self._process.execute(argv, cwd=self._manifest.directory)
         except CommandError as error:
@@ -155,6 +161,41 @@ class SystemModuleAction(Action):
                     f"its output above says which){hint}"
                 ) from error
             raise ActionFailed(f"{self._manifest.name}: {error}") from error
+
+    def alternatives(self) -> Sequence[Action]:
+        return [_FallbackInstall(self, fallback) for fallback in self._manifest.fallbacks]
+
+    def run_fallback(self, fallback: Fallback) -> None:
+        argv = self._argv(fallback.install)
+        if fallback.root:
+            try:
+                argv = self._process.elevate(argv)
+            except CommandError as error:
+                raise ActionFailed(f"{self._manifest.name}: {error}") from error
+        self._execute(argv)
+
+
+class _FallbackInstall(Action):
+    """A ``[[fallback]]`` installer of a system module (spec, *Reconcile and failover*): it only runs; whether it
+    worked is the module's own ``check`` through the primary action."""
+
+    phase = Phase.SYSTEM
+    kind = "system-module-fallback"
+
+    def __init__(self, primary: SystemModuleAction, fallback: Fallback) -> None:
+        self.scope = primary.scope
+        self.needs_root = fallback.root
+        self._primary = primary
+        self._fallback = fallback
+
+    def describe(self) -> str:
+        return self._fallback.description or f"fallback {shlex.join(self._fallback.install)}"
+
+    def check(self) -> bool:
+        return self._primary.check()
+
+    def run(self) -> None:
+        self._primary.run_fallback(self._fallback)
 
 
 def module_config_json(config: Config, name: str, default_repo: str | None = None) -> str | None:
