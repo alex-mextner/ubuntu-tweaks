@@ -99,6 +99,7 @@ def _root_lines(profile: Profile) -> list[str]:
         "",
         f"packages.toml: {_toml_origin(profile.packages_toml.is_file(), profile.overlay_packages_toml.is_file())}",
         f"system.toml:   {_toml_origin(profile.system_toml.is_file(), profile.overlay_system_toml.is_file())}",
+        f"units.toml:    {_toml_origin(profile.units_toml.is_file(), profile.overlay_units_toml.is_file())}",
     ]
 
 

@@ -90,6 +90,7 @@ class PlanBuildTests(unittest.TestCase):
                 Phase.SYSTEM,
                 Phase.LINK,
                 Phase.FILES,
+                Phase.UNITS,
                 Phase.TOGGLE,
                 Phase.SETTINGS_MODULE,
                 Phase.SETTINGS_PROFILE,

@@ -32,7 +32,11 @@ Public API:
   no two entries ever target nested paths); ``load_config(module_defaults=None) -> Config``
   (every ``[modules.<name>]`` must be a table in its own file, ``ConfigError`` otherwise);
   ``load_packages() -> Packages``; ``load_system() -> SystemConfig`` (each layer validated on its
-  own, then unioned; duplicates collapse).
+  own, then unioned; duplicates collapse); ``load_units() -> Units`` (``units.toml``: lists union, an overlay
+  ``disable`` removes a shared ``enable``, scalars of the overlay replace) and ``unit_reasons()`` (the trailing
+  comment of each name); paths ``units_toml`` / ``overlay_units_toml``.
+  ``unit_template(name)`` (``foo@.service`` of the instance ``foo@x.service``) and ``USER_UNIT_DIR``
+  (``.config/systemd/user``).
 - ``Config`` (frozen): ``data`` (the merged tree; treat as read-only), ``origins`` (leaf path ->
   ``Layer``); ``table(*path)``, ``get(*path, default=None)``, ``origin(*path)``,
   ``module_enabled(name)``.
@@ -52,6 +56,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import socket
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
@@ -62,6 +67,7 @@ from typing import Literal
 
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.identity import Location
+from ubuntu_tweaks.toml_edit import TomlDoc
 
 type TomlValue = str | int | float | bool | datetime | date | time | list[TomlValue] | TomlTable
 type TomlTable = dict[str, TomlValue]
@@ -212,6 +218,17 @@ class Packages:
 
 
 @dataclass(frozen=True)
+class Units:
+    """``units.toml`` after the shared + overlay merge: the systemd user units the machine must have enabled
+    (``enable``) or must not (``disable``), whether enabling also starts them, and lingering."""
+
+    enable: tuple[str, ...] = ()
+    disable: tuple[str, ...] = ()
+    start: bool = True
+    linger: bool | None = None  # None: not managed
+
+
+@dataclass(frozen=True)
 class Keyboard:
     model: str | None = None
     layout: str | None = None
@@ -282,6 +299,73 @@ def _parse_system(table: TomlTable, where: str) -> SystemConfig:
         timezone=_optional_str(table, "timezone", where),
         locale=_optional_str(table, "locale", where),
         keyboard=keyboard,
+    )
+
+
+USER_UNIT_DIR = PurePosixPath(".config/systemd/user")  # where `files/` puts unit files, relative to $HOME
+UNIT_SUFFIXES = (".service", ".timer", ".socket", ".path", ".target")  # the unit types `units.toml` can name
+_UNIT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9:_.\\@-]*(?:" + "|".join(map(re.escape, UNIT_SUFFIXES)) + ")")
+
+
+def unit_template(name: str) -> str:
+    """``foo@.service`` for the instance ``foo@bar.baz.service``: systemd splits at the first ``@`` and the unit
+    type is the last dotted part. The name itself when it is no instance."""
+    return re.sub(r"^([^@]*)@.*(\.[^.]+)$", r"\1@\2", name)
+
+
+def _unit_names(table: Mapping[str, TomlValue], key: str, where: str) -> tuple[str, ...]:
+    names = _str_tuple(table, key, where)
+    for name in names:
+        if _UNIT_NAME.fullmatch(name) is None:
+            raise ConfigError(
+                f"{where}: {name!r} is not a unit name (a bare name ending in .service, .timer, .socket, .path or "
+                ".target: no slash, no leading dash; template instances are foo@instance.service)"
+            )
+        if "@." in name:
+            raise ConfigError(f"{where}: {name!r} is a template; name an instance such as foo@instance.service")
+    return names
+
+
+def _optional_bool(table: Mapping[str, TomlValue], key: str, where: str) -> bool | None:
+    value = table.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ConfigError(f"{where}: {key} must be true or false, got {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class _UnitsLayer:
+    enable: tuple[str, ...]
+    disable: tuple[str, ...]
+    start: bool | None
+    linger: bool | None
+
+
+def _parse_units(table: TomlTable, where: str) -> _UnitsLayer:
+    _reject_unknown(table, ("enable", "disable", "start", "linger"), where)
+    layer = _UnitsLayer(
+        enable=_unit_names(table, "enable", where),
+        disable=_unit_names(table, "disable", where),
+        start=_optional_bool(table, "start", where),
+        linger=_optional_bool(table, "linger", where),
+    )
+    both = [name for name in layer.enable if name in layer.disable]
+    if both:
+        raise ConfigError(f"{where}: {', '.join(both)} is in both enable and disable")
+    return layer
+
+
+def _fold_units(shared: _UnitsLayer, overlay: _UnitsLayer) -> Units:
+    """The overlay is the later layer: for a name it lists, it decides; everything else of the shared layer stays."""
+    enable = [name for name in shared.enable if name not in overlay.disable]
+    enable += [name for name in overlay.enable if name not in enable]
+    disable = [name for name in shared.disable if name not in overlay.enable]
+    disable += [name for name in overlay.disable if name not in disable]
+    return Units(
+        enable=tuple(enable),
+        disable=tuple(disable),
+        start=next(value for value in (overlay.start, shared.start, True) if value is not None),
+        linger=overlay.linger if overlay.linger is not None else shared.linger,
     )
 
 
@@ -408,6 +492,14 @@ class Profile:
         return self.overlay_dir / "system.toml"
 
     @property
+    def units_toml(self) -> Path:
+        return self.root / "units.toml"
+
+    @property
+    def overlay_units_toml(self) -> Path:
+        return self.overlay_dir / "units.toml"
+
+    @property
     def exists(self) -> bool:
         return self.root.is_dir()
 
@@ -481,3 +573,25 @@ class Profile:
 
     def load_system(self) -> SystemConfig:
         return self._load_union(self.system_toml, self.overlay_system_toml, _parse_system)
+
+    def load_units(self) -> Units:
+        """``units.toml`` of both layers, each validated on its own (so one layer cannot mask a typo in the
+        other), then folded: lists union, an overlay ``disable`` removes a shared ``enable`` (and the reverse)."""
+        shared = _parse_units(read_toml(self.units_toml), str(self.units_toml))
+        overlay = _parse_units(read_toml(self.overlay_units_toml), str(self.overlay_units_toml))
+        return _fold_units(shared, overlay)
+
+    def unit_reasons(self) -> dict[tuple[str, str], str]:
+        """``("enable" | "disable", unit name)`` -> the reason comment next to that entry in ``units.toml`` (the
+        overlay's wins); entries without one are absent. Keyed by the list too: a reason written for enabling a unit
+        is no reason for the overlay's disabling it."""
+        reasons: dict[tuple[str, str], str] = {}
+        for path in (self.units_toml, self.overlay_units_toml):
+            if not path.is_file():
+                continue
+            document = TomlDoc.parse(path.read_text(encoding="utf-8"), str(path))
+            for key in ("enable", "disable"):
+                for name in document.array((), key) or ():
+                    if reason := document.item_reason((), key, name):
+                        reasons[key, name] = reason
+        return reasons

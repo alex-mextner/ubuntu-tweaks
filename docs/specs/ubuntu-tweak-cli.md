@@ -794,12 +794,13 @@ DIR` and `$UBUNTU_TWEAK_PROFILE` override).
   files/                    # mirrors $HOME: files/.config/mimeapps.list -> ~/.config/mimeapps.list
   packages.toml             # apt / snap / flatpak names
   system.toml               # root-level: timezone, locale, console keyboard
+  units.toml                # systemd USER units to enable / start / disable, linger (unit files: files/.config/systemd/user/)
   modules/<name>/           # the profile's own modules (module.toml + their scripts), see *Profile modules*
   machines/<machine>/       # overlay, one dir per machine
     machine.toml            # same schema as profile.toml; wins over it
     settings/**/*.ini       # key-level overlay bundles on top of the shared bundles
     files/                  # path-level overlay: the same relative path wins over shared files/
-    packages.toml  system.toml   # same schema, merged
+    packages.toml  system.toml  units.toml   # same schema, merged
 ```
 
 **Machine name** = the contents of `/etc/hostname`, or `--machine NAME`. It is a directory
@@ -809,8 +810,8 @@ directory uses the shared profile only; `machine` and `status` say so.
 
 **Merge order**, last wins: module defaults (`modules/<m>/module.toml`) < shared profile <
 machine overlay. Tables merge key by key and scalars replace. Lists replace in
-`profile.toml`/`machine.toml` (a list is one value) and **union** in `packages.toml` and
-`system.toml` (shared order first, then the overlay's new items), so a machine adds packages
+`profile.toml`/`machine.toml` (a list is one value) and **union** in `packages.toml`, `system.toml` and `units.toml`
+(shared order first, then the overlay's new items), so a machine adds packages
 without restating the shared ones. Every merged value remembers its layer (module, shared or
 overlay), which is what `machine` prints.
 
@@ -1060,6 +1061,82 @@ status `ii`, a `snap list` row, a `flatpak list` row. The apt lists are refreshe
 and the plan line says `(after apt-get update)`. A manager that is not on the machine means "not
 installed". A `flatpak_remote` that is empty, starts with `-` or contains whitespace, and a
 non-boolean `apt_update`, are invalid config (exit 2).
+
+#### `units.toml`
+
+Declarative systemd **user** units (ticket [#88](https://github.com/alex-mextner/ubuntu-tweaks/issues/88)). The unit
+files and drop-ins themselves are ordinary `files/` leaves
+(`files/.config/systemd/user/foo.service`, `foo.service.d/10-limits.conf`, `foo@.service`), linked by the `files`
+planner; `units.toml` says which units are enabled and running.
+
+```toml
+enable = [
+  "glances.service",                 # reason: a trailing comment, kept by capture, shown in previews
+  "tasks-backup-pull.timer",
+  "3d-printer-watch@u1.service",     # a template instance; the template file is foo@.service in files/
+]
+start = true       # optional, default true: `enable --now`; false: enable only (a unit starts at the next login)
+disable = []       # units the machine must NOT have enabled: `systemctl --user disable --now` (mostly in a machine overlay)
+linger = true      # optional: `loginctl enable-linger <user>` (user units start at boot and survive logout); false
+                   # runs `disable-linger`; absent: lingering is left alone
+```
+
+Names are validated at load (invalid = config error, exit 2, naming the file): a bare name ending in `.service`,
+`.timer`, `.socket`, `.path` or `.target`, no slash, no leading dash, no spaces; a template instance
+`foo@instance.service` is allowed, the bare template `foo@.service` is not. A name in both `enable` and `disable` of
+one file is an error. Each layer is validated alone; then they merge: lists union (shared order first), an overlay
+`disable` removes a shared `enable` name (and an overlay `enable` a shared `disable` name), `start` and `linger` of the
+overlay replace the shared ones. A comment after a name, or above it, is its reason (as in `packages.toml`); the
+preview line ends with `# reason` (a reason is that of the list the name is in: the overlay's `disable` does not show
+the shared `enable` reason).
+
+**What `apply` does** (planner `planners/units.py`, phase `UNITS`, after `FILES`; every command goes through
+`Process`, no root):
+
+- `linger`: `loginctl show-user <user> -p Linger` is `yes` (a user `loginctl` does not know counts as off), else
+  `loginctl enable-linger <user>` (or `disable-linger` for `linger = false`).
+- `daemon-reload`: one `systemctl --user daemon-reload` when any declared or profile-linked unit reports
+  `NeedDaemonReload=yes` (a changed file or drop-in), or a unit file or drop-in of the profile is not linked into
+  `$HOME` yet (the plan is built before the files phase runs, so the action remembers that, and runs even though the
+  link exists by then). Always before the unit actions.
+- `user-unit`, one per name, so a failing unit is one failed item and the others still run: `enable` is converged when
+  `UnitFileState` is `enabled`, `enabled-runtime` or one of the states `is-enabled` answers 0 for (`static`,
+  `indirect`, `generated`, `alias`, `transient`) and, with `start = true`, `ActiveState` is `active`, `activating` or
+  `reloading`; a `Type=oneshot` service is converged when enabled and is enabled without `--now`, so applying never
+  runs a backup job. The command is `systemctl --user enable --now <unit>` (`enable <unit>` with `start = false` or
+  for a oneshot). `disable` is converged when the unit is not enabled and not running (a unit the machine does not
+  have is), the command is `systemctl --user disable --now <unit>`, except for a unit whose file is the profile's own
+  link in `~/.config/systemd/user`: `systemctl disable` deletes such a link (the files planner would put it back on
+  the next run), so the unit is stopped (`systemctl --user stop`) and its `*.wants` / `*.requires` links are removed
+  (`rm -f --`, then a `daemon-reload`) and the link stays (this holds for an instance of a template the profile
+  links, too). A unit a package enables system-wide (a link in `/etc/systemd/user`) stays enabled after `disable`:
+  the engine does not guess at `mask`, the item is reported as not converged and the next command is the user's to
+  choose. The checks are one `systemctl --user show -p Id,LoadState,UnitFileState,ActiveState,Type,NeedDaemonReload
+  <unit>` per unit, read by position; enable, disable and stop use the canonical `Id` (systemctl refuses an alias name),
+  and an
+  answer with another number of blocks than names is not trusted. The stop of a profile-linked unit is skipped when the
+  unit is not running, and the removed links include `*.upholds`. The directories searched for "nobody provides" include
+  `/usr/share/systemd/user` and `/run/systemd/user`. Commands in previews and manual steps are shell-quoted, so a name
+  with a backslash escape can be pasted.
+- **Failover.** When no user manager answers (`systemctl --user show-environment` fails: no `XDG_RUNTIME_DIR` or
+  session bus, e.g. over ssh without a login session) the units are not tried one by one: one `user-units` action
+  lists the exact commands and its `run()` raises `ManualStepRequired` (`needs manual`, never a crash and never a
+  failure), e.g. `systemctl --user daemon-reload; systemctl --user enable --now a.service b.timer; systemctl --user
+  disable --now c.service` (a oneshot service the profile ships is listed with plain `enable`, as `apply` would).
+  `linger` still runs: it talks to the system manager (polkit lets only an active local session change lingering
+  without a password, so a refused `loginctl` over ssh is a `needs manual` step naming `sudo loginctl enable-linger
+  <user>`, not a failure). It stays *Missing* in `status` until
+  someone runs the commands in a login session (or a later `apply` finds a manager).
+- **A unit nobody provides.** A name in `enable` with no file in the profile's `files/.config/systemd/user/` (the
+  template for an instance), none in `~/.config/systemd/user`, `~/.local/share/systemd/user` or the system user-unit
+  directories, and not loaded, is *blocked* by `[unit-file]` (exit 7 like any blocked item; the line names the file it
+  expects) and not a failure; the other units are unaffected. The preview line says `[no unit file yet: ...]`, since
+  a package installed earlier in the same run may still provide it.
+- `--dry-run`/preview prints exactly these commands (the unit's `Type` is read from the profile file when the unit is
+  not loaded yet). A second `apply --commit` plans nothing.
+
+Coverage: every name in `units.toml` (and the template of an instance) is `unit:<name>` owned by `units.toml`; units
+of a module are claimed by the module's `[[coverage]] class = "tracked"` rule (*Coverage*).
 
 ### Profile discovery
 
@@ -1555,7 +1632,8 @@ check fails, so the preview is exactly what `--commit` will do. After an action 
 `check()` must hold; a plan that does not converge fails instead of reporting `changed`.
 
 Order: **base (init steps 1-4)** → submodules → migrations → schemas → **packages** → **system (root)** →
-symlinks (extensions) → **files (links)** → enable/disable → settings (module presets, then shared
+symlinks (extensions) → **files (links)** → **user units** (linger, daemon-reload, enable/disable; `units.toml`) →
+enable/disable (extensions) → settings (module presets, then shared
 bundles, then machine overlay bundles) → seeds. Inside a phase actions are ordered by `order` (lower
 first, default 100, stable otherwise); see *Init pipeline*.
 
@@ -1577,6 +1655,10 @@ first, default 100, stable otherwise); see *Init pipeline*.
 | `system-module` (root) | a `system` module's checker exits 0 | its installer through sudo |
 | `link` | `~/.local/share/gnome-shell/extensions/<uuid>` (uuid from `metadata.json`) or `~/<path>` is a symlink to the source | `ln -sfnT` |
 | `link-replace` | same check; the destination exists as a real file/directory or a symlink elsewhere | copy it to `~/.local/state/ubuntu-tweaks/backup/<UTC timestamp>/<absolute path>` (one helper, `backup.py`, shared by extension links, profile files and `capture --commit`), remove it, then `ln -sfnT`; the plan line says `backup+replace` and whether the content is identical |
+| `linger` | `loginctl show-user <user> -p Linger` equals the wanted `yes`/`no` | `loginctl enable-linger <user>` / `disable-linger` (no root) |
+| `daemon-reload` | no declared or profile-linked unit has `NeedDaemonReload=yes` and every profile unit file/drop-in is linked (remembered from plan time) | `systemctl --user daemon-reload` |
+| `user-unit` | `units.toml` unit is enabled (and active, see *`units.toml`*) / disabled and stopped | `systemctl --user enable [--now] <unit>` / `disable --now <unit>` |
+| `user-units` | never satisfied while no user manager answers | `needs manual` with the exact commands |
 | `enable` | uuid is in the user value of `enabled-extensions` and not in `disabled-extensions` | add / remove the one item |
 | `disable` | a conflict is not in `enabled-extensions` and is in `disabled-extensions`; a retired uuid is not in `enabled-extensions` | remove / add the one item |
 | `set-key` | effective value (user value, else schema default) equals the wanted typed value; the preview line ends with the bundle's reason comment when it has one | write it |
@@ -1662,6 +1744,10 @@ says `blocked by <kind> <what>`. Two sources: the module manifest key `requires 
 a module is blocked when any action of a required module failed or was blocked), and the extension chain inside one
 module (a failed `submodule`, `compile-schemas`, `link` or `link-replace` blocks the later `enable` and settings
 actions of the same module: they cannot work without the code). Everything independent still runs.
+
+An action may also name its own blocker (`Action.blocker()`, asked right before `run()`): a `units.toml` unit with no
+unit file anywhere is *blocked by* the `[unit-file]` it lacks, reported with the expected path, not tried and not
+failed.
 
 **Fallbacks.** A module of source kind `system` may declare alternatives to its installer:
 `[[fallback]] install = "install-user.sh"` (a program inside the module, like `[source] install`), optional
@@ -2480,6 +2566,17 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   ([#18](https://github.com/alex-mextner/ubuntu-tweaks/issues/18) for the rest of the
   hardening). Tests that need PyGObject run under the distro interpreter, because
   `python3-gi` is an apt package.
+- Units (`tests/test_profile_units.py`, `tests/test_planner_units.py`, `tests/test_coverage_units.py`; a fake systemd
+  user manager and login manager in memory, no real systemd): `units.toml` parse, merge (union, overlay `disable`,
+  overlay scalars), validation and reasons; the planner's enable / start / oneshot / static units, disable,
+  linger, the reload in the same plan as the links, a changed drop-in, templates, the manual failover when no user
+  manager answers (a oneshot kept out of `enable --now`), a unit nobody provides (blocked, the others still run), one
+  failing unit not hiding the others, an alias whose `Id` differs, shell-quoted names, instances with dots, disabling
+  a unit the profile links or an instance of a template it links (stop + remove the wants links, the link stays), a
+  unit a package enables system-wide (reported, not masked), a refused `loginctl` (manual), a reason per list, a unit directory
+  that is itself a link,
+  idempotent second run; `Action.blocker` (`tests/test_failover.py`); ownership of `units.toml` names and a module's
+  `tracked` rule beating `untracked`.
 - Init pipeline and base modules (`tests/test_manifest_pipeline.py`, `tests/test_planner_base.py`,
   `tests/test_init_pipeline.py`, `tests/test_system_modules.py`, `tests/test_actions.py`; no PyGObject
   needed except `test_init_pipeline.py`): `order` / `phase` / `[install]` / `[[step]]` / `[[post]]` /

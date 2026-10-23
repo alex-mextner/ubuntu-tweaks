@@ -7,8 +7,10 @@ Assumptions:
 - Items are ``unit:<name>``: a unit (or a ``<unit>.d`` drop-in directory) in ``~/.config/systemd/user`` and every unit
   ``systemctl --user list-unit-files --state=enabled`` reports. ``detail`` says which of the two holds (``enabled``,
   ``user unit file``). Without a user systemd (``systemctl`` missing, no session bus) only the directory is read.
-- ``owned``: units whose file or drop-in the profile's ``files/`` declares (``.config/systemd/user/...``) and units
-  that are symlinks into the profile, the dotfiles checkout or the engine checkout.
+- ``owned``: every name in ``units.toml`` (``enable`` and ``disable``, shared and machine overlay; an instance such
+  as ``foo@x.service`` also owns its template ``foo@.service``, the one ``list-unit-files`` reports), units whose
+  file or drop-in the profile's ``files/`` declares (``.config/systemd/user/...``) and units that are symlinks into
+  the profile, the dotfiles checkout or the engine checkout.
 - ``*.wants`` / ``*.requires`` directories are enablement symlinks, not units: never items.
 
 Public API: ``NAME``, ``discover(ctx)``, ``owned(ctx)``.
@@ -18,15 +20,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
-from pathlib import PurePosixPath
 
 from ubuntu_tweaks.adapters._links import link_owner
 from ubuntu_tweaks.adapters._system import system
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.coverage import Item
+from ubuntu_tweaks.profile import USER_UNIT_DIR, unit_template
 
 NAME = "units"
-USER_DIR = PurePosixPath(".config/systemd/user")
+USER_DIR = USER_UNIT_DIR
 _SUFFIXES = (".service", ".timer", ".socket", ".path", ".target", ".mount", ".slice")
 
 
@@ -67,6 +69,10 @@ def discover(ctx: Context) -> Iterable[Item]:
 def owned(ctx: Context) -> Mapping[str, str]:
     profile = ctx.profile
     found: dict[str, str] = {}
+    declared = profile.load_units()
+    for name in (*declared.enable, *declared.disable):
+        found.setdefault(f"unit:{name}", "units.toml")
+        found.setdefault(f"unit:{unit_template(name)}", "units.toml")  # `systemctl list-unit-files` lists the template
     depth = len(USER_DIR.parts)
     for entry in profile.files():
         parts = entry.rel.parts
