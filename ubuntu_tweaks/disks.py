@@ -499,6 +499,19 @@ def automount_points(lines: Sequence[str]) -> dict[str, str]:
     return found
 
 
+def unmanaged_lines(text: str) -> list[tuple[int, str]]:
+    """``(1-based line number, line)`` of every entry (blank lines and comments dropped) outside the managed block."""
+    lines = text.splitlines()
+    span = _block_span(lines)
+    return [
+        (number, line)
+        for number, line in enumerate(lines, start=1)
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and not (span is not None and span[0] <= number - 1 <= span[1])
+    ]
+
+
 def merge_fstab(text: str, block: str) -> str:
     """``text`` with the managed block replaced by ``block`` (removed when empty, appended when new)."""
     lines = text.splitlines()

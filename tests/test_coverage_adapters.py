@@ -73,7 +73,7 @@ class AdapterCase(TempDirCase):
 class DiscoveryTests(unittest.TestCase):
     def test_every_adapter_is_found_by_dropping_a_file(self) -> None:
         names = [module.NAME for module in discover_adapters()]
-        self.assertEqual(names, ["dconf", "etc", "extensions", "files", "packages", "units"])
+        self.assertEqual(names, ["dconf", "disk", "etc", "extensions", "files", "packages", "units"])
 
     def test_the_machine_seam_defaults_to_the_real_one_and_is_restorable(self) -> None:
         before = system()
