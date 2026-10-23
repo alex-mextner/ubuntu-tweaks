@@ -390,6 +390,29 @@ files. Installed by `modules/hang-capture/install.sh` (root, idempotent):
     and writes it into the installed `/etc/memguard/memguard.toml` (`user = "..."`) for the
     polkit rule and swap-drain's heavy scan; `--check` compares against that rendering.
 
+  - **Per-machine options** (`[modules.memguard.swap]` in the profile's `profile.toml` or `machines/<host>/machine.toml`).
+    The shipped `modules/memguard/memguard.toml` holds defaults written for no machine in particular (heavy-run gate and
+    heavy locks off); a machine states its own values in the profile instead of editing the shipped file. The engine
+    hands the table to `install.sh` as JSON in `UBUNTU_TWEAK_MODULE_CONFIG`, and `memguard_options.py` replaces the
+    assignment of each named `[swap]` key in the rendered file, keeping its trailing comment, in the install and in
+    `--check` alike (so changing an option is drift, and dropping one is drift). Unknown keys, a value of the wrong
+    type (a fraction for a whole-number key), a number outside 0 to 10^9, text that is not valid, and `user` (resolved by the
+    installer as above) exit 1 before anything is compared or written; the rendered file must also load through
+    `memguard_swap.load_config`, the loader `swap-drain` uses at run time.
+
+    ```toml
+    [modules.memguard.swap]
+    heavy_locks = ["/tmp/3d-cli-heavy.lock"]
+    heavy_gate = "auto"
+    heavy_hook = "~/.omp/agent/hooks/heavy-op-memory-gate.pre-bash.json"
+    ```
+  - *Reconciled with the laptop's installed copy* (23 Oct 2026, `ssh home`): the installed `memguard_swap.py`,
+    `swap-drain`, `memguard`, units and `/etc/memguard/memguard.toml` equal this module's after ruff formatting, except
+    that the laptop's copies still carry its own values (`heavy_locks = ["/tmp/3d-cli-heavy.lock"]`, `heavy_gate =
+    "auto"`, `heavy_hook = "~/.omp/agent/hooks/heavy-op-memory-gate.pre-bash.json"`, the laptop owner as `user`) as built-in
+    defaults, where this module ships them off and resolves the user. The module is the superset; the laptop's values
+    are what a machine sets through the options above.
+
   Exit codes (`swap-drain` and `memguard swap-drain`): 0 drained/started, 1 error, 2 usage or
   config, 10 skipped, 11 already in progress, 12 aborted (10–12 are `SuccessExitStatus`).
 

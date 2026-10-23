@@ -14,6 +14,10 @@
 # $MEMGUARD_USER (default: the current user), writes the files and the stamp
 # under DIR and never touches systemd or runuser. Idempotent: a second run prints
 # "nothing to change". Spec: docs/specs/memguard.md.
+#
+# UBUNTU_TWEAK_MODULE_CONFIG (set by ubuntu-tweak from `[modules.memguard]` of the profile) may carry
+# {"swap": {"<key>": value, ...}}: those keys replace the repo copy's in the rendered memguard.toml, in the
+# install and in --check alike (modules/memguard/memguard_options.py). A bad option exits 1 before any write.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -36,7 +40,7 @@ fi
 python3 -B - "$here" <<'EOF'
 import ast, sys
 here = sys.argv[1]
-for name in ("memguard_swap.py", "swap-drain", "memguard"):
+for name in ("memguard_swap.py", "memguard_options.py", "swap-drain", "memguard"):
     with open(f"{here}/{name}") as f:
         ast.parse(f.read(), name)
 sys.path.insert(0, here)
@@ -44,6 +48,8 @@ import memguard_swap
 memguard_swap.load_config(f"{here}/memguard.toml")
 EOF
 cfg_user=$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import memguard_swap as m; print(m.load_config(sys.argv[1] + "/memguard.toml")["user"])' "$here")
+# the profile's options must be valid before anything is compared or written
+python3 -B "$here/memguard_options.py" <"$here/memguard.toml" >/dev/null
 
 # The desktop user: staged mode takes $MEMGUARD_USER or the current user; a real install takes
 # $SUDO_USER, else the $PKEXEC_UID account, else `user` of memguard.toml; a non-root dry run or
@@ -70,13 +76,14 @@ fi
 [ -n "$root" ] || getent passwd "$user" >/dev/null || { echo "memguard: user '$user' does not exist" >&2; exit 1; }
 [ "$check" = 1 ] || echo "memguard: desktop user: $user"
 
-# memguard.toml with `user = "<resolved user>"` (the repo copy leaves it empty = detect).
+# memguard.toml with `user = "<resolved user>"` (the repo copy leaves it empty = detect) and the profile's
+# `[modules.memguard]` swap options applied.
 render_toml() {
   if grep -q '^user = ' "$here/memguard.toml"; then
     sed "s|^user = \"[^\"]*\"|user = \"$user\"|" "$here/memguard.toml"
   else
     sed "s|^\[swap\]\$|&\nuser = \"$user\"|" "$here/memguard.toml"
-  fi
+  fi | python3 -B "$here/memguard_options.py"
 }
 
 # source : target : mode
