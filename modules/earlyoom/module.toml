@@ -1,0 +1,30 @@
+description = "earlyoom: the package, /etc/default/earlyoom from [modules.earlyoom] options, the service; a rootless copy when root is unavailable"
+enabled = true
+
+# Options ([modules.earlyoom] in profile.toml / machine.toml): mem_percent, swap_percent, report_interval, prefer, avoid,
+# notify, extra_args (docs/specs/earlyoom.md). Without any, earlyoom runs with its own defaults (10 % / 10 %), a report
+# per hour and an avoid list for the processes whose death ends the desktop session.
+[source]
+kind = "system"
+root = true
+install = "earlyoom install"
+check = "earlyoom check"
+preview = "earlyoom plan"
+
+# No root (no sudo, locked-down session): the archive's deb extracted under ~/.local/opt/earlyoom and run as a user
+# unit. `check` accepts either, so a machine that ended up with the user-level copy is converged and is not asked
+# for root again.
+[[fallback]]
+install = "earlyoom-user install"
+root = false
+description = "earlyoom extracted from the Ubuntu archive deb under ~/.local/opt/earlyoom, run as a user unit (no root)"
+
+[[coverage]]
+match = ["etc:/etc/default/earlyoom"]
+class = "tracked"
+reason = "rendered from [modules.earlyoom] by modules/earlyoom"
+
+[[coverage]]
+match = ["file:~/.local/opt/earlyoom*", "file:~/.config/earlyoom*"]
+class = "tracked"
+reason = "the rootless copy (earlyoom-user) owns these"

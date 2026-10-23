@@ -1,0 +1,48 @@
+#!/usr/bin/python3 -B
+"""earlyoom module: the earlyoom package, /etc/default/earlyoom rendered from [modules.earlyoom], the service running.
+
+    earlyoom check     exit 0 satisfied, 3 unsatisfied (read-only, no root)
+    earlyoom status    the same facts, one line each (read-only)
+    earlyoom plan      what `install` is going to do, with the diff of the defaults file (read-only)
+    earlyoom install   as root: make them true (sudo, run by `ubuntu-tweak apply --commit`)
+
+EARLYOOM_ROOT=DIR stages the install: only DIR/etc/default/earlyoom is read and written, no root, apt or systemd
+(tests, and a look at the rendered file). When the machine has no earlyoom package but the rootless copy
+(`earlyoom-user`, the failover when root is unavailable) is installed, `check` and `status` judge that copy.
+Spec: docs/specs/earlyoom.md.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from earlyoom_lib import ROOT_ENV, StagedEarlyoom, SystemEarlyoom, UserEarlyoom, options_from, run  # noqa: E402
+
+from ubuntu_tweaks.module_script import Module, invoking_account  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+
+def build(env: Mapping[str, str]) -> Module:
+    options = options_from(env)
+    if env.get(ROOT_ENV):
+        return StagedEarlyoom(Path(env[ROOT_ENV]), options)
+    process = Process()
+    account = invoking_account(env)
+    return SystemEarlyoom(
+        process,
+        Path("/"),
+        options,
+        is_root=os.geteuid() == 0,
+        user=UserEarlyoom(process, account.home, options, owner=account.name),
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(run("earlyoom", build, sys.argv[1:]))

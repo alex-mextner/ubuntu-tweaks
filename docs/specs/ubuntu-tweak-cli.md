@@ -770,6 +770,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `firefox-policy` | `system` (root) | `/etc/firefox/policies/policies.json` force-installs the signed extension |
 | `firefox-autologin` | `system`, user | start Firefox, wait for the extension, open the sign-in page once so passwords-app fills it |
 | `firefox-passkey-qr` | `system`, user | the `firefox-passkey-qr` installer run with `--yes`; `enabled = false`, a machine enables it |
+| `earlyoom` | `system` (root), rootless fallback | the package, `/etc/default/earlyoom` from typed `[modules.earlyoom]` options, the service; spec: `docs/specs/earlyoom.md` |
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
