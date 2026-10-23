@@ -181,7 +181,7 @@ Covered by `tests/test_launcher.py`.
 |---|---|
 | `init [--commit] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs the missing apt packages as part of the run, with no question: `--commit` is the consent, the preview names the packages; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it (*Repair in one command*). `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
 | `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing and says so. In a terminal: badges, `[sudo]` marks, a reason per action, numbered progress and a summary (*Output*). |
-| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan holds root actions (and not `--no-sudo`), root is obtained once before the first of them runs (*Elevation*; exit 6 when it cannot be). When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
+| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan holds root actions (and not `--no-sudo`), root is obtained once before the first of them runs (*Elevation*); when it cannot be, the run finishes all user-level work, lists the root remainder and exits 6 (*Reconcile and failover*). When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
 | `status [--explain\|-v] [--json]` | Drift both ways (see *Drift*, *Output*), grouped as Missing / Modified / Extra / Manual, with a verdict line, a definition of each group and the next command in a terminal; compact text when piped; `--json` for scripts. Exit 3 when anything declared is Missing or Modified; extras and manual items alone exit 0. |
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
 | `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install` (root is obtained first, *Elevation*). |
@@ -198,7 +198,8 @@ Global flags, accepted before or after the command: `--profile DIR`, `--machine 
 `--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*), and `--dry-run` (see *Dry run*).
 
 Exit codes: 0 ok, 1 internal error, 2 invalid config, 3 drift, 4 unknown module, 5 refused
-(secret finding or unsafe path), 6 root needed but not obtainable (*Elevation*). The constants live in one place,
+(secret finding or unsafe path), 6 root needed but not obtainable (*Elevation*), 7 partial: the run finished but an
+action failed or was blocked (*Reconcile and failover*). The constants live in one place,
 `ubuntu_tweaks/errors.py`, and top-level errors map to them. A command-line usage error
 (unknown command or flag) is argparse's own exit 2. A name in `--only` that no module
 declares is exit 4.
@@ -273,7 +274,8 @@ runs the strategy below once per run (later calls are no-ops) and, for the durat
 
   sudo or pkexec rejecting the request (wrong password after sudo's three tries, sudo's own prompt timeout, a user
   who may not use sudo: sudo answers 1 for all of them) is `RootUnavailable` (`rejected`). There is no retry loop:
-  the run stops before the first root action.
+  the run goes on without root: every user-level action still runs and the root actions are the **root remainder**
+  (*Reconcile and failover*); `doctor --yes`, which has nothing else to do, stops.
 - **The error.** `RootUnavailable` is an `UbuntuTweakError` with exit code **6** (`ExitCode.NO_ROOT`), no
   traceback. Its message names the cause and ends with the exact command to run from a normal terminal: the
   command that was run, with the `--profile` / `--machine` / `--only` / `--dotfiles-repo` the user gave (e.g.
@@ -301,8 +303,9 @@ one `--commit` run, in order, with one `RootSession` for the whole run:
    is the check (exit 0 when nothing declared is left).
 
 Without `--commit` (or with `--dry-run`) nothing is installed or applied and no sudo is asked; the preview lists
-the apt packages the commit would install first. A run that cannot get root stops before the first root action with
-exit 6 and the command to run from a normal terminal (*Elevation*). Idempotent: a second run reports `0 changed`.
+the apt packages the commit would install first. A run that cannot get root does not stop: it finishes everything
+that needs no root, lists the root remainder with the command to run from a normal terminal and exits 6 (*Elevation*,
+*Reconcile and failover*). Idempotent: a second run reports `0 changed`.
 
 ### Dry run
 
@@ -715,7 +718,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set <your token_ref>` (GNOME keyring; the item `[git] token_ref` names, no default), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
 | git identity | `git-gh` | planned from the first source that knows it; only when none does: warned, not an error | set `[git] name` / `email` in `profile.toml`, or `git config --global user.name ...` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
-| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) the run stops with exit 6 and the command to run from a normal terminal, or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
+| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) every user-level action still runs, the root actions are listed as the root remainder with the command to run from a normal terminal, and the exit code is 6; or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
 | polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
