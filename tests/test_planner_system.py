@@ -63,7 +63,7 @@ class Machine(FakeProcess):
             case ["apt-get", "install"]:
                 self.apt |= {w for w in words[2:] if not w.startswith("-")}
             case ["snap", "install"]:
-                self.snaps |= set(words[2:])
+                self.snaps |= {w for w in words[2:] if not w.startswith("-")}
             case ["flatpak", "install"]:
                 self.flatpaks |= set(words[words.index("--noninteractive") + 2 :])  # then the remote
             case ["timedatectl", "set-timezone"]:
@@ -269,6 +269,40 @@ class PackagesTests(ProfileCase):
             ],
         )
         self.assertEqual(len(Plan.build(self.build())), 0)
+
+    def test_classic_snaps_install_with_the_classic_flag_in_their_own_batch(self) -> None:
+        write(self.root / "packages.toml", 'snap = ["firefox"]\nsnap_classic = ["code"]\n')
+        self.machine.snaps = {"firefox"}
+        plan = Plan.build(self.build())
+
+        self.assertEqual([a.describe() for a in plan.actions], ["snap --classic: install code"])
+        self.assertTrue(plan.actions[0].needs_root)
+        plan.execute()
+        self.assertEqual(
+            [argv for argv, _ in self.machine.executed], [("sudo", "--", "snap", "install", "--classic", "code")]
+        )
+        self.assertEqual(len(Plan.build(self.build())), 0)
+
+    def test_a_snap_listed_both_plain_and_classic_is_invalid_config(self) -> None:
+        write(self.root / "packages.toml", 'snap = ["code"]\nsnap_classic = ["code"]\n')  # one file
+        with self.assertRaisesRegex(ConfigError, "'code' is also in snap"):
+            self.build()
+
+        write(self.root / "packages.toml", 'snap = ["code"]\n')
+        write(self.root / "machines/home/packages.toml", 'snap_classic = ["code"]\n')  # shared meets overlay
+        with self.assertRaisesRegex(ConfigError, "'code' is also in snap"):
+            self.build()
+
+    def test_classic_snaps_union_with_the_overlay_and_reject_option_looking_names(self) -> None:
+        write(self.root / "packages.toml", 'snap_classic = ["code"]\n')
+        write(self.root / "machines/home/packages.toml", 'snap_classic = ["intellij-idea-community"]\n')
+        self.assertEqual(
+            [a.describe() for a in self.build()], ["snap --classic: install code, intellij-idea-community"]
+        )
+
+        write(self.root / "machines/home/packages.toml", 'snap_classic = ["--dangerous"]\n')
+        with self.assertRaisesRegex(ConfigError, "snap_classic"):
+            self.build()
 
     def test_flatpak_remote_is_configurable_and_defaults_to_flathub(self) -> None:
         write(self.root / "packages.toml", 'flatpak = ["org.gnome.Extensions"]\nflatpak_remote = "gnome-nightly"\n')

@@ -103,6 +103,7 @@ def owned(ctx: Context) -> Mapping[str, str]:
     for manager, names in (
         ("apt", packages.apt),
         ("snap", packages.snap),
+        ("snap", packages.snap_classic),  # classic snaps share the snap: id namespace
         ("flatpak", packages.flatpak),
         ("brew", packages.brew),
     ):

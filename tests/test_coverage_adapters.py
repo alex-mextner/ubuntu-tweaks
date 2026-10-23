@@ -288,7 +288,10 @@ class PackagesTests(AdapterCase):
         self.assertIn(("brew", "leaves"), self.process.queries)
 
     def test_packages_toml_and_module_installs_are_owned(self) -> None:
-        write(self.profile_root / "packages.toml", 'apt = ["curl"]\nsnap = ["firefox"]\nbrew = ["jq"]\n')
+        write(
+            self.profile_root / "packages.toml",
+            'apt = ["curl"]\nsnap = ["firefox"]\nsnap_classic = ["code"]\nbrew = ["jq"]\n',
+        )
         write(self.profile_root / "machines/box/packages.toml", 'flatpak = ["org.gimp.GIMP"]\n')
         self.module("tools", '[source]\nkind = "builtin"\n[install]\napt = ["git"]\n[deps]\napt = ["zip"]\n')
         self.module(
@@ -302,6 +305,7 @@ class PackagesTests(AdapterCase):
             {
                 "apt:curl": "packages.toml",
                 "snap:firefox": "packages.toml",
+                "snap:code": "packages.toml",
                 "brew:jq": "packages.toml",
                 "flatpak:org.gimp.GIMP": "packages.toml",
                 "apt:git": "module tools",
