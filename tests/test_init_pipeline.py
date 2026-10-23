@@ -45,6 +45,7 @@ PIPELINE_MODULES = (
     "firefox-autologin",
     "firefox-passkey-qr",
     "hyperdock",
+    "quicklook",
     "rig",
     "dotfiles",
 )

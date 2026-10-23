@@ -1,0 +1,16 @@
+description = "Space previews the selected file in Files (Nautilus), like Quick Look on macOS: GNOME Sushi plus the codecs it plays video with"
+enabled = true
+order = 85   # init step 8b, right after the dock; install actions run in the default (packages) phase
+
+[source]
+kind = "builtin"
+
+# Nautilus asks the D-Bus name org.gnome.NautilusPreviewer when Space is pressed on a file; the name is
+# activated on demand from the service file gnome-sushi ships, so the running Files needs no restart and
+# no re-login. gstreamer1.0-libav lets the preview play H.264/AAC/MP3 files, which the plain
+# gstreamer1.0-plugins-good that sushi depends on does not decode.
+[install]
+apt = ["gnome-sushi", "gstreamer1.0-libav"]
+
+[install.provides]
+gnome-sushi = "sushi"

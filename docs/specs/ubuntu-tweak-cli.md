@@ -431,6 +431,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 6 | passwords-app: install, enable unit, native host, polkit action | `passwords-app` (60), `passwords-app-polkit` (61) |
 | 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
+| 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -461,6 +462,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `firefox-autologin` | 72 | `system` | on |
 | `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
+| `quicklook` | 85 | `packages` | on |
 | `rig` | 100 | `system` | off |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
@@ -566,6 +568,17 @@ fail on tools the pipeline is about to install. `update` runs `git pull` and the
 a git checkout (`<repo>/.git` exists); a tree without it (an unpacked tarball) prints that it skips them and runs
 `apply`, so it never needs `git` there. The `submodule` planner agrees: in a tree without `.git` a non-empty
 submodule directory counts as present and an empty one is a manual step (never a `git` call).
+
+### Quick Look (`quicklook`)
+
+User request of 23 Oct ("space для предпросмотра в навигаторе по файлам я еще делал"): Space in Files (Nautilus) previews the
+selected file. No code of the user's own for it survives on this PC (not in any repository, branch, session or
+backup that was searched), so the module installs the GNOME solution instead of rebuilding one: apt
+`gnome-sushi` (the `org.gnome.NautilusPreviewer` D-Bus service Nautilus calls on Space) and `gstreamer1.0-libav`
+(H.264/AAC/MP3 playback in the preview). `kind = "builtin"`, default phase (`packages`), order 85, on by default,
+`[modules.quicklook] enabled = false` in `machine.toml` switches it off. It needs root only for the apt batch, which
+`apply --commit` already runs under the one sudo prompt. The bus name is activated on demand from the service file
+the package ships, so neither Files nor the session has to restart: press Space on a file after the apt run.
 
 ### Base modules
 
