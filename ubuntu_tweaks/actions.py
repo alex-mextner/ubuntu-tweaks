@@ -55,8 +55,11 @@ Public API:
 
 from __future__ import annotations
 
+import random
+import re
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -93,6 +96,75 @@ class ManualStepRequired(UbuntuTweakError):
     effect: a staged ``apply`` rebuilds the plan, so the same action runs (and raises) once per pass."""
 
 
+class Transient(ActionFailed):
+    """A failure worth retrying: the network, a package lock or a busy service. ``Plan.execute`` retries it with
+    backoff; once the attempts are used it is a permanent failure that says it was transient."""
+
+
+EX_TEMPFAIL = 75  # sysexits.h: an installer's "try again later"
+_TRANSIENT_TEXT = re.compile(
+    r"could not resolve|name or service not known|temporary failure|temporarily unavailable|timed out|timeout"
+    r"|connection (?:reset|refused|closed)|network is unreachable|could not get lock|unable to acquire the dpkg"
+    r"|dpkg frontend lock|resource temporarily unavailable|try again|http (?:429|502|503|504)"
+    r"|\b(?:429|502|503|504)\b.*(?:too many|bad gateway|unavailable|gateway)|rate limit|ssl: |tls handshake",
+    re.IGNORECASE,
+)
+
+
+def is_transient(error: BaseException) -> bool:
+    """``Transient``, or an error whose text names a network / lock / busy cause (``returncode`` 75 counts too)."""
+    if isinstance(error, Transient):
+        return True
+    if getattr(error, "returncode", None) == EX_TEMPFAIL:
+        return True
+    return _TRANSIENT_TEXT.search(str(error)) is not None
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Exponential backoff with full jitter: attempt ``n`` (0-based) waits ``uniform(0, min(cap, base * 2**n))``."""
+
+    attempts: int = 3
+    base: float = 2.0
+    cap: float = 30.0
+    sleep: Callable[[float], None] = time.sleep
+    jitter: Callable[[float, float], float] = random.uniform
+
+    def delay(self, attempt: int) -> float:
+        return self.jitter(0.0, min(self.cap, self.base * 2**attempt))
+
+
+@dataclass(frozen=True)
+class Failure:
+    """An action that failed for good: ``transient`` says the last error looked retryable (the attempts ran out),
+    ``tried`` lists the fallbacks that were attempted, ``fix`` is the error's own next command when it has one."""
+
+    action: Action
+    message: str
+    transient: bool
+    attempts: int
+    tried: tuple[str, ...] = ()
+    fix: str | None = None
+
+    def next_command(self) -> str:
+        if self.fix:
+            return self.fix
+        scope = self.action.scope
+        return f"ubuntu-tweak apply --commit --only {scope}" if scope else "ubuntu-tweak apply --commit"
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """An action that was not tried because ``by`` (an action it needs) failed or was itself blocked."""
+
+    action: Action
+    by: Action
+
+
+def _fix(error: BaseException) -> str | None:
+    return error.fix if isinstance(error, UbuntuTweakError) else None
+
+
 class Action(ABC):
     phase: Phase
     kind: str
@@ -118,12 +190,21 @@ class Action(ABC):
     def run(self) -> None:
         """Make ``check()`` true."""
 
+    def alternatives(self) -> Sequence[Action]:
+        """Other ways to reach the same ``check()`` (spec, *Reconcile and failover*): tried in order when ``run()``
+        failed for good, or when this action needs root and root is not available. Each runs through the same
+        retry policy and counts only when this action's ``check()`` then passes."""
+        return ()
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
     changed: int
     skipped: tuple[Action, ...] = ()
     manual: tuple[tuple[Action, str], ...] = ()
+    failed: tuple[Failure, ...] = ()
+    blocked: tuple[Blocked, ...] = ()
+    fallbacks: tuple[tuple[Action, str], ...] = ()  # (action, the alternative that made it pass)
 
     def render_skipped(self) -> str:
         if not self.skipped:
@@ -153,6 +234,40 @@ class ExecutionResult:
         ]
         lines += [f"  {number}. [{action.kind}] {message}" for number, (action, message) in enumerate(self.manual, 1)]
         return "\n".join(lines)
+
+    def render_failed(self) -> str:
+        """The ``Failed`` block: what went wrong, whether it was transient, what was tried and the next command."""
+        if not self.failed:
+            return ""
+        lines = (
+            [ui.section(ui.t("failed.title"), len(self.failed), "manual")]
+            if ui.rich()
+            else [f"Failed ({len(self.failed)}): the run went on without these"]
+        )
+        for number, failure in enumerate(self.failed, 1):
+            cause = failure.message.strip().splitlines()[0] if failure.message.strip() else "failed"
+            how = f"after {failure.attempts} attempts (transient)" if failure.transient else "permanent"
+            lines.append(f"  {number}. [{failure.action.kind}] {failure.action.describe()}: {cause} ({how})")
+            lines += [f"       tried: {line}" for line in failure.tried]
+            lines.append(f"       next: {failure.next_command()}")
+        return "\n".join(lines)
+
+    def render_blocked(self) -> str:
+        if not self.blocked:
+            return ""
+        lines = (
+            [ui.section(ui.t("blocked.title"), len(self.blocked), "need")]
+            if ui.rich()
+            else [f"Blocked ({len(self.blocked)}): not tried because something they need failed"]
+        )
+        for item in self.blocked:
+            lines.append(
+                f"  [{item.action.kind}] {item.action.describe()}: blocked by [{item.by.kind}] {item.by.describe()}"
+            )
+        return "\n".join(lines)
+
+    def render_fallbacks(self) -> str:
+        return "\n".join(f"  [{action.kind}] {action.describe()}: via fallback {how}" for action, how in self.fallbacks)
 
 
 @dataclass(frozen=True)
@@ -222,26 +337,183 @@ class Plan:
         no_sudo: bool = False,
         on_start: Callable[[Action], None] | None = None,
         on_done: Callable[[Action], None] | None = None,
+        policy: RetryPolicy | None = None,
+        requires: Mapping[str, Collection[str]] | None = None,
+        observer: Observer | None = None,
+        on_retry: Callable[[Action, int, float, str], None] | None = None,
     ) -> ExecutionResult:
-        changed = 0
-        skipped: list[Action] = []
-        manual: list[tuple[Action, str]] = []
+        """Run the plan; a failing action is recorded and the run goes on (spec, *Reconcile and failover*)."""
+        execution = _Execution(
+            no_sudo=no_sudo,
+            policy=policy or RetryPolicy(),
+            requires=requires or {},
+            on_start=on_start,
+            on_done=on_done,
+            observer=observer,
+            on_retry=on_retry,
+        )
         for action in self.actions:
-            if action.check():
-                continue
-            if action.needs_root and no_sudo:
-                skipped.append(action)
-                continue
-            if on_start is not None:
-                on_start(action)
+            execution.step(action)
+        return execution.result()
+
+
+type Observer = Callable[[Action, str, str], None]
+
+CHAIN_BLOCKERS = frozenset({"submodule", "compile-schemas", "link", "link-replace"})
+CHAIN_BLOCKED = frozenset({Phase.TOGGLE, Phase.SETTINGS_MODULE, Phase.SEED})
+
+
+class _Execution:
+    """The state of one ``Plan.execute`` call: results, failed scopes and the retry / fallback mechanics."""
+
+    def __init__(
+        self,
+        *,
+        no_sudo: bool,
+        policy: RetryPolicy,
+        requires: Mapping[str, Collection[str]],
+        on_start: Callable[[Action], None] | None,
+        on_done: Callable[[Action], None] | None,
+        observer: Observer | None,
+        on_retry: Callable[[Action, int, float, str], None] | None,
+    ) -> None:
+        self.no_sudo = no_sudo
+        self.policy = policy
+        self.requires = requires
+        self.on_start = on_start
+        self.on_done = on_done
+        self.observer = observer
+        self.on_retry = on_retry
+        self.changed = 0
+        self.skipped: list[Action] = []
+        self.manual: list[tuple[Action, str]] = []
+        self.failed: list[Failure] = []
+        self.blocked: list[Blocked] = []
+        self.fallbacks: list[tuple[Action, str]] = []
+        self.unhealthy: dict[str, Action] = {}  # scope -> the action that failed or was blocked first
+        self.chain: dict[str, Action] = {}  # scope -> the first failed code-installing action
+
+    def result(self) -> ExecutionResult:
+        return ExecutionResult(
+            self.changed,
+            tuple(self.skipped),
+            tuple(self.manual),
+            tuple(self.failed),
+            tuple(self.blocked),
+            tuple(self.fallbacks),
+        )
+
+    def _note(self, action: Action, status: str, detail: str = "") -> None:
+        if self.observer is not None:
+            self.observer(action, status, detail)
+
+    def _blocker(self, action: Action) -> Action | None:
+        scope = action.scope
+        if scope is None:
+            return None
+        for needed in self.requires.get(scope, ()):
+            if needed in self.unhealthy:
+                return self.unhealthy[needed]
+        chained = self.chain.get(scope)
+        if chained is not None and action.phase in CHAIN_BLOCKED and action.phase > chained.phase:
+            return chained
+        return None
+
+    def _try(self, action: Action, runner: Callable[[], None]) -> tuple[BaseException | None, int]:
+        """Run ``runner`` with the retry policy; ``(error or None, attempts used)``. A manual step propagates."""
+        for attempt in range(1, max(self.policy.attempts, 1) + 1):
             try:
-                action.run()
-            except ManualStepRequired as needed:
-                manual.append((action, str(needed)))
+                runner()
+            except ManualStepRequired:
+                raise
+            except Exception as error:
+                if is_transient(error) and attempt < self.policy.attempts:
+                    delay = self.policy.delay(attempt - 1)
+                    if self.on_retry is not None:
+                        self.on_retry(action, attempt, delay, str(error))
+                    self.policy.sleep(delay)
+                    continue
+                return error, attempt
+            return None, attempt
+        return None, 0
+
+    def _fail(self, action: Action, error: BaseException, attempts: int, tried: Sequence[str]) -> None:
+        self.failed.append(
+            Failure(
+                action, str(error) or type(error).__name__, is_transient(error), attempts, tuple(tried), _fix(error)
+            )
+        )
+        if action.scope is not None:
+            self.unhealthy.setdefault(action.scope, action)
+            if action.kind in CHAIN_BLOCKERS:
+                self.chain.setdefault(action.scope, action)
+        self._note(action, "failed", str(error))
+
+    def _fallback(self, action: Action, tried: list[str]) -> bool:
+        """Try the declared alternatives in order; True when one made the primary's ``check()`` pass."""
+        for alternative in action.alternatives():
+            if alternative.needs_root and self.no_sudo:
+                tried.append(f"{alternative.describe()} (needs root: skipped)")
                 continue
-            if not action.check():
-                raise ActionFailed(f"[{action.kind}] {action.describe()}: still not satisfied after running")
-            changed += 1
-            if on_done is not None:
-                on_done(action)
-        return ExecutionResult(changed, tuple(skipped), tuple(manual))
+            try:
+                error, _attempts = self._try(alternative, alternative.run)
+            except ManualStepRequired as needed:
+                tried.append(f"{alternative.describe()} (needs you: {needed})")
+                continue
+            if error is None and action.check():
+                self.fallbacks.append((action, alternative.describe()))
+                return True
+            tried.append(f"{alternative.describe()} ({error or 'check still fails'})")
+        return False
+
+    def step(self, action: Action) -> None:
+        try:
+            if action.check():
+                return
+        except Exception as error:
+            self._fail(action, error, 1, ())
+            return
+        blocker = self._blocker(action)
+        if blocker is not None:
+            self.blocked.append(Blocked(action, blocker))
+            if action.scope is not None:
+                self.unhealthy.setdefault(action.scope, blocker)
+            self._note(action, "blocked", f"{blocker.kind} {blocker.describe()}")
+            return
+        tried: list[str] = []
+        if action.needs_root and self.no_sudo:
+            if not self._fallback(action, tried):
+                self.skipped.append(action)
+                self._note(action, "deferred", "needs root")
+                return
+            self._succeeded(action)
+            return
+        if self.on_start is not None:
+            self.on_start(action)
+        try:
+            error, attempts = self._try(action, action.run)
+        except ManualStepRequired as needed:
+            self.manual.append((action, str(needed)))
+            self._note(action, "manual", str(needed))
+            return
+        if error is None:
+            try:
+                satisfied = action.check()
+            except Exception as check_error:
+                error, satisfied = check_error, True
+            if not satisfied:
+                error = ActionFailed(f"[{action.kind}] {action.describe()}: still not satisfied after running")
+        if error is None:
+            self._succeeded(action)
+            return
+        tried.append(f"{action.describe()}: {error}")
+        if self._fallback(action, tried):
+            self._succeeded(action)
+            return
+        self._fail(action, error, attempts, tried if len(tried) > 1 else ())
+
+    def _succeeded(self, action: Action) -> None:
+        self.changed += 1
+        self._note(action, "done")
+        if self.on_done is not None:
+            self.on_done(action)

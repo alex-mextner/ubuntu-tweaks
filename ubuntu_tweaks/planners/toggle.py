@@ -21,6 +21,7 @@ Assumptions:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 
 import gi
@@ -34,6 +35,7 @@ from ubuntu_tweaks.context import Context  # noqa: E402
 from ubuntu_tweaks.extension import ExtensionModule, extension_modules  # noqa: E402
 from ubuntu_tweaks.manifest import SourceKind, module_defaults  # noqa: E402
 from ubuntu_tweaks.settings import SettingsBackend  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
 
 SCHEMA = "org.gnome.shell"
 ENABLED = "enabled-extensions"
@@ -95,10 +97,27 @@ class EnableExtension(_ExtensionListAction):
 
 
 class DisableConflict(_ExtensionListAction):
+    """Turn a conflicting extension off, but only once the replacement can actually load: disabling the Ubuntu dock
+    while hyperdock is only linked (GNOME on Wayland reads new extension code at login) would leave no dock at all."""
+
     kind = "disable"
 
+    def __init__(
+        self,
+        backend: SettingsBackend,
+        module: str,
+        uuid: Callable[[], str | None],
+        subject: str,
+        replacement_loaded: Callable[[], bool] = lambda: True,
+    ) -> None:
+        super().__init__(backend, module, uuid, subject)
+        self._replacement_loaded = replacement_loaded
+
     def describe(self) -> str:
-        return f"disable {self._label()} (conflicts with module {self.scope})"
+        waiting = (
+            "" if self._replacement_loaded() else f"; waits until the shell has loaded {self.scope} (log out and in)"
+        )
+        return f"disable {self._label()} (conflicts with module {self.scope}{waiting})"
 
     def check(self) -> bool:
         uuid = self._uuid()
@@ -108,6 +127,11 @@ class DisableConflict(_ExtensionListAction):
 
     def run(self) -> None:
         uuid = self.resolved()
+        if not self._replacement_loaded():
+            raise ManualStepRequired(
+                f"{uuid} stays enabled until the shell has loaded {self.scope}: log out and back in, then run "
+                "`ubuntu-tweak apply --commit` again (the autoheal module does that at login)"
+            )
         _edit(self.backend, ENABLED, remove=uuid)
         _edit(self.backend, DISABLED, add=uuid)
 
@@ -126,6 +150,31 @@ class RetireExtension(_ExtensionListAction):
         _edit(self.backend, ENABLED, remove=self.resolved())
 
 
+ASSUME_LOADED_ENV = "UBUNTU_TWEAK_SHELL_LOADED"
+LIST_TIMEOUT_SECONDS = 15
+
+
+def _loaded_check(process: Process, replacement: Callable[[], str | None]) -> Callable[[], bool]:
+    """True when the running shell knows the replacement extension (``gnome-extensions list``), or when that cannot
+    be asked (no ``gnome-extensions``, no session bus) or ``UBUNTU_TWEAK_SHELL_LOADED=1`` says to assume it; the
+    answer is read once per plan."""
+    cache: list[bool] = []
+
+    def loaded() -> bool:
+        if not cache:
+            uuid = replacement()
+            if os.environ.get(ASSUME_LOADED_ENV) == "1":
+                cache.append(True)
+            elif uuid is None:
+                cache.append(False)
+            else:
+                result = process.query(["gnome-extensions", "list"], timeout=LIST_TIMEOUT_SECONDS)
+                cache.append(uuid in result.stdout.split() if result.ok else True)
+        return cache[0]
+
+    return loaded
+
+
 def _fixed(uuid: str) -> Callable[[], str]:
     return lambda: uuid
 
@@ -138,14 +187,17 @@ def _lazy_uuid(module: ExtensionModule) -> Callable[[], str | None]:
     return resolve
 
 
-def build(ctx: Context, backend: SettingsBackend) -> Sequence[Action]:
+def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> Sequence[Action]:
     actions: list[Action] = []
+    runner = process or Process()
     for module in extension_modules(ctx):
-        actions.append(EnableExtension(backend, module.name, _lazy_uuid(module), module.name))
+        replacement = _lazy_uuid(module)
+        actions.append(EnableExtension(backend, module.name, replacement, module.name))
         spec = module.manifest.extension
         if spec is None:
             continue
-        actions += [DisableConflict(backend, module.name, _fixed(uuid), uuid) for uuid in spec.conflicts]
+        loaded = _loaded_check(runner, replacement)
+        actions += [DisableConflict(backend, module.name, _fixed(uuid), uuid, loaded) for uuid in spec.conflicts]
         actions += [RetireExtension(backend, module.name, _fixed(uuid), uuid) for uuid in spec.retire]
     actions += _system_extension_actions(ctx, backend)
     return actions

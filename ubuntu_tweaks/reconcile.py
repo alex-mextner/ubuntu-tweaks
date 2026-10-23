@@ -41,11 +41,12 @@ import subprocess
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from ubuntu_tweaks import ui
-from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
+from ubuntu_tweaks import journal, ui
+from ubuntu_tweaks.actions import Action, Blocked, ExecutionResult, Failure, Phase, Plan
 from ubuntu_tweaks.checkout import warning_line
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.elevation import RootSession
+from ubuntu_tweaks.elevation import NOTHING_CHANGED, RootSession, RootUnavailable
+from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
 from ubuntu_tweaks.planners import build_actions, collect_warnings
 from ubuntu_tweaks.identity import Location, locate, missing_lines
@@ -214,7 +215,7 @@ def apply(
     commit: bool,
     no_sudo: bool,
     extra_actions: Iterable[Action] = (),
-    backend_factory: BackendFactory = open_backend,
+    backend_factory: BackendFactory | None = None,
     relogin_hint: bool = False,
     relocate: Callable[[], Location] | None = None,
     title: str = "apply",
@@ -222,6 +223,7 @@ def apply(
     root: RootSession | None = None,
 ) -> int:
     extras = tuple(extra_actions)
+    backend_factory = backend_factory or open_backend  # looked up now, so a test can replace ``open_backend``
     backend = backend_factory(ctx)
     plan = build_plan(ctx, backend, extras)
     _print_preview(ctx, plan, backend, no_sudo=no_sudo, title=title)
@@ -250,13 +252,69 @@ def apply(
             session.close()
 
 
-def _require_root(root: RootSession, plan: Plan, *, no_sudo: bool, ran_before: bool) -> None:
+@dataclasses.dataclass
+class _RunState:
+    """What changes during one ``--commit`` run: ``no_sudo`` is the user's flag, until root turns out unavailable."""
+
+    no_sudo: bool
+    root_error: RootUnavailable | None = None
+
+
+def _require_root(root: RootSession, plan: Plan, state: _RunState, *, ran_before: bool) -> None:
     """Ask for root before the first root action of ``plan`` runs (a no-op after the first success);
-    ``ran_before``: this run already executed actions."""
-    if no_sudo:
+    ``ran_before``: this run already executed actions. When root cannot be had the run does not stop: the rest
+    of it is ``--no-sudo`` and the root actions are reported as the root remainder (spec, *Reconcile and failover*)."""
+    if state.no_sudo:
         return
     pending = [action for action in plan.actions if action.needs_root]
-    root.require(len(pending), ", ".join(sorted({action.kind for action in pending})), ran_before=ran_before)
+    try:
+        root.require(len(pending), ", ".join(sorted({action.kind for action in pending})), ran_before=ran_before)
+    except RootUnavailable as error:
+        state.no_sudo = True
+        state.root_error = error
+        print(f"{ui.symbol('need')} {str(error).replace(NOTHING_CHANGED, '').strip()}", flush=True)
+        print("  continuing with everything that needs no root; the root remainder is listed at the end", flush=True)
+
+
+def _requires(ctx: Context) -> dict[str, tuple[str, ...]]:
+    return {manifest.name: manifest.requires for manifest in ctx.manifests() if manifest.requires}
+
+
+def _announce_interrupted(path: Path) -> None:
+    earlier = journal.previous(path)
+    if earlier is not None and not earlier.finished:
+        done = earlier.counts().get("done", 0)
+        left = len(earlier.entries) - done
+        print(
+            f"previous run ({earlier.command}) was interrupted: {done} done, {left} not finished; "
+            "continuing, every item is observed again",
+            flush=True,
+        )
+
+
+def _exit_code(failed: int, blocked: int, state: _RunState, skipped: int, unconverged: bool) -> int:
+    if failed or blocked:
+        return int(ExitCode.PARTIAL)
+    if state.root_error is not None and skipped:
+        return int(ExitCode.NO_ROOT)
+    if unconverged:
+        return int(ExitCode.DRIFT)
+    return int(ExitCode.OK)
+
+
+def _root_remainder(state: _RunState, skipped: tuple[Action, ...]) -> str:
+    if state.root_error is None or not skipped:
+        return ""
+    fix = state.root_error.fix or "ubuntu-tweak apply --commit"
+    if ui.rich():
+        lines = [ui.section(ui.t("deferred.title"), len(skipped), "manual")]
+        lines += ui.wrap(f"Run `{fix}` from a normal terminal.", indent=2)
+        for action in skipped:
+            lines += ui.wrap(action.describe(), first=f"  {ui.symbol('manual')} ", names=())
+        return "\n".join(lines)
+    lines = [f"Root remainder ({len(skipped)}): root could not be obtained; run `{fix}` from a normal terminal"]
+    lines += [f"  [{action.kind}] {action.describe()}" for action in skipped]
+    return "\n".join(lines)
 
 
 def _commit(
@@ -271,9 +329,14 @@ def _commit(
     root: RootSession,
 ) -> int:
     executed: list[str] = []
+    state = _RunState(no_sudo)
+    path = journal.journal_path()
+    _announce_interrupted(path)
+    run_journal = journal.RunJournal(path, "apply --commit")
+    run_journal.begin(plan.actions)
 
     def runnable(pending: Plan) -> int:
-        return sum(not (a.needs_root and no_sudo) for a in pending.actions)
+        return sum(not (a.needs_root and state.no_sudo) for a in pending.actions)
 
     progress = {"number": 0, "total": 0}
 
@@ -288,71 +351,134 @@ def _commit(
     def done(_action: Action) -> None:
         print(ui.progress(progress["number"], progress["total"], "ok", ui.style("done", "green")), flush=True)
 
+    def retrying(action: Action, attempt: int, delay: float, message: str) -> None:
+        cause = message.strip().splitlines()[0] if message.strip() else "failed"
+        print(f"  ~ [{action.kind}] attempt {attempt} failed ({cause}); retrying in {delay:.1f}s", flush=True)
+
+    failed: list[Failure] = []
+    blocked: list[Blocked] = []
+    fallbacks: list[tuple[Action, str]] = []
+
+    def run_stage(stage: Plan) -> ExecutionResult:
+        outcome = stage.execute(
+            no_sudo=state.no_sudo,
+            on_start=announce,
+            on_done=done if ui.rich() else None,
+            requires=_requires(ctx),
+            observer=run_journal.record,
+            on_retry=retrying,
+        )
+        failed.extend(outcome.failed)
+        blocked.extend(outcome.blocked)
+        fallbacks.extend(outcome.fallbacks)
+        return outcome
+
     if ui.rich():
         print()
     changed = 0
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
+    settled: set[tuple[str, str | None, str]] = set()  # reported once (manual, failed, blocked): not run again
+
+    def settle(outcome: ExecutionResult) -> None:
+        manual.update({_manual_key(action): (action, message) for action, message in outcome.manual})
+        settled.update(_manual_key(action) for action, _message in outcome.manual)
+        settled.update(_manual_key(item.action) for item in outcome.failed)
+        settled.update(_manual_key(item.action) for item in outcome.blocked)
+
+    def unsettled(rebuilt: Plan) -> Plan:
+        remaining = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in settled), rebuilt.satisfied)
+        run_journal.add(remaining.actions)
+        return remaining
+
     acquire = _profile_acquisition(ctx, plan)
     # with a profile still to clone, only what the clone stage runs is certain: the profile may switch the rest
     # off, and the rebuilt plan asks for itself in the loop below
-    _require_root(root, Plan(acquire, 0) if acquire else plan, no_sudo=no_sudo, ran_before=False)
+    _require_root(root, Plan(acquire, 0) if acquire else plan, state, ran_before=False)
     if acquire:
         # the profile decides which modules are on (a profile may switch ssh-server off): clone it first, alone
         progress["total"] = runnable(Plan(acquire, 0))
-        first = Plan(acquire, 0).execute(no_sudo=no_sudo, on_start=announce, on_done=done if ui.rich() else None)
+        first = run_stage(Plan(acquire, 0))
         changed += first.changed
-        manual.update({_manual_key(action): (action, message) for action, message in first.manual})
+        settle(first)
         arrived = _arrived_profile(ctx, relocate)
         if arrived is not None:
             ctx = dataclasses.replace(ctx, profile=arrived)
             arrived_line = f"profile: {tilde(arrived.root)} (cloned by this run)"
             print(f"{ui.symbol('ok')} {ui.style(arrived_line, 'green')}" if ui.rich() else arrived_line, flush=True)
-        rebuilt = build_plan(ctx, backend_factory(ctx), extras)
-        plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
+        plan = unsettled(build_plan(ctx, backend_factory(ctx), extras))
     result = ExecutionResult(0, (), ())
+    unconverged = False
     while True:
         # a rebuilt plan may hold root actions the first one did not
-        _require_root(root, plan, no_sudo=no_sudo, ran_before=bool(executed))
+        _require_root(root, plan, state, ran_before=bool(executed))
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:
-            raise ActionFailed(f"the plan still installs extension code after {MAX_PASSES - 1} passes")
+            print(f"the plan still installs extension code after {MAX_PASSES - 1} passes; stopping the passes here")
+            unconverged = True
+            break
         stage = _before_settings(plan) if staged else plan
         progress["total"] = progress["number"] + runnable(stage)
-        result = stage.execute(no_sudo=no_sudo, on_start=announce, on_done=done if ui.rich() else None)
+        result = run_stage(stage)
         changed += result.changed
-        manual.update({_manual_key(action): (action, message) for action, message in result.manual})
+        settle(result)
         if not staged:
             break
         number += 1
-        rebuilt = build_plan(ctx, backend_factory(ctx), extras)
         # a manual step reported in an earlier pass is not run again (its installer may have done work)
-        plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
-    final = ExecutionResult(changed, result.skipped, tuple(manual.values()))
+        plan = unsettled(build_plan(ctx, backend_factory(ctx), extras))
+    final = ExecutionResult(
+        changed, result.skipped, tuple(manual.values()), tuple(failed), tuple(blocked), tuple(fallbacks)
+    )
     relogin = relogin_hint or any(kind in CODE_CHANGING for kind in executed)
+    code = _exit_code(len(failed), len(blocked), state, len(final.skipped), unconverged)
+    run_journal.finish(code)
+    remainder = _root_remainder(state, final.skipped)
     if not ui.rich():
         print(f"{changed} changed")
-        if final.skipped:
+        if final.fallbacks:
+            print("Fallbacks used:\n" + final.render_fallbacks())
+        if final.failed:
+            print(final.render_failed())
+        if final.blocked:
+            print(final.render_blocked())
+        if remainder:
+            print(remainder)
+        elif final.skipped:
             print(final.render_skipped())
         if relogin:
             print(RELOGIN_HINT)
         if final.manual:
             print(final.render_manual())
-        return 0
+        return code
     print()
     print(ui.heading(ui.t("commit.summary")))
     counts = [f"{ui.symbol('ok')} {ui.style(ui.t('commit.changed', n=changed), 'green')}"]
+    if final.failed:
+        counts.append(f"{ui.symbol('manual')} {ui.style(ui.t('commit.failed', n=len(final.failed)), 'red')}")
+    if final.blocked:
+        counts.append(f"{ui.symbol('need')} {ui.style(ui.t('commit.blocked', n=len(final.blocked)), 'yellow')}")
     if final.manual:
         counts.append(f"{ui.symbol('manual')} {ui.style(ui.t('commit.manual', n=len(final.manual)), 'yellow')}")
     if final.skipped:
-        counts.append(f"{ui.symbol('need')} {ui.style(ui.t('commit.skipped', n=len(final.skipped)), 'yellow')}")
+        key = "commit.deferred" if remainder else "commit.skipped"
+        counts.append(f"{ui.symbol('need')} {ui.style(ui.t(key, n=len(final.skipped)), 'yellow')}")
     print("  " + "   ".join(counts))
-    if final.skipped:
+    if final.fallbacks:
+        print(final.render_fallbacks())
+    if final.failed:
+        print(final.render_failed())
+    if final.blocked:
+        print(final.render_blocked())
+    if remainder:
+        print(remainder)
+    elif final.skipped:
         print(final.render_skipped())
     if relogin:
         print("\n".join(ui.wrap(RELOGIN_HINT, first=f"{ui.symbol('need')} ", names=("yellow",))))
     if final.manual:
         print(final.render_manual())
-    hint = "commit.rerun_pending" if final.skipped or final.manual else "commit.rerun"
+    pending = final.skipped or final.manual or final.failed or final.blocked
+    hint = "commit.rerun_pending" if pending else "commit.rerun"
     print("\n".join(ui.wrap(ui.t(hint), first=f"{ui.symbol('info')} ", names=("cyan",))))
-    return 0
+    return code

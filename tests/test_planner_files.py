@@ -140,8 +140,8 @@ class ReplaceTests(FilesCase):
 
         self.assertIn("REFUSED", plan.actions[0].describe())
         self.assertIn("~/.config is not a directory", plan.actions[0].describe())
-        with self.assertRaisesRegex(RefusedError, "not a directory"):
-            plan.execute()
+        failed = plan.execute().failed
+        self.assertRegex(failed[0].message, "not a directory")
 
     def test_a_directory_symlink_into_the_profile_is_not_reported_as_an_orphan(self) -> None:
         self.shared(".config/nvim/init.lua")
@@ -157,8 +157,8 @@ class ReplaceTests(FilesCase):
         plan = self.plan()
 
         self.assertIn("REFUSED", plan.actions[0].describe())
-        with self.assertRaisesRegex(RefusedError, "is a directory"):
-            plan.execute()
+        failed = plan.execute().failed
+        self.assertRegex(failed[0].message, "is a directory")
         self.assertEqual((self.home / "thing/keep").read_text(encoding="utf-8"), "k")
 
 

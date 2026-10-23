@@ -15,8 +15,9 @@ from tests.util import host, write
 try:
     from tests.actions_scenario import Scenario
     from ubuntu_tweaks import planners, reconcile
-    from ubuntu_tweaks.actions import Action, ActionFailed, Phase
+    from ubuntu_tweaks.actions import Action, Phase
     from ubuntu_tweaks.commands import _support, apply, doctor, init, status, update
+    from ubuntu_tweaks.commands import coverage as coverage_command
     from ubuntu_tweaks import process
     from ubuntu_tweaks.process import CommandError
     from ubuntu_tweaks.context import Context
@@ -97,6 +98,10 @@ class CommandScenario(Scenario):
         patcher = mock.patch.object(planners, "discover_planners", return_value=MY_PLANNERS)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # status ends with the coverage summary: the scan reads the real machine, which these scenarios must not
+        scan = mock.patch.object(coverage_command, "scan", return_value=[])
+        scan.start()
+        self.addCleanup(scan.stop)
         self.source = self.add_extension("gnome-extensions/eng@example", "eng@example")
         self.add_module("eng", path="gnome-extensions/eng@example", extension=EXTENSION_MODULE)
         self.link = self.extensions_dir / "eng@example"
@@ -304,13 +309,14 @@ class ApplyTests(CommandScenario):
         self.assertIn("other@x", out.getvalue())
         self.assertNotIn("eng@example", out.getvalue())
 
-    def test_a_plan_that_does_not_converge_fails(self) -> None:
+    def test_a_plan_that_does_not_converge_ends_partial_not_in_a_traceback(self) -> None:
         class Stubborn(RecordingAction):
             def check(self) -> bool:
                 return False
 
-        with self.assertRaises(ActionFailed):
-            self.run_apply(commit=True, extra=(Stubborn(lambda: None, []),))
+        code, out = self.run_apply(commit=True, extra=(Stubborn(lambda: None, []),))
+        self.assertEqual(code, 7)
+        self.assertIn("Failed (1)", out)
 
     def test_planner_warnings_are_printed_under_the_plan(self) -> None:
         warn = types.SimpleNamespace(

@@ -168,10 +168,49 @@ class SystemModulePlannerTests(TempDirCase):
 
     def test_a_failing_installer_and_one_that_does_not_converge_both_fail(self) -> None:
         self.module("memguard")
-        with self.assertRaisesRegex(ActionFailed, r"memguard: sudo -- .*install\.sh --now: exited with status 2"):
-            Plan.build(self.candidates(Recorder(check_exit=3, install_exit=2))).execute()
-        with self.assertRaisesRegex(ActionFailed, r"still not satisfied"):
-            Plan.build(self.candidates(Recorder(check_exit=3, install_exit=0))).execute()
+        failed = Plan.build(self.candidates(Recorder(check_exit=3, install_exit=2))).execute().failed
+        self.assertRegex(failed[0].message, r"memguard: sudo -- .*install\.sh --now: exited with status 2")
+        failed = Plan.build(self.candidates(Recorder(check_exit=3, install_exit=0))).execute().failed
+        self.assertRegex(failed[0].message, r"still not satisfied")
+
+    FALLBACK = (
+        MANIFEST.format(enabled="true")
+        + '\n[[fallback]]\ninstall = "install-user.sh"\nroot = false\ndescription = "user-level tarball"\n'
+    )
+
+    class Flipping(Recorder):
+        """The checker turns satisfied once the user-level installer ran."""
+
+        def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+            if any("install-user.sh" in part for part in argv):
+                self.check_exit = 0
+                self.install_exit = 0
+            super().execute(argv, input_text=input_text, cwd=cwd)
+
+    def test_a_failing_primary_installer_falls_back_to_the_declared_alternative(self) -> None:
+        write(self.repo / "modules/memguard/module.toml", self.FALLBACK)
+        runner = self.Flipping(check_exit=3, install_exit=2)
+
+        result = Plan.build(self.candidates(runner)).execute()
+
+        directory = self.repo / "modules/memguard"
+        self.assertEqual((result.changed, result.failed), (1, ()))
+        self.assertEqual([item[1] for item in result.fallbacks], ["user-level tarball"])
+        self.assertIn(([str(directory / "install-user.sh")], directory, None, False), runner.calls)
+
+    def test_without_root_the_user_level_fallback_runs_and_the_root_primary_never_does(self) -> None:
+        write(self.repo / "modules/memguard/module.toml", self.FALLBACK)
+        runner = self.Flipping(check_exit=3)
+
+        result = Plan.build(self.candidates(runner)).execute(no_sudo=True)
+
+        self.assertEqual((result.changed, result.skipped), (1, ()))
+        self.assertFalse(any(call[0][:2] == ["sudo", "--"] for call in runner.calls))
+
+    def test_dry_run_lists_the_declared_fallbacks_under_the_action(self) -> None:
+        write(self.repo / "modules/memguard/module.toml", self.FALLBACK)
+        (action,) = Plan.build(self.candidates(Recorder(check_exit=3))).actions
+        self.assertIn("fallback (no root): install-user.sh", action.describe())
 
     def test_root_does_not_prefix_sudo(self) -> None:
         self.module("memguard")

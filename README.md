@@ -79,7 +79,8 @@ error (exit 2).
 |---|---|
 | `init [--commit]` | fresh system: `doctor`, submodules, CLI link in `~/.local/bin`, then `apply`; preview without `--commit` |
 | `apply [--commit] [--no-sudo]` | print the plan (what would change), or repair the machine: sudo once, missing apt packages, then the plan; a second run says `0 changed` |
-| `status` | Missing / Modified / Extra; exit 3 when anything declared is missing or modified |
+| `status` | Missing / Modified / Extra, then a one-line coverage summary; exit 3 when anything declared is missing or modified |
+| `coverage [--json] [--class untracked\|tracked\|excluded\|secret] [--propose]` | read-only scan of dconf, `~/.config` and friends, packages, systemd user units, GNOME extensions and `/etc`: every item is `tracked`, `excluded` (with a reason), `secret` (reported, never read) or `untracked`; exit 3 while anything is untracked; `--propose` prints what `capture` would add. Rules: engine defaults < module `[[coverage]]` < profile `coverage.toml` < `machines/<host>/coverage.toml` |
 | `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
 | `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them (asks for sudo once) |
 | `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
@@ -122,6 +123,19 @@ colors removed, secrets masked) to `~/.local/state/ubuntu-tweaks/logs/<UTC times
 (`$XDG_STATE_HOME` honoured; mode `0600`). **`~/.local/state/ubuntu-tweaks/logs/latest.log`** is the newest one: point an
 agent at it ("read latest.log and tell me what went wrong"). The newest 50 are kept. Not logged: the sudo password
 prompt and anything you type into a child tool's own prompt. Details: spec, *Session log*.
+
+### Reconcile and failover
+
+`apply --commit` / `init --commit` observe every declared item, act, observe again, and **never stop at the first
+failure**: a transient error (network, dpkg lock, HTTP 429/5xx, installer exit 75) is retried with exponential
+backoff and jitter; a permanent one is reported and its dependents (`requires = [...]` in `module.toml`, or the later
+steps of the same extension) are marked *blocked* while everything independent still runs; a system module may declare
+`[[fallback]]` installers (user-level variants run when sudo is unavailable); when root cannot be had, all user-level
+work is finished and the root remainder is listed with the exact command. Exit codes: `0` converged, `7` something
+failed or was blocked, `6` root actions remain because root was unavailable, `3` plan not converged. Every run
+writes `~/.local/state/ubuntu-tweaks/run-journal.json` (an interrupted run is noticed and simply continues; `status`
+lists the last run's failed/blocked/deferred items). Opt-in unattended self-heal: `[modules.autoheal] enabled = true`
+(user timer running `apply --commit --no-sudo` at login and daily; never asks for root). Spec: *Reconcile and failover*.
 
 ### Settings workflow: preview → commit → review → PR
 

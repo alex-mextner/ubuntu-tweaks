@@ -81,6 +81,7 @@ class ExitCodeTests(unittest.TestCase):
                 ("UNKNOWN_MODULE", 4),
                 ("REFUSED", 5),
                 ("NO_ROOT", 6),
+                ("PARTIAL", 7),
             ],
         )
         self.assertEqual(ConfigError.exit_code, ExitCode.INVALID_CONFIG)

@@ -35,3 +35,16 @@ _LOG_DIR = tempfile.mkdtemp(prefix="ubuntu-tweak-test-logs-")
 os.environ["UBUNTU_TWEAK_LOG_DIR"] = _LOG_DIR
 os.environ.pop("UBUNTU_TWEAK_SESSION_LOG", None)
 atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
+
+# Nothing a test does by accident may reach the developer's machine: the run journal and every other state file
+# go to a temporary directory, and an accidental Gio write lands in GSettings' in-memory backend instead of the
+# live dconf database. The scratch-dconf scenarios (test_settings, test_planner_gio) run their children under
+# their own dbus-run-session, HOME and GSETTINGS_BACKEND=dconf (UBUNTU_TWEAKS_SCRATCH=1): those keep them.
+if os.environ.get("UBUNTU_TWEAKS_SCRATCH") != "1":
+    _STATE_DIR = tempfile.mkdtemp(prefix="ubuntu-tweak-test-state-")
+    os.environ["XDG_STATE_HOME"] = _STATE_DIR
+    os.environ["GSETTINGS_BACKEND"] = "memory"
+    atexit.register(shutil.rmtree, _STATE_DIR, ignore_errors=True)
+
+# No test may ask the developer's running GNOME Shell anything (`gnome-extensions list` goes over the live bus).
+os.environ["UBUNTU_TWEAK_SHELL_LOADED"] = "1"

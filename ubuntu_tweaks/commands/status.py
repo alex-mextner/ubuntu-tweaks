@@ -7,7 +7,8 @@ Uses the same plan as ``apply`` (so the same ``check()``s): a pending action of 
 the planners' optional ``extras()`` and are printed only when ``--only`` is not given. **Manual** holds
 the planners' warnings (things only the user can decide, e.g. a missing git identity); it never
 changes the exit code. Exit 3 when anything is Missing or Modified; extras and manual alone exit 0.
-Read-only.
+Read-only. The last line is the one-line coverage summary (``ubuntu-tweak coverage`` has the table; JSON key
+``coverage``, ``null`` with ``--only``): a count per class, and untracked items never change status's exit code.
 
 Two layouts, same facts and same exit codes. The *plain* layout (pipes, ``--plain``) is the compact
 ``Missing (n):`` / ``Modified (n):`` / ``Extra (n):`` text with ``[kind]`` labels. The *interactive* layout
@@ -23,10 +24,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 
-from ubuntu_tweaks import ui
+from ubuntu_tweaks import journal, ui
 from ubuntu_tweaks.actions import Action, Plan
+from ubuntu_tweaks.commands import coverage as coverage_command
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.coverage import Coverage
 from ubuntu_tweaks.errors import ExitCode
 
 MODIFIED_KINDS = frozenset({"set-key", "link-replace", "dotfiles-link-replace"})
@@ -107,6 +111,7 @@ def render_rich(
     warnings: list[str],
     *,
     explain: bool,
+    coverage: Mapping[Coverage, int] | None = None,
 ) -> str:
     lines = [*header, ""]
     lines += verdict(len(missing), len(modified), len(extras), len(warnings))
@@ -124,6 +129,8 @@ def render_rich(
     lines += _section_lines("manual", "manual", len(warnings), explain=explain)
     for warning in warnings:
         lines += ui.wrap(warning, first=f"    {ui.symbol('manual')} ", names=("yellow",))
+    if coverage is not None:
+        lines += ["", *coverage_command.summary_rich(coverage)]
     lines += ["", *ui.legend()]
     if missing or modified:
         lines += ["", ui.heading(ui.t("next"))]
@@ -136,7 +143,14 @@ def render_rich(
     return "\n".join(lines)
 
 
-def _json(ctx: Context, missing: list[Action], modified: list[Action], extras: list[str], warnings: list[str]) -> str:
+def _json(
+    ctx: Context,
+    missing: list[Action],
+    modified: list[Action],
+    extras: list[str],
+    warnings: list[str],
+    coverage: Mapping[Coverage, int] | None = None,
+) -> str:
     def entry(action: Action) -> dict[str, object]:
         return {
             "kind": action.kind,
@@ -155,9 +169,34 @@ def _json(ctx: Context, missing: list[Action], modified: list[Action], extras: l
         "modified": [entry(action) for action in modified],
         "extra": None if ctx.only else extras,  # not checked with --only: null, not an empty list
         "manual": warnings,
+        "coverage": None if coverage is None else {kind.value: coverage[kind] for kind in coverage_command.ORDER},
         "exit_code": int(ExitCode.DRIFT if drift else ExitCode.OK),
     }
     return json.dumps(document, ensure_ascii=False, indent=2)
+
+
+def last_run_lines() -> list[str]:
+    """The failed / blocked / deferred items of the last ``apply --commit`` (the run journal), one line each."""
+    last = journal.previous(journal.journal_path())
+    if last is None:
+        return []
+    problems = last.problems()
+    if not last.finished:
+        return ["Last run: interrupted before it finished; `ubuntu-tweak apply --commit` continues it"]
+    if not problems:
+        return []
+    lines = [f"Last run (`{last.command}`, exit {last.exit_code}): {len(problems)} item(s) did not converge"]
+    lines += [
+        f"  {entry.status}: [{entry.kind}] {entry.text}" + (f": {entry.detail}" if entry.detail else "")
+        for entry in problems
+    ]
+    return lines
+
+
+def _print_last_run() -> None:
+    lines = last_run_lines()
+    if lines:
+        print("\n".join(lines))
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
@@ -172,14 +211,16 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     missing, modified = classify(plan)
     extras = [] if ctx.only else collect_extras(ctx, backend)
     warnings = collect_warnings(ctx, backend)
+    coverage = None if ctx.only else coverage_command.counts(coverage_command.scan(ctx))
     code = int(ExitCode.DRIFT if missing or modified else ExitCode.OK)
     explain = getattr(args, "explain", False)  # direct callers (tests) pass a bare Namespace
     if getattr(args, "json", False):
-        print(_json(ctx, missing, modified, extras, warnings))
+        print(_json(ctx, missing, modified, extras, warnings, coverage))
         return code
     if ui.rich() or (explain and not ui.plain()):
         header = reconcile.header_lines(ctx, "status")
-        print(render_rich(header, missing, modified, extras, warnings, explain=explain))
+        print(render_rich(header, missing, modified, extras, warnings, explain=explain, coverage=coverage))
+        _print_last_run()
         return code
     print("\n".join(reconcile.profile_lines(ctx)))
     _section("Missing", [f"[{a.kind}] {a.describe()}" for a in missing])
@@ -188,4 +229,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     if warnings:
         print("Warnings:")
         print("\n".join(f"  {line}" for line in warnings))
+    if coverage is not None:
+        print(coverage_command.summary_plain(coverage))
+    _print_last_run()
     return code

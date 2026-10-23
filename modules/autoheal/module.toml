@@ -1,0 +1,14 @@
+description = "Unattended self-heal: re-run `ubuntu-tweak apply --commit --no-sudo` at login and daily"
+enabled = false   # opt in: [modules.autoheal] enabled = true in profile.toml or machines/<host>/machine.toml
+order = 95        # after everything else it would re-apply
+phase = "base"
+
+[source]
+kind = "builtin"
+
+# User level only: the unit runs `apply --commit --no-sudo`, so it never asks for root and never prompts; root
+# actions wait for the next interactive `ubuntu-tweak apply --commit` (spec, *Reconcile and failover*, *Self-heal*).
+[[step]]
+name = "user-timer"
+command = "%h/.local/bin/ubuntu-tweak apply --commit --no-sudo --plain"
+calendar = "daily"
