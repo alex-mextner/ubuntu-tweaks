@@ -30,9 +30,19 @@ from pathlib import Path
 
 from ubuntu_tweaks.actions import Action
 from ubuntu_tweaks.atomic_write import atomic_write
+from ubuntu_tweaks.capture.secrets import mask_secrets
+
+MAX_TEXT = 500  # one journal line is a pointer to the session log, not the log
 
 PENDING = "pending"
 PROBLEM_STATUSES = ("failed", "blocked", "deferred")
+
+
+def _safe(text: str) -> str:
+    """What is stored: secrets masked the way the session log masks them, and clipped (error text can carry a
+    child tool's stderr)."""
+    masked = mask_secrets(text)
+    return masked if len(masked) <= MAX_TEXT else masked[: MAX_TEXT - 1] + "…"
 
 
 def journal_path(environ: Mapping[str, str] | None = None, home: Path | None = None) -> Path:
@@ -108,7 +118,7 @@ class RunJournal:
         for action in actions:
             key = action_key(action)
             if key not in self._index:
-                entry = Entry(key, action.kind, action.describe())
+                entry = Entry(key, action.kind, _safe(action.describe()))
                 self._index[key] = entry
                 self._run.entries.append(entry)
         self._write()
@@ -117,11 +127,11 @@ class RunJournal:
         key = action_key(action)
         entry = self._index.get(key)
         if entry is None:
-            entry = Entry(key, action.kind, action.describe())
+            entry = Entry(key, action.kind, _safe(action.describe()))
             self._index[key] = entry
             self._run.entries.append(entry)
         entry.status = status
-        entry.detail = detail
+        entry.detail = _safe(detail)
         self._write()
 
     def finish(self, exit_code: int) -> None:

@@ -562,6 +562,9 @@ def _user_timer(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> lis
         raise ConfigError(f"{where}: 'name' must be letters, digits, '.', '_' or '-', got {name!r}")
     command = _text_arg(args, "command", where)
     calendar = _text_arg(args, "calendar", where, "daily")
+    for label, value in (("command", command), ("calendar", calendar)):
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ConfigError(f"{where}: '{label}' must be one line without control characters")
     return [UserTimerAction(env, name, command, calendar)]
 
 

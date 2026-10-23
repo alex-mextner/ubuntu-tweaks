@@ -367,3 +367,17 @@ class StatusLastRunTests(unittest.TestCase):
         self.assertIn("2 item(s) did not converge", lines[0])
         self.assertIn("  failed: [bad] do bad: apt broke", lines)
         self.assertIn("  deferred: [waiting] do waiting: needs root", lines)
+
+
+class JournalMaskingTests(unittest.TestCase):
+    def test_secrets_in_an_error_are_masked_and_long_text_is_clipped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "j.json"
+            run_journal = journal.RunJournal(path, "apply --commit")
+            step = Step("gh-login")
+            run_journal.begin([step])
+            token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+            run_journal.record(step, "failed", f"gh: bad credentials {token} " + "x" * 2000)
+            text = path.read_text(encoding="utf-8")
+        self.assertNotIn(token, text)
+        self.assertLess(len(text), 1500)
