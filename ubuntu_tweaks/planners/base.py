@@ -45,9 +45,9 @@ from ubuntu_tweaks.manifest import (
     module_defaults,
 )
 from ubuntu_tweaks.planners.packages import PackageAction, installed_apt
-from ubuntu_tweaks.planners.system_modules import SystemModuleAction, module_config_json
+from ubuntu_tweaks.planners.system_modules import SystemModuleAction
 from ubuntu_tweaks.process import CommandError, Process
-from ubuntu_tweaks.profile import Config, Packages
+from ubuntu_tweaks.profile import Config, Packages, module_config_json
 from ubuntu_tweaks.settings import SettingsBackend
 from ubuntu_tweaks.steps import StepEnv, get_step, git_section
 

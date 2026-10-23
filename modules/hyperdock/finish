@@ -1,0 +1,84 @@
+#!/usr/bin/python3 -B
+"""hyperdock finish step: the one log out and in that loads the dock (spec, *Finish*).
+
+    finish check    exit 0 once GNOME Shell reports the dock extension ACTIVE (read-only)
+
+GNOME Shell on Wayland loads extension code only at login, so after `apply` has linked the dock the owner has to
+log out and back in once. There is nothing a command could do for that, so the step has no `run`: it is listed
+until `check` passes. The extension id is read from the checked-out dock's metadata.json, because the dock was
+renamed once and may be again.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Protocol
+
+sys.dont_write_bytecode = True
+
+METADATA = Path("gnome-extensions/hyperdock/metadata.json")
+
+
+class Runner(Protocol):
+    def capture(self, argv: Sequence[str], env: Mapping[str, str]) -> tuple[int, str]: ...
+
+
+class SystemRunner:
+    def capture(self, argv: Sequence[str], env: Mapping[str, str]) -> tuple[int, str]:
+        try:
+            done = subprocess.run(
+                list(argv),
+                env=dict(env),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except FileNotFoundError:
+            return 127, f"{argv[0]}: not found"
+        except subprocess.TimeoutExpired:
+            return 124, f"{argv[0]}: no answer within 20s"
+        return done.returncode, (done.stdout + done.stderr).strip()
+
+
+def extension_uuid(repo: Path) -> str | None:
+    try:
+        uuid = json.loads((repo / METADATA).read_text(encoding="utf-8"))["uuid"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return uuid if isinstance(uuid, str) and uuid else None
+
+
+def check(runner: Runner, repo: Path, env: Mapping[str, str]) -> int:
+    uuid = extension_uuid(repo)
+    if uuid is None:
+        print(f"the dock is not checked out at {repo / METADATA.parent}: run `ubuntu-tweak apply --commit` first")
+        return 1
+    code, text = runner.capture(["gnome-extensions", "info", uuid], {**env, "LC_ALL": "C"})
+    state = re.search(r"State:\s*(\S+)", text)
+    if code == 0 and state and state.group(1) == "ACTIVE":
+        return 0
+    if state:
+        print(f"GNOME Shell reports the dock as {state.group(1)}: log out and back in to load it")
+    else:
+        print(f"GNOME Shell does not know {uuid} yet: log out and back in to load it")
+    return 1
+
+
+def main(argv: Sequence[str], env: Mapping[str, str] | None = None, runner: Runner | None = None) -> int:
+    if list(argv) != ["check"]:
+        print("usage: finish check", file=sys.stderr)
+        return 2
+    return check(runner or SystemRunner(), Path(__file__).resolve().parents[2], os.environ if env is None else env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

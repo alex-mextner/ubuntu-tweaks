@@ -31,6 +31,10 @@ Public API:
   ``phase`` (``base`` / ``packages`` / ``system`` as a ``Phase``, or ``None``) place the module's
   install-time actions in the plan; ``manual`` is the optional hint printed in the closing ``Manual
   steps`` block when the module's installer exits 10 (how the user finishes it).
+- ``FinishStep(id, title, why, action, check, ...)`` and ``Manifest.finish``: the ``[[finish]]`` tables, the
+  human-only steps ``ubuntu-tweak finish`` walks through (spec, *Finish*); ``check`` exits 0 when done,
+  ``prepare``, ``run`` and ``gate`` are optional argv lists, ``./name`` is a file of the module directory;
+  ``parse_finish_tables(tables, where)`` parses the same tables from the profile's ``[[finish.steps]]``.
 - ``parse_manifest(name, text, directory, origin="engine") -> Manifest``.
 - ``Manifest.origin`` is ``"engine"`` (``modules/<name>/``) or ``"profile"`` (``<profile>/modules/<name>/``, same
   manifest and kinds; a ``submodule`` is refused, a ``local`` path is relative to the module directory).
@@ -158,6 +162,30 @@ class Fallback:
 
 
 @dataclass(frozen=True)
+class FinishStep:
+    """``[[finish]]``: one human-only step of ``ubuntu-tweak finish`` (spec, *Finish*). The ``_ru`` texts are the
+    Russian ones (empty: the English text is shown). ``check`` exits 0 when the step is done; ``prepare`` is the
+    machine part before the human one, ``run`` the interactive command, ``gate`` prints why the step must wait
+    (nothing printed: go); ``reapply`` says that once this step is done the ``apply`` step has more to do and runs
+    again. ``./name`` runs a file of the module's directory."""
+
+    id: str
+    title: str
+    why: str
+    action: str
+    check: tuple[str, ...]
+    title_ru: str = ""
+    why_ru: str = ""
+    action_ru: str = ""
+    prepare: tuple[str, ...] = ()
+    run: tuple[str, ...] = ()
+    gate: tuple[str, ...] = ()
+    requires: tuple[str, ...] = ()
+    optional: bool = False
+    reapply: bool = False
+
+
+@dataclass(frozen=True)
 class Step:
     """``[[step]]``: a named built-in step (``ubuntu_tweaks/steps.py``) with its own arguments."""
 
@@ -187,6 +215,7 @@ class Manifest:
     fallbacks: tuple[Fallback, ...] = ()  # system modules: alternative installers
     coverage: tuple[Rule, ...] = ()  # [[coverage]] rules this module contributes (spec, *Coverage*)
     origin: Origin = "engine"  # "profile": the module lives in the profile's modules/ directory
+    finish: tuple[FinishStep, ...] = ()  # [[finish]] steps this module adds to `ubuntu-tweak finish` (spec, *Finish*)
 
 
 class _Reader:
@@ -421,6 +450,76 @@ def _parse_fallbacks(readers: list[_Reader], source: Source, where: _Reader) -> 
     return tuple(fallbacks)
 
 
+FINISH_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _finish_command(reader: _Reader, key: str, *, required: bool = False) -> tuple[str, ...]:
+    """A ``[[finish]]`` command: an argv list. The first element is a program on ``PATH``, an absolute path or
+    ``./name`` (a file in the module's directory); never a path that climbs out of it."""
+    if key not in reader.table and not required:
+        return ()
+    value = reader.table.get(key)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise reader.fail(f"'{key}' must be a non-empty argv list of strings, got {value!r}")
+    program = value[0]
+    path = PurePosixPath(program)
+    if program == "./" or ".." in path.parts or ("/" in program and not program.startswith(("/", "./"))):
+        raise reader.fail(
+            f"'{key}' must start with a program on PATH, an absolute path or ./file inside the module, got {program!r}"
+        )
+    return tuple(value)
+
+
+def parse_finish_tables(tables: Sequence[Mapping[str, TomlValue]], where: str) -> tuple[FinishStep, ...]:
+    """``[[finish]]`` tables read from a file that is not a manifest (the profile's ``[[finish.steps]]``)."""
+    return _parse_finish([_Reader(table, f"{where} step #{number}") for number, table in enumerate(tables, 1)])
+
+
+def _parse_finish(readers: list[_Reader]) -> tuple[FinishStep, ...]:
+    steps: list[FinishStep] = []
+    for reader in readers:
+        reader.only(
+            "id",
+            "title",
+            "title_ru",
+            "why",
+            "why_ru",
+            "action",
+            "action_ru",
+            "check",
+            "prepare",
+            "run",
+            "gate",
+            "requires",
+            "optional",
+            "reapply",
+        )
+        step_id = reader.required_string("id")
+        if not FINISH_ID.fullmatch(step_id):
+            raise reader.fail(f"'id' must be lowercase letters, digits and '-', got {step_id!r}")
+        if any(step.id == step_id for step in steps):
+            raise reader.fail(f"duplicate finish step id {step_id!r}")
+        steps.append(
+            FinishStep(
+                id=step_id,
+                title=reader.required_string("title"),
+                why=reader.required_string("why"),
+                action=reader.required_string("action"),
+                check=_finish_command(reader, "check", required=True),
+                title_ru=reader.string("title_ru") or "",
+                why_ru=reader.string("why_ru") or "",
+                action_ru=reader.string("action_ru") or "",
+                prepare=_finish_command(reader, "prepare"),
+                run=_finish_command(reader, "run"),
+                gate=_finish_command(reader, "gate"),
+                requires=reader.strings("requires"),
+                optional=reader.boolean("optional", False),
+                reapply=reader.boolean("reapply", False),
+            )
+        )
+    return tuple(steps)
+
+
 def _parse_posts(readers: list[_Reader]) -> tuple[Post, ...]:
     posts: list[Post] = []
     for reader in readers:
@@ -476,6 +575,7 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         "requires",
         "fallback",
         "coverage",
+        "finish",
     )
     source_reader = root.sub("source")
     if source_reader is None:
@@ -525,6 +625,7 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         requires=root.strings("requires"),
         fallbacks=_parse_fallbacks(root.array("fallback"), source, root),
         coverage=tuple(parse_rules([item.table for item in root.array("coverage")], Layer.MODULE, where, name)),
+        finish=_parse_finish(root.array("finish")),
         origin=origin,
     )
 

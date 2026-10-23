@@ -753,8 +753,8 @@ launcher, see the profile's `files/`). Steps come from two places:
 - the built-in **`apply`** step: the root work (`ubuntu-tweak apply --commit`, which asks for the sudo password once
   itself; `finish` never reads a password), always first;
 - `[[finish]]` tables of the enabled modules, the engine's and the profile's (a disabled module contributes none),
-  ordered by the module's `order`, then its name, then file order. `--only` keeps the steps of the named modules
-  (and drops `apply`).
+  ordered by the module's `order`, then its name, then file order. `--only` is refused (a module filter would
+  drop the `apply` step that others require): `--step ID` walks one step and the steps it requires.
 
 ```toml
 [[finish]]                       # in modules/<name>/module.toml or <profile>/modules/<name>/module.toml
@@ -763,11 +763,12 @@ title = "Sign in to iCloud"      # required; title_ru / why_ru / action_ru are u
 why = "Apple ID, password and the 2FA code are yours to type; nothing here stores them"       # required
 action = "Type the Apple ID password, then the code from your other Apple device"             # required: what you do
 check = ["./finish", "icloud-signin", "check"]   # required: exit 0 = done; read-only, no prompt, fast
-prepare = ["./finish", "icloud-signin", "prepare"]   # optional machine part before the human one; non-zero = blocked
+prepare = ["./finish", "icloud-signin", "prepare"]   # optional machine part before the human one; non-zero = failed
 run = ["passwords-app", "signin"]    # optional: the interactive command, it owns the terminal
 gate = ["./finish", "icloud-signin", "gate"]   # optional: empty stdout = go; any output = wait (shown as the reason)
 requires = ["apply"]             # optional: step ids that must be done first
 optional = false                 # an optional step never keeps the exit code at 3
+reapply = false                  # true: once this step is done `apply` has more root work and runs once more
 ```
 
 An argv whose first element starts with `./` runs from the module's directory (`finish` itself runs a script of
@@ -775,14 +776,20 @@ the module next to `module.toml`; the profile's own modules work the same), any 
 on `PATH`. Every command gets `UBUNTU_TWEAK_MODULE_CONFIG` (the module's `[modules.<name>]` options as JSON, as for
 system modules), `UBUNTU_TWEAK_LANG` (`ru` or `en`) and `UBUNTU_TWEAK_FINISH_DRY_RUN=1` under `--dry-run`. The step texts
 are written by the module author in `title` / `title_ru` and so on; the missing `_ru` falls back to English. A
-command never prints a secret (the session log masks the usual ones anyway).
+command never prints a secret (the session log masks the usual ones anyway). `check` and `gate` run without a terminal
+and within 60 seconds; `prepare` and `run` own the terminal, have no time limit and show their output as it comes.
 
 State of a step, decided by the commands alone: **done** (`check` exits 0), **pending** (it does not), **wait** (a
 `gate` printed something: it says plainly `WAIT` and why, and the step is not run), **blocked** (a `requires` step
 is not done) and, after a run, **failed** (the `prepare` or `run` command failed, or `check` still fails). The
-built-in `apply` step is **done** when the plan holds no root action and the last finished journal run has no failed,
-blocked or deferred item (*Reconcile and failover*); its `gate` comes from `[finish.apply]` in `profile.toml` /
-`machine.toml`:
+built-in `apply` step is **done** when no root action is left that `apply` could still do and the last finished journal
+run has no failed or deferred item (*Reconcile and failover*); a root action that run reported as `manual`
+waits for a person (another finish step says what to do) and does not count, so a root module that waits for the AMO
+key cannot keep the step that has to come first pending for ever. The plan cannot see that the key has since made that
+action possible, so a step with `reapply = true` sends `apply` back to *pending* once it is done; that debt is kept
+in `finish-state.json` next to the run journal until `apply` has run without a problem, so quitting before it or a
+failing `apply` cannot lose it. The `gate` of `apply`
+comes from `[finish.apply]` in `profile.toml` / `machine.toml`:
 
 ```toml
 [finish.apply]
@@ -799,12 +806,18 @@ come after every module's steps. The profile installs the launcher `finish-setup
 
 `--dry-run` prints the checklist (state of every step, why, the exact action, the gate verdict) and runs only the
 read-only `check` and `gate` commands: no `prepare`, no `run`, no sudo; it exits 3 while a required step is not
-done. Without it `finish` walks the pending steps in order: shows the step (why, what you do), waits for Enter
-(`--yes`: no pause), runs `prepare`, then `run`, then `check` again and prints `✓` or `✗`; after every step all
-states are recomputed (a later step may have become possible, a finished one may need running again: the AMO key
-makes `apply` pending once more). A step is tried at most twice per run, and a `wait` or `blocked` step is only
-listed. Without a terminal on stdin nothing is run: the checklist is printed with a note that a terminal is needed
-(exit 3). The end prints what is done, what waits and the one command to run next. Exit 0: every required step is
+done. Without it `finish` walks the pending steps in order: shows the step (why, what you do) and waits: only Enter
+starts it, `s` skips it, `q` (or end of input) stops the walk, anything else is asked again, so a step with a sudo
+prompt behind it never starts on a stray `n` (`--yes`: no pause; optional steps are then left alone). It runs
+`prepare`, then `run`, then `check` again and prints `✓` or `✗`; after every step all states are recomputed (a later
+step may have become possible, a finished one may need running again: the AMO key makes `apply` pending once more).
+A step is tried at most twice per run. A `wait` or `blocked` step, and a step with neither `prepare` nor `run` (one
+you do on your own, such as logging out), is only listed. Ctrl-C inside a step's command goes to that command (it
+decides what it means); an exit of 130 ends the attempt, not the walk. `UBUNTU_TWEAK_FINISH_COMMAND` is the name the
+summary tells you to run again (the profile's launcher sets `finish-setup`); what the caller inherited as
+`UBUNTU_TWEAK_MODULE_CONFIG` or `UBUNTU_TWEAK_FINISH_DRY_RUN` is not passed on. A step that requires itself, or steps that require each other, are a configuration error (exit 2). The `apply`
+step runs through the session log like `update` does. Without a terminal on stdin nothing is run: the checklist is
+printed with a note that a terminal is needed (exit 3). The end prints what is done, what waits and the one command to run next. Exit 0: every required step is
 done; 3: a required step is pending, waiting, blocked or failed; usage errors are the usual 2. Re-running is always
 safe: done steps are only listed.
 

@@ -10,3 +10,18 @@ install = "passwords-app install"
 check = "passwords-app check"
 # the author-published tool this module installs; override with [modules.passwords-app] repo = "..."
 repo = "https://github.com/alex-mextner/passwords-app.git"
+
+# What only the owner can do: `ubuntu-tweak finish` runs the machine part (the venv must carry the Apple client-identity
+# fix) and then `passwords-app signin`, prefilled with `[modules.passwords-app] apple_id` (not a secret).
+[[finish]]
+id = "icloud-signin"
+title = "Sign in to iCloud (passwords-app)"
+title_ru = "Войти в iCloud (passwords-app)"
+why = "iCloud passwords sync only after you sign in: the Apple ID password, the 2FA code and the device passcode are yours to type, nothing here stores them."
+why_ru = "Пароли iCloud синхронизируются только после входа: пароль Apple ID, код 2FA и код-пароль устройства вводишь ты, ничего из этого не сохраняется."
+action = "Type the Apple ID password, then the 6-digit code that appears on your other Apple device, then that device's passcode if it asks."
+action_ru = "Введи пароль Apple ID, затем 6-значный код, который появится на другом твоём устройстве Apple, затем код-пароль этого устройства, если спросит."
+check = ["./finish", "check"]
+prepare = ["./finish", "prepare"]
+run = ["./finish", "run"]
+requires = ["apply"]   # prepare needs the installed venv

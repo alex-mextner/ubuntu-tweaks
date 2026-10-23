@@ -8,3 +8,16 @@ kind = "system"
 root = false
 install = "firefox-autologin install"
 check = "firefox-autologin check"
+
+# Firefox shows "Allow Firefox to start WebExtension backend?" once, and only its owner can answer it.
+[[finish]]
+id = "firefox-backend-prompt"
+title = "Allow the passwords extension in Firefox"
+title_ru = "Разрешить расширение паролей в Firefox"
+why = "Firefox asks once whether it may start the WebExtension backend that fills passwords; only you can press Allow."
+why_ru = "Firefox один раз спрашивает, можно ли запускать бэкенд WebExtension для автозаполнения паролей; нажать Allow можешь только ты."
+action = "Press Allow in the Firefox prompt (Firefox opens by itself)."
+action_ru = "Нажми Allow в запросе Firefox (Firefox откроется сам)."
+check = ["./firefox-autologin", "check"]
+run = ["./finish", "run"]
+requires = ["apply", "amo-key"]

@@ -138,7 +138,7 @@ def _resolve_profile(args: argparse.Namespace) -> Profile:
 
 def _refuse_dry_run_commit(args: argparse.Namespace) -> None:
     """``--dry-run`` is the explicit preview, so it cannot be combined with the word that commits (``--commit``,
-    ``doctor``'s ``--yes``): that is a usage error, not a silent pick of one of them."""
+    the ``--yes`` of ``doctor`` and ``finish``): that is a usage error, not a silent pick of one of them."""
     if not args.dry_run:
         return
     for word in ("commit", "yes"):

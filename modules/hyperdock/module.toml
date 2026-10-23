@@ -21,3 +21,16 @@ provider = "screenshots-stack"
 [[migrations]]
 from_uuid = "dash2dock-lite@icedman.github.com"
 from_path = "/org/gnome/shell/extensions/dash2dock-lite/"
+
+# GNOME Shell on Wayland loads extension code only at login: the one re-login after the first apply. Nothing to run, so
+# `ubuntu-tweak finish` only lists it until the extension is ACTIVE.
+[[finish]]
+id = "dock-relogin"
+title = "Log out and back in (loads the new dock)"
+title_ru = "Выйти из сессии и войти снова (загрузит новый док)"
+why = "GNOME Shell on Wayland loads extension code only at login, so the dock that apply just installed appears after one re-login."
+why_ru = "GNOME Shell на Wayland загружает код расширений только при входе, поэтому установленный док появится после одного перелогина."
+action = "Save your work, log out (top-right menu, Power Off / Log Out, Log Out) and log in again; then run this command again to confirm."
+action_ru = "Сохрани работу, выйди из сессии (меню справа вверху, Выключить / Выйти, Выйти) и войди снова; потом запусти эту команду ещё раз для проверки."
+check = ["./finish", "check"]
+requires = ["apply"]

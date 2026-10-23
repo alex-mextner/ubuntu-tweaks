@@ -1,0 +1,197 @@
+#!/usr/bin/python3 -B
+"""passwords-app finish step: the iCloud sign-in that only the owner can type (spec, *Finish*).
+
+    finish check     exit 0 once passwords-app is signed in to iCloud (read-only, never starts a sign-in)
+    finish prepare   the machine part: the installed venv must carry the Apple client-identity fix, else it is
+                     reinstalled from the checkout and the daemon restarted
+    finish run       `passwords-app signin`, with the Apple ID prefilled from [modules.passwords-app] apple_id
+
+The probe is one init-only GrandSlam request for an Apple ID that does not exist: with the fix Apple answers
+ec=-20970 ("entered incorrectly"), without it ec=-80045 (the client identity is refused before the account is
+even looked at). No password, no 2FA code and no real account are involved, and nothing is signed in or stored.
+The Apple ID, password, the code and the device passcode are typed by the owner into `passwords-app signin`
+itself; this script never sees them. The Apple ID option is not a secret.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Protocol
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import ModuleError, module_config  # noqa: E402
+
+SIGNED_OUT_STATES = {"signed-out", "signin-required"}
+FIXED_CODE = "-20970"
+REFUSED_CODE = "-80045"
+DEFAULT_CHECKOUT = "~/dev/passwords-app"
+UNIT = "passwords-appd.service"
+PROBE_TIMEOUT = 45
+SETTLE_SECONDS = 4
+
+# Runs inside the installed venv: the same request `passwords-app signin` starts with, for an address nobody owns.
+# It reaches into the client's private `GSAClient._request`, because the public sign-in needs a password.
+PROBE = """
+from srp import _pysrp as srp
+from passwords_app.icloud.auth.anisette import Anisette
+from passwords_app.icloud.auth.device import Device
+from passwords_app.icloud.auth.gsa import GSAClient, GSAError, _S2K_PROTOCOLS, _status
+name = "finish-probe@example.invalid"
+user = srp.User(name, b"", hash_alg=srp.SHA256, ng_type=srp.NG_2048)
+_, a_pub = user.start_authentication()
+try:
+    reply = GSAClient(Device.generate(), Anisette())._request({"A2k": a_pub, "ps": list(_S2K_PROTOCOLS), "u": name, "o": "init"})
+    print("RESULT", _status(reply))
+except GSAError as error:
+    print("ERROR", error)
+"""
+
+
+class Runner(Protocol):
+    def capture(self, argv: Sequence[str], *, timeout: float) -> tuple[int, str]: ...
+
+    def interactive(self, argv: Sequence[str]) -> int: ...
+
+
+class SystemRunner:
+    def capture(self, argv: Sequence[str], *, timeout: float) -> tuple[int, str]:
+        try:
+            done = subprocess.run(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except FileNotFoundError:
+            return 127, f"{argv[0]}: not found"
+        except subprocess.TimeoutExpired:
+            return 124, f"{argv[0]}: no answer within {timeout:.0f}s"
+        return done.returncode, (done.stdout if done.returncode == 0 else done.stdout + done.stderr).strip()
+
+    def interactive(self, argv: Sequence[str]) -> int:
+        try:
+            return subprocess.run(list(argv), check=False).returncode
+        except FileNotFoundError:
+            return 127
+
+
+def data_dir(env: Mapping[str, str], home: Path) -> Path:
+    configured = env.get("XDG_DATA_HOME")
+    return (Path(configured) if configured else home / ".local/share") / "passwords-app"
+
+
+def checkout_dir(options: Mapping[str, object], home: Path) -> Path:
+    text = str(options.get("checkout", DEFAULT_CHECKOUT))
+    return home / text[2:] if text.startswith("~/") else Path(text)
+
+
+def apple_id(options: Mapping[str, object]) -> str | None:
+    value = options.get("apple_id")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or value.startswith("-"):
+        raise ModuleError("[modules.passwords-app] apple_id must be an email address or a phone number")
+    return value.strip()
+
+
+def check(runner: Runner) -> int:
+    code, text = runner.capture(["passwords-app", "status", "--json"], timeout=30)
+    try:
+        state = json.loads(text)["state"]
+    except (ValueError, KeyError, TypeError):
+        print(f"passwords-app status gave no answer ({code}): {text.splitlines()[0] if text else 'no output'}")
+        return 1
+    if not isinstance(state, str) or state in SIGNED_OUT_STATES:
+        print(f"iCloud: {state}")
+        return 1
+    return 0
+
+
+def probe(runner: Runner, venv_python: Path) -> str:
+    """``-20970`` (fix present), ``-80045`` (fix missing) or the first line of whatever else the probe said."""
+    code, text = runner.capture([str(venv_python), "-c", PROBE], timeout=PROBE_TIMEOUT)
+    found = re.search(r"ec=(-?\d+)", text)
+    if found:
+        return found.group(1)
+    return text.splitlines()[-1] if text else f"the probe exited {code} without output"
+
+
+def prepare(
+    runner: Runner, env: Mapping[str, str], home: Path, options: Mapping[str, object], *, sleep=time.sleep
+) -> int:
+    venv = data_dir(env, home) / "venv"
+    python = venv / "bin/python"
+    if not python.exists():
+        print(f"passwords-app is not installed in {venv}: run `ubuntu-tweak apply --commit` first")
+        return 1
+    answer = probe(runner, python)
+    if answer == FIXED_CODE:
+        print(f"the installed passwords-app carries the Apple client fix (probe ec={FIXED_CODE})")
+        return 0
+    if answer != REFUSED_CODE:
+        print(f"the Apple probe gave no usable answer: {answer}")
+        return 1
+    checkout = checkout_dir(options, home)
+    print(f"the installed venv still answers ec={REFUSED_CODE}: reinstalling it from {checkout}")
+    code, text = runner.capture(
+        ["uv", "pip", "install", "-q", "--python", str(python), "--reinstall-package", "passwords-app", str(checkout)],
+        timeout=300,
+    )
+    if code != 0:
+        print(f"reinstall failed ({code}): {text.splitlines()[-1] if text else 'no output'}")
+        return 1
+    code, text = runner.capture(["systemctl", "--user", "restart", UNIT], timeout=60)
+    if code != 0:
+        print(f"could not restart {UNIT} ({code}): {text.splitlines()[-1] if text else 'no output'}")
+        return 1
+    sleep(SETTLE_SECONDS)
+    answer = probe(runner, python)
+    if answer != FIXED_CODE:
+        print(f"after the reinstall the probe still says {answer}: the checkout {checkout} does not carry the fix")
+        return 1
+    print(f"reinstalled; the probe now answers ec={FIXED_CODE}")
+    return 0
+
+
+def run(runner: Runner, options: Mapping[str, object]) -> int:
+    print("Next: Apple ID password, then the code shown on your other Apple device, then its passcode if it asks.")
+    argv = ["passwords-app", "signin"]
+    identity = apple_id(options)
+    if identity is not None:
+        argv += ["--apple-id", identity]
+    return runner.interactive(argv)
+
+
+def main(argv: Sequence[str], env: Mapping[str, str] | None = None, runner: Runner | None = None) -> int:
+    environment = os.environ if env is None else env
+    command = argv[0] if argv else ""
+    if command not in {"check", "prepare", "run"}:
+        print("usage: finish check|prepare|run", file=sys.stderr)
+        return 2
+    try:
+        options = module_config(environment)
+        shell = runner or SystemRunner()
+        if command == "check":
+            return check(shell)
+        if command == "prepare":
+            return prepare(shell, environment, Path(environment.get("HOME", str(Path.home()))), options)
+        return run(shell, options)
+    except ModuleError as error:
+        print(f"finish: {error}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

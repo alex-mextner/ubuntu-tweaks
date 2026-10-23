@@ -7,7 +7,8 @@ PyGObject die with a ``ModuleNotFoundError`` traceback on a machine that lacks `
 the subcommand plus the ``--profile`` / ``--machine`` / ``--only`` / ``--dotfiles-repo`` the user gave);
 ``root_session(args, subcommand, *, skip=None) -> RootSession`` (the one object that asks for root once,
 failing with that command line and the ``skip`` alternative; a seam for tests); ``say(kind, text)`` (one status
-sentence on stdout).
+sentence on stdout); ``apply_command(ctx, *, no_sudo=False) -> list[str]`` (the argv of a child ``ubuntu-tweak apply
+--commit`` with the same profile, machine, ``--only`` and output flags: ``update`` and ``finish`` run it).
 """
 
 from __future__ import annotations
@@ -16,10 +17,15 @@ import argparse
 import importlib
 import importlib.util
 import shlex
+import sys
+from typing import TYPE_CHECKING
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.elevation import RootSession
 from ubuntu_tweaks.process import CommandError
+
+if TYPE_CHECKING:
+    from ubuntu_tweaks.context import Context
 
 GLOBAL_FLAGS = ("profile", "machine", "only", "dotfiles_repo")
 
@@ -54,3 +60,16 @@ def root_session(args: argparse.Namespace, subcommand: str, *, skip: str | None 
 
 def say(kind: str, text: str) -> None:
     print(ui.say(kind, text))
+
+
+def apply_command(ctx: Context, *, no_sudo: bool = False) -> list[str]:
+    command = [sys.executable, str(ctx.repo_root / "bin" / "ubuntu-tweak"), "apply", "--commit"]
+    command += ["--machine", ctx.profile.machine]
+    if ctx.profile.exists:
+        command += ["--profile", str(ctx.profile.root)]
+    if ctx.only:
+        command += ["--only", ",".join(sorted(ctx.only))]
+    if no_sudo:
+        command.append("--no-sudo")
+    command += ui.cli_flags()
+    return command

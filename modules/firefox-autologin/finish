@@ -1,0 +1,24 @@
+#!/bin/sh
+# firefox-autologin finish step: the one prompt in Firefox that only its owner can answer (spec, *Finish*).
+#
+#   finish run    start Firefox through the module and wait until the passwords-app extension is active
+#
+# The module's own `install` does the work and exits 10 ("needs manual") when the extension did not become active in
+# time. For this step that is not a failure of the command: `check` (the module's own check) decides afterwards.
+set -u
+case "${1:-}" in
+  run)
+    echo 'Firefox opens now. When it asks "Allow Firefox to start WebExtension backend?", press Allow.'
+    "$(dirname "$0")/firefox-autologin" install
+    code=$?
+    if [ "$code" -eq 10 ]; then
+      echo "The extension is not active yet: check about:policies and about:addons, then run this step again."
+      exit 0
+    fi
+    exit "$code"
+    ;;
+  *)
+    echo "usage: finish run" >&2
+    exit 2
+    ;;
+esac

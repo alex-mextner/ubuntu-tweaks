@@ -14,7 +14,7 @@ from ubuntu_tweaks.identity import Location
 
 REQUIRED = {"note": ["target", "reason"], "bundle-move": ["bundle", "key"]}  # positionals with no default
 COMMIT_WORD = {"apply": "--commit", "init": "--commit", "update": "--commit", "capture": "--commit"}
-COMMIT_WORD |= {"bundle-move": "--commit", "note": "--commit", "doctor": "--yes"}
+COMMIT_WORD |= {"bundle-move": "--commit", "note": "--commit", "doctor": "--yes", "finish": "--yes"}
 
 
 class DryRunFlagTests(unittest.TestCase):
