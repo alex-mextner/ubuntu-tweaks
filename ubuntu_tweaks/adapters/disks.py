@@ -8,8 +8,7 @@ Assumptions:
   block device ``lsblk --json`` reports with a filesystem, mounted or not, plugged in now. ``disk:loops`` is one item for
   all loop devices (snap images). ``disk:fstab:<mount point or source>`` is an ``/etc/fstab`` line outside the
   ``ubuntu-tweaks disks`` block whose source is not a block device found above (swap files, tmpfs, network mounts); a
-  line that names a found device is folded into that device's ``detail``. Without ``lsblk`` one ``disk:unreadable``
-  item says so.
+  line that names a found device is folded into that device's ``detail``. Without ``lsblk`` there are no items.
 - ``kind`` carries the opinion ``classify`` turns into a reason: ``system`` (mounted at ``/``, ``/boot``, ``/boot/efi``,
   ``/home``, ``/var``, ...), ``loop``, ``swap``, ``pseudo`` (tmpfs, proc, ...), ``efi`` (an EFI System Partition that is
   not the booted one: boot loader files), all ``excluded`` with that reason; ``filesystem`` (a data disk) and ``network``
@@ -220,8 +219,9 @@ def _fstab_kind(fields: Sequence[str]) -> str:
 
 def discover(ctx: Context) -> Iterable[Item]:
     devices = _devices()
-    if devices is None:
-        yield Item(NAME, "disk:unreadable", "disk", "lsblk is not available: block devices were not scanned")
+    if (
+        devices is None
+    ):  # no lsblk (or unreadable output): nothing to scan, like a machine without systemd for ``units``
         return
     lines = _fstab_lines()
     listed: dict[str, int] = {}
@@ -349,7 +349,7 @@ def _declaration(device: Device, name: str, windows: bool) -> str:
 
 
 def capture(ctx: Context, items: Sequence[Item]) -> Iterable[Proposal]:
-    wanted = {item.id: item for item in items if item.kind == "filesystem" and item.id != "disk:unreadable"}
+    wanted = {item.id: item for item in items if item.kind == "filesystem"}
     devices = _devices() or []
     taken = {name for name, _, _ in _declared(ctx)}
     blocks: list[str] = []

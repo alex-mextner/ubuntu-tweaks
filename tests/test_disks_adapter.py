@@ -203,17 +203,15 @@ class DiscoverTests(DiskCase):
         self.assertIn("/etc/fstab line 3", found["disk:uuid:a1b2c3d4-0000-4000-8000-000000000002"].detail)
         self.assertFalse([item for item in found if item.startswith("disk:fstab:")])
 
-    def test_without_lsblk_one_item_says_so_and_nothing_raises(self) -> None:
+    def test_without_lsblk_there_are_no_items_and_nothing_raises(self) -> None:
         self.machine(None)
-        items = list(disks.discover(self.ctx))
-        self.assertEqual([(item.id, item.kind) for item in items], [("disk:unreadable", "disk")])
-        self.assertIn("lsblk", items[0].detail)
+        self.assertEqual(list(disks.discover(self.ctx)), [])
 
-    def test_unparseable_lsblk_output_is_the_same_unreadable_item(self) -> None:
+    def test_unparseable_lsblk_output_is_no_items(self) -> None:
         for output in ("not json", "[]", '{"blockdevices": "x"}', "{}"):
             with self.subTest(output=output):
                 self.machine(output)
-                self.assertEqual([item.id for item in disks.discover(self.ctx)], ["disk:unreadable"])
+                self.assertEqual(list(disks.discover(self.ctx)), [])
 
     def test_a_missing_fstab_is_not_an_error(self) -> None:
         self.machine(lsblk(), fstab=None)
@@ -274,10 +272,6 @@ class ClassifyTests(DiskCase):
             self.classified(Rules((engine,)))["disk:loops"][:2],
             (Coverage.EXCLUDED, "read-only loop images (snap packages)"),
         )
-
-    def test_the_unreadable_item_is_left_to_the_generic_rules(self) -> None:
-        self.machine(None)
-        self.assertEqual(self.classified()["disk:unreadable"][0], Coverage.UNTRACKED)
 
 
 class OwnedTests(DiskCase):
@@ -411,7 +405,7 @@ class CaptureTests(DiskCase):
 
     def test_without_lsblk_nothing_is_proposed(self) -> None:
         self.machine(None)
-        self.assertEqual(list(disks.capture(self.ctx, [Item("disk", "disk:unreadable", "disk")])), [])
+        self.assertEqual(list(disks.capture(self.ctx, [Item("disk", "disk:uuid:x", "filesystem")])), [])
 
 
 class DiscoveryRegistrationTests(unittest.TestCase):
