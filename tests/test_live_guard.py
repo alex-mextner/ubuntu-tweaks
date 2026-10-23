@@ -30,6 +30,9 @@ class LiveGuardTests(unittest.TestCase):
         self.assertEqual(os.environ.get("GSETTINGS_BACKEND"), "memory")
         self.assertIn("Memory", type(Gio.SettingsBackend.get_default()).__name__)
 
+    def test_the_developers_session_bus_is_not_reachable_from_the_test_process(self) -> None:
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", os.environ)
+
     def test_the_state_directory_of_the_test_run_is_temporary(self) -> None:
         state = Path(os.environ["XDG_STATE_HOME"])
         self.assertNotEqual(state, Path.home() / ".local/state")

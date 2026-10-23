@@ -85,10 +85,6 @@ class AutohealModuleTests(unittest.TestCase):
         self.assertIn("--no-sudo", str(manifest.steps[0].args["command"]))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class UserTimerHardeningTests(TempDirCase):
     def test_a_newline_in_the_command_cannot_inject_unit_directives(self) -> None:
         env = StepEnv(Config(), Systemd(), root=self.tmp, home=self.tmp / "home")
@@ -96,3 +92,7 @@ class UserTimerHardeningTests(TempDirCase):
             get_step("user-timer")(env, "autoheal", {"command": "true\nExecStart=/bin/evil"})
         with self.assertRaisesRegex(ConfigError, "control characters"):
             get_step("user-timer")(env, "autoheal", {"command": "true", "calendar": "daily\n[Service]"})
+
+
+if __name__ == "__main__":
+    unittest.main()

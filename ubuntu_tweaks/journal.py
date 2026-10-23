@@ -118,7 +118,7 @@ class RunJournal:
         for action in actions:
             key = action_key(action)
             if key not in self._index:
-                entry = Entry(key, action.kind, _safe(action.describe()))
+                entry = Entry(_safe(key), action.kind, _safe(action.describe()))
                 self._index[key] = entry
                 self._run.entries.append(entry)
         self._write()
@@ -127,7 +127,7 @@ class RunJournal:
         key = action_key(action)
         entry = self._index.get(key)
         if entry is None:
-            entry = Entry(key, action.kind, _safe(action.describe()))
+            entry = Entry(_safe(key), action.kind, _safe(action.describe()))
             self._index[key] = entry
             self._run.entries.append(entry)
         entry.status = status

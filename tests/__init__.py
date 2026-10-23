@@ -44,6 +44,9 @@ if os.environ.get("UBUNTU_TWEAKS_SCRATCH") != "1":
     _STATE_DIR = tempfile.mkdtemp(prefix="ubuntu-tweak-test-state-")
     os.environ["XDG_STATE_HOME"] = _STATE_DIR
     os.environ["GSETTINGS_BACKEND"] = "memory"
+    # the developer's session bus is not reachable from a test process: nothing can talk to the live shell, dconf
+    # service or keyring by accident (the scratch scenarios start their own bus)
+    os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
     atexit.register(shutil.rmtree, _STATE_DIR, ignore_errors=True)
 
 # No test may ask the developer's running GNOME Shell anything (`gnome-extensions list` goes over the live bus).
