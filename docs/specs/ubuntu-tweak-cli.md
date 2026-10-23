@@ -1284,8 +1284,8 @@ matching rule wins**, specific before general) and a unit test fails when this t
 | `online-accounts` | `/org/gnome/online-accounts/**`: tokens and identities | `X` |
 | `sharing` | `/org/gnome/desktop/remote-desktop/**`, file sharing; TLS keys, certificates and credentials are `secret` | `S` (credentials `X`) |
 | `sound` | `/org/gnome/desktop/sound/**`, the startup sound; keys named `*-device*`, `default-sink*`, `default-source*` go to the machine overlay | `S/M` |
-| `power` | `/org/gnome/settings-daemon/plugins/power/**`, `/org/gnome/desktop/session/**`, `last-selected-power-profile`, `show-battery-percentage` | `M` |
-| `displays` | night light and the colour plugin (`/org/gnome/settings-daemon/plugins/color/**`); `night-light-last-coordinates` goes to the machine overlay; `~/.config/monitors.xml` (file adapter, machine overlay) | `S/M/F` |
+| `power` | `/org/gnome/settings-daemon/plugins/power/**`, `/org/gnome/desktop/session/**`, `show-battery-percentage` (`last-selected-power-profile` is `state`, never captured) | `M` |
+| `displays` | night light and the colour plugin (`/org/gnome/settings-daemon/plugins/color/**`); `night-light-last-coordinates` is `state` (derived from the location, rewritten by the daemon, never captured); `~/.config/monitors.xml` (file adapter, machine overlay) | `S/M/F` |
 | `mouse-touchpad` | `/org/gnome/desktop/peripherals/{mouse,touchpad,trackball}/**` | `M` |
 | `keyboard` | input sources, `wm/keybindings`, media-keys (custom bindings), `mutter/keybindings`, `shell/keybindings`, global shortcuts, tiling-assistant `tile-*`/`restore-window`/`center-window`/… bindings, IBus, peripherals keyboard | `S` |
 | `printers` | `/org/gnome/cups/**`: queues are machine and network specific | `X` |
@@ -1312,7 +1312,7 @@ Scan, Logs) belong to `apps`, so `unmapped` only lists schemas no rule knows (ti
 - The machine key is the hostname; `machines/<machine>/` is the overlay described above.
 - Default `machine` rules ship with the engine (`ubuntu_tweaks/capture/defaults.toml`): power
   plugin keys including `battery-*`, `peripherals/touchpad`, `peripherals/mouse`,
-  `night-light-last-coordinates`, `last-selected-power-profile`, sound device keys, absolute
+  sound device keys, absolute
   filesystem paths outside `/usr/share` (a string leaf of the value that starts with a real
   filesystem root such as `/home` or `/opt`, or a `file:///` URI to one; a dconf object path
   like `/org/gnome/.../custom0/` is not a file),
@@ -1379,8 +1379,12 @@ schemas. Then, in this order:
    only when `$XDG_DATA_HOME/flatpak` exists, with flatpak's cache redirected to a temporary
    directory, because a plain `flatpak list` creates `~/.local/share/flatpak`) and **System** (a `system.toml` proposal:
    timezone into the machine overlay, locale and console keyboard shared).
-4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (window
-   geometry, recents, app-picker-layout, `last-*` timestamps), `auto` (keys the system or an app
+4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (volatile runtime keys an app or
+   the daemon rewrites by itself, never captured: window geometry `window-*`, recents, app-picker-layout,
+   `last-*` / `*-last-*` / `last-selected-*` markers, `prompt-check`, timestamps, and
+   `night-light-last-coordinates`, which is derived from the location and would put a home position into the
+   profile; the `[state_keep]` globs exempt real preferences, a profile `[capture] include` or an explicit
+   `machine` match lifts a key back), `auto` (keys the system or an app
    registered by itself: notification app ids and lists, Ptyxis profile uuids, Clocks UI state,
    the Clocks mirror in `world-clocks`, portal global shortcuts, the input-source MRU order, the
    Shell's seeded app-grid folders, an extension's version marker; the section lists each key with
