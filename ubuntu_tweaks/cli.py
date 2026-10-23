@@ -14,10 +14,13 @@ here, so a command must not define options of those names.
 
 Public API:
 
-- ``main(argv=None) -> int``: parse, build the ``Context``, run the handler and return its exit
-  code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; a missing
+- ``main(argv=None) -> int``: ``_run`` inside the session log (``sessionlog.run_logged``: every run of every
+  command is logged, usage errors and ``--help`` included): parse, build the ``Context``, run the handler and
+  return its exit code. ``UbuntuTweakError`` becomes its ``exit_code`` with the message on stderr; a missing
   ``gi`` module becomes a one-line "sudo apt install python3-gi" message with exit 1; any other
-  exception prints a traceback and returns ``ExitCode.INTERNAL``.
+  exception prints a traceback and returns ``ExitCode.INTERNAL``. ``--dry-run`` (a global flag) turns the
+  command into its preview, ends the run with ``dry run: nothing was changed`` on stderr and is a usage error
+  (exit 2) together with ``--commit`` / ``--yes``.
 - ``build_parser() -> argparse.ArgumentParser`` and ``discover_commands() -> list[ModuleType]``.
 """
 
@@ -29,12 +32,15 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
-from ubuntu_tweaks import commands, identity, ui
+from ubuntu_tweaks import commands, identity, sessionlog, ui
+from ubuntu_tweaks.checkout import stable_checkout, warning_line
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.discovery import discover
-from ubuntu_tweaks.errors import ExitCode, UbuntuTweakError
+from ubuntu_tweaks.errors import ConfigError, ExitCode, UbuntuTweakError
 from ubuntu_tweaks.identity import REPO_ENV
 from ubuntu_tweaks.profile import PROFILE_ENV, Profile
+
+DRY_RUN_NOTE = "dry run: nothing was changed"
 
 
 def discover_commands() -> list[ModuleType]:
@@ -65,6 +71,12 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, default: object) -> No
         metavar="OWNER/NAME",
         default=default,
         help=f"your dotfiles repository (default: ${REPO_ENV}, else found through gh: .files, dotfiles, .dotfiles, dot-files)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=default,
+        help="preview only, exactly like the run without --commit: change nothing, ask for no sudo (excludes --commit)",
     )
     parser.add_argument(
         "--refresh",
@@ -118,25 +130,53 @@ def _resolve_profile(args: argparse.Namespace) -> Profile:
     return Profile.resolve(
         args.profile,
         args.machine,
-        locate=lambda: identity.locate(home=Path.home(), env=os.environ, refresh=refresh, repo_override=flag),
+        locate=lambda: identity.locate(
+            home=Path.home(), env=os.environ, refresh=refresh, repo_override=flag, persist=not args.dry_run
+        ),
     )
 
 
+def _refuse_dry_run_commit(args: argparse.Namespace) -> None:
+    """``--dry-run`` is the explicit preview, so it cannot be combined with the word that commits (``--commit``,
+    ``doctor``'s ``--yes``): that is a usage error, not a silent pick of one of them."""
+    if not args.dry_run:
+        return
+    for word in ("commit", "yes"):
+        if getattr(args, word, False):
+            raise ConfigError(f"--dry-run and --{word} exclude each other: a dry run never changes anything")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    return sessionlog.run_logged(arguments, lambda: _run(arguments))
+
+
+def _run(argv: Sequence[str]) -> int:
     try:
         args = build_parser().parse_args(argv)
+        sessionlog.set_command(args.command)
         ui.configure(color=args.color or "auto", plain=bool(args.plain), lang=args.lang)
+        _refuse_dry_run_commit(args)
+        checkout = stable_checkout(REPO_ROOT, os.environ)
+        if not checkout.is_stable:
+            print(warning_line(checkout.root, checkout.running), file=sys.stderr)
+        if getattr(args, "plans_links", False):
+            checkout.require_usable(args.command)
         context = Context(
-            repo_root=REPO_ROOT,
+            repo_root=checkout.root if checkout.usable else checkout.running,
             profile=_resolve_profile(args),
             only=_only(args.only),
+            running_root=checkout.running,
         )
+        sessionlog.note("profile", str(context.profile.root))
+        sessionlog.note("machine", context.profile.machine)
         result = args.handler(context, args)
     except UbuntuTweakError as error:
-        print(ui.format_error(str(error), int(error.exit_code), stream=sys.stderr), file=sys.stderr)
+        print(ui.format_error(str(error), int(error.exit_code), fix=error.fix, stream=sys.stderr), file=sys.stderr)
         return int(error.exit_code)
     except ModuleNotFoundError as error:
         if error.name != "gi":
+            sessionlog.note("exception", type(error).__name__)
             traceback.print_exc()
             return int(ExitCode.INTERNAL)
         message = (
@@ -148,7 +188,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return int(ExitCode.INTERNAL)
-    except Exception:
+    except Exception as error:
+        sessionlog.note("exception", type(error).__name__)
         traceback.print_exc()
         return int(ExitCode.INTERNAL)
+    if args.dry_run:
+        print(DRY_RUN_NOTE, file=sys.stderr)
     return int(result or ExitCode.OK)

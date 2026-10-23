@@ -6,8 +6,9 @@ With ``--commit``: ``git pull --ff-only`` of the umbrella checkout, ``git submod
 --recursive`` (the only command that moves a submodule that is checked out at another commit),
 then ``apply --commit`` in a **fresh interpreter** (the pull may have changed this very package),
 carrying over ``--machine``, ``--profile`` and ``--only``; the re-login hint is printed when the pull
-or the submodule update changed anything. Without ``--commit`` it prints the two git commands and
-the ``apply`` preview of the *current* checkout (what the plan will be after the pull is not
+or the submodule update changed anything. The child ``apply --commit`` obtains root itself, once, before its
+first root action (``elevation``); its exit code, 6 included, is ``update``'s. Without ``--commit`` it prints
+the two git commands it would run and the ``apply`` preview of the *current* checkout (what the plan will be after the pull is not
 knowable before it). A tree that is not a git checkout (a tarball or a copied directory: no ``.git``)
 has nothing to pull: the git steps are skipped with a message and ``apply`` still runs, so ``update``
 never needs ``git`` there. The release channel and schedule are ticket #19, not handled here.
@@ -16,13 +17,12 @@ never needs ``git`` there. The release channel and schedule are ticket #19, not 
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.extension import RELOGIN_HINT
-from ubuntu_tweaks.process import run as run_command
+from ubuntu_tweaks.process import run as run_command, run_streamed
 
 PULL = ("git", "pull", "--ff-only")
 SUBMODULES = ("git", "submodule", "update", "--init", "--recursive")
@@ -34,7 +34,7 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     )
     parser.add_argument("--commit", action="store_true", help="pull and apply (default: preview only)")
     parser.add_argument("--no-sudo", action="store_true", help="skip actions that need root and say so")
-    parser.set_defaults(handler=run)
+    parser.set_defaults(handler=run, plans_links=True)  # links into the stable checkout (spec *Checkout*)
 
 
 def _is_git_checkout(ctx: Context) -> bool:
@@ -90,7 +90,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
     if not _is_git_checkout(ctx):
         _note(f"{ctx.repo_root} is not a git checkout: skipping the pull and the submodule update.", kind="manual")
-        return subprocess.run(_apply_command(ctx, no_sudo=args.no_sudo), check=False).returncode
+        return run_streamed(_apply_command(ctx, no_sudo=args.no_sudo))
     before = _code_state(ctx)
     if ui.rich():
         _note(f"Step 1/2: {' '.join(PULL)}; {' '.join(SUBMODULES)}")
@@ -98,7 +98,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     run_command(SUBMODULES, cwd=ctx.repo_root)
     if ui.rich():
         _note("Step 2/2: apply --commit with the updated code")
-    code = subprocess.run(_apply_command(ctx, no_sudo=args.no_sudo), check=False).returncode
+    code = run_streamed(_apply_command(ctx, no_sudo=args.no_sudo))
     if _code_state(ctx) != before:
         _note(RELOGIN_HINT, kind="manual")
     return code

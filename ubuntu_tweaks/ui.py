@@ -57,8 +57,17 @@ def configure(*, color: str = "auto", plain: bool = False, lang: str | None = No
 
 
 def cli_flags() -> list[str]:
-    """The global flags that reproduce this configuration, for a child ``ubuntu-tweak`` process."""
-    flags = ["--color", _config.color] if _config.color != "auto" else []
+    """The global flags that reproduce this configuration, for a child ``ubuntu-tweak`` process.
+
+    A child's stdout is a pipe (``process.run_streamed`` copies it to ours), so ``auto`` would make it print the
+    compact plain text; when this process shows the explained, colored layout the child is told ``--color always``.
+    """
+    if _config.color != "auto":
+        flags = ["--color", _config.color]
+    elif rich() and color_enabled():
+        flags = ["--color", "always"]
+    else:
+        flags = []
     if _config.plain:
         flags.append("--plain")
     if _config.lang:
@@ -348,6 +357,8 @@ _KIND_WHY: dict[str, dict[str, str]] = {
         "link-replace": "something else is in the way: it is backed up first, then replaced by the link",
         "cli-link": "puts `ubuntu-tweak` on your PATH through ~/.local/bin",
         "cli-link-replace": "something else is at ~/.local/bin/ubuntu-tweak: backed up, then replaced",
+        "dotfiles-link": "a link from $HOME to a file of your dotfiles repository (its .zprofile, .zshrc, .profile)",
+        "dotfiles-link-replace": "another file is in $HOME: it is backed up, then replaced by a link to the dotfiles repository's file",
         "enable": "turns the extension on in GNOME Shell (loads after the next login)",
         "disable": "turns off a conflicting or retired extension",
         "set-key": "the live value differs from the one your modules/profile declare",
@@ -372,6 +383,8 @@ _KIND_WHY: dict[str, dict[str, str]] = {
         "link-replace": "место занято чем-то другим: сначала бэкап, затем замена ссылкой",
         "cli-link": "кладёт `ubuntu-tweak` в PATH через ~/.local/bin",
         "cli-link-replace": "по пути ~/.local/bin/ubuntu-tweak лежит другое: бэкап и замена",
+        "dotfiles-link": "ссылка из $HOME на файл вашего dotfiles-репозитория (его .zprofile, .zshrc, .profile)",
+        "dotfiles-link-replace": "в $HOME лежит другой файл: бэкап, затем замена ссылкой на файл dotfiles-репозитория",
         "enable": "включает расширение в GNOME Shell (загрузится после перелогина)",
         "disable": "выключает конфликтующее или устаревшее расширение",
         "set-key": "текущее значение отличается от заданного в модулях/профиле",
@@ -416,7 +429,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "exit.title": "Exit codes",
         "exit.0": "0  in sync (extras alone never fail)",
         "exit.3": "3  drift: something is missing or modified",
-        "exit.other": "1 internal error, 2 invalid config, 4 unknown module, 5 refused",
+        "exit.other": "1 internal error, 2 invalid config, 4 unknown module, 5 refused, 6 root not obtainable",
         "legend.title": "Legend",
         "legend.ok": "satisfied, nothing to do",
         "legend.need": "needs action: `apply --commit` does it",
@@ -446,6 +459,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "init.preview_footer": "Nothing changed. This was a preview; run `ubuntu-tweak init --commit` to set this machine up.",
         "update.preview_footer": "Nothing changed. This was a preview; run `ubuntu-tweak update --commit` to pull and apply.",
         "warnings": "Warnings",
+        "staged": "Staged until the extension code is installed (not an error, nothing to do: the same `apply --commit` applies them)",
     },
     "ru": {
         "header.machine": "машина",
@@ -483,7 +497,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "exit.title": "Коды выхода",
         "exit.0": "0  всё синхронно (лишнее само по себе не ошибка)",
         "exit.3": "3  расхождение: что-то отсутствует или изменено",
-        "exit.other": "1 внутренняя ошибка, 2 неверная конфигурация, 4 неизвестный модуль, 5 отказ",
+        "exit.other": "1 внутренняя ошибка, 2 неверная конфигурация, 4 неизвестный модуль, 5 отказ, 6 нет root",
         "legend.title": "Обозначения",
         "legend.ok": "выполнено, делать нечего",
         "legend.need": "нужно действие: его сделает `apply --commit`",
@@ -513,6 +527,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "init.preview_footer": "Ничего не изменено. Это предпросмотр; `ubuntu-tweak init --commit` настроит эту машину.",
         "update.preview_footer": "Ничего не изменено. Это предпросмотр; `ubuntu-tweak update --commit` обновит код и применит план.",
         "warnings": "Предупреждения",
+        "staged": "Отложено до установки кода расширения (не ошибка, ничего делать не нужно: тот же `apply --commit` применит)",
     },
 }
 

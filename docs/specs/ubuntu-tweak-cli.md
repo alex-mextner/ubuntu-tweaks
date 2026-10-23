@@ -74,6 +74,23 @@ as any behavior change.
     Например status сейчас очень непонятный» — the generic-OSS half (no hardcoded identity, dotfiles repo found
     through gh, profile-supplied modules) is in *Engine and profile*, *Profile discovery* and *Profile modules*;
     the output half is in *Output*: every interactive output is colored and explained, `status` first.
+15. «ubuntu-tweaks должен уметь запрашивать sudo и чинить всё что не так» — the engine obtains root itself,
+    once and up front (*Elevation*), and repairs every drift in one command (request 18).
+16. «Все что видит пользователь в cli писалось в логи, чтобы ты мог анализировать» — every command's complete
+    user-visible session (stdout and stderr, prompts and answers included) is also written to a log file an
+    agent can read afterwards; see *Session log*.
+17. Not a quote: the observed problem. The CLI ran from a temporary git worktree through the `~/.local/bin`
+    symlink, and the plan linked the GNOME extensions into that worktree, so the links dangle once the worktree
+    is removed. Persistent links must target a stable checkout (*Checkout*).
+18. «Зачем fix? Разве не init/apply должен быть только? Как в rig» — there is no `fix` command: `apply --commit`
+    and `init --commit` ask for sudo once, install the missing apt packages (what `doctor --yes` does) and apply
+    the plan in the same run, with no question in between (*Repair in one command*, *Elevation*). Where `rig`
+    differs and no decision of the user is recorded, the difference is listed under *Decisions*.
+19. «И --dry-run добавь везде» — every command accepts `--dry-run` (*Dry run*).
+20. «Почему zprofile не из .files» — the dotfiles repository's own shell rc files (`.zprofile`, `.zshrc`,
+    `.profile`) are what the machine gets; the generic `shell-rc` step only fills in what neither the profile nor
+    the repository has, and the git identity is taken from the profile, the machine, the repository's `.gitconfig`
+    or `gh` instead of being left unset (*rc files from the repository*, *git and gh*).
 
 ## Requirements
 
@@ -100,7 +117,7 @@ no default. `tests/test_no_identity.py` fails on a new occurrence of the author'
 `tests/identity_allowlist.txt` lists each allowed path and why (the project's own repository URL, the upstream
 URL of a bundled extension, the tool references of the author-published modules). The private profile never
 contains engine code.
-Whatever else a dotfiles repository holds (zsh, zplug, brew) is not touched by this system; `ubuntu/` is
+The shell rc files at the root of a dotfiles repository (`.zprofile`, `.zshrc`, `.profile`) are linked into `$HOME` by the plan (*rc files from the repository*); whatever else it holds (zplug, brew, aliases) is not touched by this system; `ubuntu/` is
 self-contained. Profile location: `--profile DIR` > `$UBUNTU_TWEAK_PROFILE` > the profile found by
 *Profile discovery*. An explicit location that does not exist is invalid config (exit 2); no discovered
 profile means "no profile" and only module defaults apply, with the header saying what was looked for.
@@ -152,12 +169,12 @@ Covered by `tests/test_launcher.py`.
 
 | Command | What it does |
 |---|---|
-| `init [--commit] [--yes] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs missing apt packages after a confirmation, or at once with `--yes`; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it. `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
+| `init [--commit] [--no-sudo]` | Fresh system. Runs `doctor` (read-only without `--commit`; with `--commit` it installs the missing apt packages as part of the run, with no question: `--commit` is the consent, the preview names the packages; `--no-sudo` skips that install and goes on), then plans `git submodule update --init --recursive` and a symlink of the CLI into `~/.local/bin` (kinds `cli-link` / `cli-link-replace`: not extension code, so no re-login hint), then the `apply` plan; without `--commit` it only prints all of that, with `--commit` it executes it (*Repair in one command*). `--only` limits it to the named modules (no CLI link). A missing default profile directory is not an error: `init` says which dotfiles repository gh found (or what was looked for, or `needs manual: ... gh auth login`), the `dotfiles` module clones it with `--commit` and the same run applies it (*Profile discovery*); without one the plan covers the modules only. Re-running is safe. |
 | `apply [--commit] [--no-sudo]` | Prints the plan: every action needed to make the system match modules + profile, the `N changed` count after `--commit`, and the re-login hint. Without `--commit` it changes nothing and says so. In a terminal: badges, `[sudo]` marks, a reason per action, numbered progress and a summary (*Output*). |
-| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
+| `apply --commit` | Executes the plan. Idempotent: a second run reports `0 changed`. When the plan holds root actions (and not `--no-sudo`), root is obtained once before the first of them runs (*Elevation*; exit 6 when it cannot be). When the plan installs code that adds new schemas (submodule init, schema compile, extension link), the plan is rebuilt once the earlier actions ran, so settings of a fresh extension are applied in the same invocation (at most three passes); the preview says so. |
 | `status [--explain\|-v] [--json]` | Drift both ways (see *Drift*, *Output*), grouped as Missing / Modified / Extra / Manual, with a verdict line, a definition of each group and the next command in a terminal; compact text when piped; `--json` for scripts. Exit 3 when anything declared is Missing or Modified; extras and manual items alone exit 0. |
 | `update [--commit] [--no-sudo]` | `git pull --ff-only` of the umbrella, `git submodule update --init --recursive`, then `apply`. Without `--commit` it prints the two git commands it would run and the `apply` preview of the current checkout. Channel and schedule come from #19. |
-| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install`. |
+| `doctor [--yes]` | Checks `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and every enabled module's `[deps] apt`. A tool that an enabled module installs itself (`[install] apt`, e.g. `git` by `base-tools`) is reported `planned`, not `MISSING` (*Init pipeline*); `init --no-sudo` keeps them hard because its root actions are skipped. Exit 3 when something is missing; `--yes` installs the missing apt packages with `sudo apt-get install` (root is obtained first, *Elevation*). |
 | `list` | Modules with kind, enabled state and source, from the manifests and the merged config. Read-only. |
 | `machine` | Read-only: detected machine name, whether its overlay exists, and for each module setting, settings bundle and linked file whether it comes from the shared profile or the machine overlay. |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | Inventory of the live system, printed as the exact diff the profile would receive, SUMMARY block first (see *capture*). `--dry-run` is the explicit no-write mode (excludes `--commit`); `--summary` prints only the summary. |
@@ -168,16 +185,126 @@ Covered by `tests/test_launcher.py`.
 
 Global flags, accepted before or after the command: `--profile DIR`, `--machine NAME`,
 `--only <name,…>` (modules for `apply`/`status`, panels for `capture`), and the output flags
-`--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*).
+`--color auto|always|never`, `--plain`, `--lang en|ru` (see *Output*), and `--dry-run` (see *Dry run*).
 
 Exit codes: 0 ok, 1 internal error, 2 invalid config, 3 drift, 4 unknown module, 5 refused
-(secret finding or unsafe path). The constants live in one place,
+(secret finding or unsafe path), 6 root needed but not obtainable (*Elevation*). The constants live in one place,
 `ubuntu_tweaks/errors.py`, and top-level errors map to them. A command-line usage error
 (unknown command or flag) is argparse's own exit 2. A name in `--only` that no module
 declares is exit 4.
 
 After any action that adds or changes extension code, the CLI says that a re-login is
 needed: Shell on Wayland loads extension code only at login.
+
+### Checkout
+
+Request 17. The engine has one persistent location, **the stable checkout**: the tree the user keeps and that
+`update` pulls in. Everything persistent points into it (module directories, submodules, extension links and
+the schemas compiled in them, the `~/.local/bin/ubuntu-tweak` link, `engine_version`), never into a temporary
+worktree that may be removed. `ubuntu_tweaks/checkout.py` resolves it, in order:
+
+1. `$UBUNTU_TWEAKS_DIR` when set and non-empty (the name `scripts/bootstrap.sh` already uses for its clone
+   directory; there is no second variable). `~` is expanded; a path that is not a directory is `ConfigError`
+   (exit 2).
+2. The main working tree of the git repository the running code belongs to: the parent of
+   `git rev-parse --git-common-dir`, so a linked worktree (`<main>/.worktrees/...`, `~/.omp/wt/...`) resolves to
+   the tree it was added from. Only when the running directory is that repository's top level and the common
+   directory is a `.git` directory. This needs git 2.31+ (`--path-format=absolute`); with an older git the rule
+   does not apply and rule 3 takes over.
+3. The running checkout itself: not a git checkout, git unavailable, or a layout not understood above.
+
+`Context.repo_root` is the stable checkout (every planner reads and links through it); `Context.running_root`
+is the checkout whose code runs, informational only. When they differ `cli.main` prints one line to stderr
+and the interactive plan header repeats it:
+
+```
+warning: running from <path>, a git worktree; links, submodules and extension code target the stable checkout <stable> (set UBUNTU_TWEAKS_DIR to change)
+```
+
+(`a copy` instead of `a git worktree` when the running directory is not a worktree.) A stable checkout is
+**usable** when it has a `modules/` directory and an `ubuntu_tweaks/` package. A command that plans links,
+submodule init, schema compiles or extension code declares it with `parser.set_defaults(plans_links=True)`
+(`apply`, `init`, `update`; `cli.py` never names them); when the stable checkout is not usable such a command
+ends with exit 2 naming the path, what is missing and `UBUNTU_TWEAKS_DIR=<checkout> ubuntu-tweak <command>`, with
+or without `--commit` (the preview must not describe a plan against the wrong tree). Read-only commands
+(`status`, `list`, `machine`, `show`, `bundles`, `capture`, `note`, `bundle-move`, `doctor`) keep working from the
+running checkout (their `repo_root` is the running tree when the stable one is unusable) and print only the warning.
+Covered by `tests/test_checkout.py`, which builds temporary git repositories with linked worktrees; the suite's
+`tests/__init__.py` sets `UBUNTU_TWEAKS_DIR` to the checkout under test so that `cli.main` tests never resolve to
+a developer's main checkout.
+
+### Elevation
+
+Request 15. Root actions (`[sudo]` in the plan, the apt install of `doctor --yes`) used to call `sudo` one at a
+time, so the password prompt could land between two half-applied steps, and a run with no terminal ended in sudo's
+raw message. `ubuntu_tweaks/elevation.py` is the one place that obtains root: `RootSession.require(count, kinds)`
+runs the strategy below once per run (later calls are no-ops) and, for the duration of the run, makes
+`process.elevate()` prefix root commands the way the strategy found to work.
+
+- **When it asks.** `apply --commit`, `init --commit`, `update --commit` (through its `apply --commit` child),
+  `doctor --yes`: only when the plan holds an unsatisfied root action (or there is an apt package to
+  install) and `--no-sudo` is absent; after the preview is printed and before the first action of the plan runs.
+  When a rebuilt plan (a profile that was just cloned, a staged pass) holds root actions the first one did not, the
+  call is repeated and acquires then, still before those root actions run (but after the steps that need no root
+  already ran: a failure then says so instead of "Nothing was changed"). A preview, `status`, `list` and every
+  `--no-sudo` run never ask and never look at sudo.
+- **Strategy**, the first row that applies wins:
+
+  | # | State | What happens |
+  |---|---|---|
+  | 1 | the process is root (euid 0) | nothing to do |
+  | 2 | `NoNewPrivs: 1` in `/proc/self/status` | `RootUnavailable` (`no-new-privs`): setuid helpers are neutered, so sudo and pkexec cannot work from here, NOPASSWD or not (a sandbox, a container, a restricted agent shell) |
+  | 3 | neither `sudo` nor `pkexec` exists | `RootUnavailable` (`no-tool`) |
+  | 4 | `sudo -n true` succeeds (NOPASSWD, or a ticket still valid) | go on, no prompt; the refresh thread below also runs, so a ticket about to expire cannot lapse mid-run |
+  | 5 | a controlling terminal (`/dev/tty` opens) and `sudo` | one line says why (how many root actions, which kinds), then `sudo -v` once with its own password prompt; the refresh thread runs `sudo -n -v` every 60 s until the run ends, so the password is asked **once** however long the run is (a hung refresh never holds the exit for more than a second) |
+  | 6 | `SUDO_ASKPASS` is set and `sudo` exists | `sudo -A -v` once; root commands run as `sudo -A --` (also when `sudo -n true` already works and there is no terminal, so a ticket that lapses is asked for again through it) |
+  | 7 | `pkexec` exists and there is a graphical session (`DISPLAY` or `WAYLAND_DISPLAY`) or a terminal (pkexec starts its own text agent there) | `pkexec true` once to prove it works; root commands run through `pkexec` (polkit keeps no ticket we could refresh, so it may ask again per action; a dismissed dialog then fails that action, not exit 6) |
+  | 8 | none of the above | `RootUnavailable` (`no-prompt`): nothing here can ask for a password; the message lists what is missing (sudo not passwordless, no terminal, no `SUDO_ASKPASS`, pkexec absent or without a terminal or session) |
+
+  sudo or pkexec rejecting the request (wrong password after sudo's three tries, sudo's own prompt timeout, a user
+  who may not use sudo: sudo answers 1 for all of them) is `RootUnavailable` (`rejected`). There is no retry loop:
+  the run stops before the first root action.
+- **The error.** `RootUnavailable` is an `UbuntuTweakError` with exit code **6** (`ExitCode.NO_ROOT`), no
+  traceback. Its message names the cause and ends with the exact command to run from a normal terminal: the
+  command that was run, with the `--profile` / `--machine` / `--only` / `--dotfiles-repo` the user gave (e.g.
+  `ubuntu-tweak apply --commit`, `ubuntu-tweak apply --commit --only eng`); and, where skipping root is meaningful, the
+  alternative `... --no-sudo` (root actions are skipped and listed; `doctor --yes` has none). In a terminal the
+  `fix:` line repeats the command. `ExitCode.NO_ROOT` is also what `update --commit` returns when its `apply`
+  child fails this way.
+- **Tests** use a `Host` value (euid, controlling terminal, `SUDO_ASKPASS`, display, `NoNewPrivs`, the tools on
+  `PATH`; `Host.detect()` reads the real ones) and `FakeProcess`, so no test needs real sudo.
+
+### Repair in one command
+
+Request 18. There is no `fix` command: `apply --commit` and `init --commit` are the repair, as in `rig`. Steps of
+one `--commit` run, in order, with one `RootSession` for the whole run:
+
+1. **Requirements** (what `doctor` checks: `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas`, the enabled
+   modules' `[deps] apt`): the ones missing that no module installs itself are installed with
+   `apt-get install -y` after root was obtained once. No question is asked: `--commit` is the consent and the
+   preview already said `apply --commit would first install: sudo apt-get install -y <packages>`. Still missing
+   afterwards ends the run with exit 3. `--no-sudo` skips the install, says so and goes on when the plan can still
+   be built (it cannot without `python3-gi`: exit 3).
+2. The plan runs as before (*Plan and actions*): root is already held, so the plan's own `[sudo]` actions never
+   ask again; rebuilt plans (a profile cloned by this run, extension code that adds schemas) run in the same call.
+3. The run ends with `N changed`, the re-login hint and the manual steps with their reasons; `status` afterwards
+   is the check (exit 0 when nothing declared is left).
+
+Without `--commit` (or with `--dry-run`) nothing is installed or applied and no sudo is asked; the preview lists
+the apt packages the commit would install first. A run that cannot get root stops before the first root action with
+exit 6 and the command to run from a normal terminal (*Elevation*). Idempotent: a second run reports `0 changed`.
+
+### Dry run
+
+Request 19. Every command accepts `--dry-run`, before or after the command name. For a command that can change
+something (`apply`, `init`, `update`, `doctor`, `capture`, `bundle-move`, `note`) it is the explicit spelling of the
+default preview: the same output and the same exit code as the run without `--commit` / `--yes`, one extra line
+`dry run: nothing was changed` on stderr, no sudo, no write anywhere except the session log (*Session log*), no
+question. It excludes the command's commit word (`--commit`, `--yes` of `doctor`): both together are a usage
+error, exit 2 (`ConfigError`) with the message `--dry-run and --commit exclude each other`. A read-only command
+(`status`, `list`, `machine`, `bundles`, `show`) accepts it as a no-op with the same stderr line, so a script can
+pass `--dry-run` to every command it runs. `cli.py` resolves it once for all commands: the flag is a global flag
+and a command that has a commit word is declared by its own `--commit` / `--yes` argument.
 
 ### Modules
 
@@ -298,13 +425,14 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 1 | base tools + `zsh` installed **and** set as the login shell, first | `base-tools` (10), `zsh` (11) |
 | 2 | clipboard tools (`wl-clipboard`, `xclip`, `xsel`) | `clipboard` (20) |
 | 3 | `git` + `gh` installed and configured | `git-gh` (30) |
+| 3b | your dotfiles repository (found through gh) cloned with the profile in it, its shell rc files linked (`dotfiles` is on by default and a no-op when there is none), then the generic rc files only for what neither has | `dotfiles` (35), `shell-rc` (36) |
 | 4 | Homebrew for Linux and its follow-up actions | `brew` (40) |
 | 5 | ssh server | `ssh-server` (50) |
 | 6 | passwords-app: install, enable unit, native host, polkit action | `passwords-app` (60), `passwords-app-polkit` (61) |
 | 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
-| 10 | rig (opt-in: + tmux, omp, `ctmux`) and your dotfiles repository (found through gh) cloned, with the profile in it; `dotfiles` is on by default and a no-op when there is none | `rig` (100), `dotfiles` (110) |
+| 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
 `ctmux` is not a module: it is a first-class rig tool (`tools.items.ctmux`), installed by `rig activate`
 inside step 10.
@@ -322,6 +450,8 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `zsh` | 11 | `base` | on |
 | `clipboard` | 20 | `base` | on |
 | `git-gh` | 30 | `base` | on |
+| `dotfiles` | 35 | `base` (so the profile arrives before the shell and brew steps; it was 110) | on |
+| `shell-rc` | 36 | `base` | on |
 | `brew` | 40 | `base` | on |
 | `ssh-server` | 50 | `system` | on |
 | `passwords-app` | 60 | `system` | on |
@@ -332,7 +462,6 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
 | `rig` | 100 | `system` | off |
-| `dotfiles` | 110 | `system` | on |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
 
@@ -446,7 +575,8 @@ Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
 |---|---|
 | `base-tools` | apt: `curl wget ca-certificates git gnupg openssh-client zsh build-essential procps file zip unzip 7zip xz-utils bzip2 jq libsecret-tools` (verified with `apt-cache policy` on Ubuntu 26.04: all exist; `p7zip-full` does not, `7zip` replaces it). `build-essential procps file curl git` are Homebrew's prerequisites; the archivers answer "zip is missing" on a stock install; `libsecret-tools` (`secret-tool`) is for the Secret Service scripts of the passwords-app and Firefox modules. |
 | `clipboard` | apt: `wl-clipboard xclip xsel`: what `gh` looks for when it copies a one-time code (`! Failed to copy one-time code to clipboard: No clipboard utilities available`). |
-| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`); step `shell-rc`: `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone) **and not linked by the profile** (see *rc files* below); the mac-era dotfiles at the root of `.files` are not touched. |
+| `zsh` | apt `zsh` (always the apt build: `chsh` needs a shell listed in `/etc/shells`, so a brew zsh on `PATH` does not replace it); step `login-shell` (`chsh -s /usr/bin/zsh <user>` through sudo; satisfied when the passwd shell is named `zsh`, a brew zsh included, read with `getent passwd <user>`; a manual step when `/usr/bin/zsh` is not there, e.g. under `--no-sudo`). |
+| `shell-rc` | step `shell-rc` (own module since request 20, order 36, right after `dotfiles`): `~/.zprofile` and `~/.zshrc` that put brew's `shellenv` and `~/.local/bin` on `PATH`, **only while absent** (an existing file is never read, replaced or appended; `O_EXCL`; one that appears between preview and run is left alone) **and not provided** by the profile's `files/` or by the dotfiles repository (see *rc files* below, *rc files from the repository*): it is the pure fallback. |
 | `git-gh` | apt `git gh` (`gh` 2.46.0 is in the 26.04 `universe` archive, decided with `apt-cache policy gh`); steps `git-identity`, `gh-login`, `git-credential-helper`. |
 | `brew` | steps `brew-prefix` (root) and `brew-install`; posts `shellenv` (appends a guarded `[ -x brew ] && eval "$(brew shellenv)"` to `~/.bashrc` unless `~/.bashrc`, `~/.profile` or `~/.bash_profile` already has it, or the profile links one of them), `tools` (`brew install uv oven-sh/bun/bun` unless `uv` and `bun` are already on `PATH`: what the passwords-app and Firefox modules run on) and `formulae` (`brew install` of `packages.toml` `brew`). A post waits for the module's install (`after` defaults to `install`) and does not run (it is a manual step) while the actions it waits for are unsatisfied, e.g. `shellenv` without a brew install under `--no-sudo`. |
 
@@ -460,8 +590,18 @@ token_ref = "example/gh-token"         # optional: the keychain item that holds 
 host = "github.com"                    # optional
 ```
 
-`git-identity` runs `git config --global user.name` / `user.email` only for the keys set; without `[git]`
-nothing is planned and the plan prints a warning. `gh-login` takes the token **only** from the keychain
+`git-identity` sets `git config --global user.name` / `user.email`. Per key, the first source that knows it wins
+(request 20: an identity that is knowable is never left unset, and nothing is hardcoded in the engine):
+
+1. `[git] name` / `email` of the profile (enforced: drift when the global value differs);
+2. the value `git config --global` already holds: left as it is, nothing planned, no warning;
+3. `user.name` / `user.email` of `<dotfiles checkout>/.gitconfig` (read with `git config -f`; the file is not linked);
+4. `gh api user` when `gh` is logged in: the name (else the login) and the public e-mail (else
+   `<id>+<login>@users.noreply.github.com`).
+
+A planned value says where it came from (`from ~/.files/.gitconfig`, `from gh api user`). Only when no source
+knows a key does the plan warn, and the warning says what to do: it is not an error, git works until the first
+commit. `gh-login` takes the token **only** from the keychain
 item that `[git] token_ref` names (no default; the `keychain` CLI, GNOME Keyring / Secret Service), at run time:
 `keychain exec --no-prompt --caller ubuntu-tweaks --stdin <ref> -- gh auth login --hostname <host>
 --with-token`; the value is never in argv, an environment variable, a file, the profile or this process,
@@ -507,8 +647,9 @@ real fresh machine: the Homebrew installer running non-interactively against a p
 **rc files and the profile's `files/`.** The BASE phase runs before the FILES phase, so a file the profile links
 would be created or appended to by BASE and then replaced (with a backup) by the link. The rule, one for all:
 **BASE never creates or appends to an rc file that the profile's `files/` links** (shared or machine overlay).
-`shell-rc` leaves out `~/.zprofile` / `~/.zshrc` when the profile links that file, and the brew `shellenv` post
-(`unless_linked = [".bashrc", ".profile", ".bash_profile"]`) is not planned when the profile links any of them.
+`shell-rc` leaves out `~/.zprofile` / `~/.zshrc` when the profile links that file or the dotfiles repository
+provides it (*rc files from the repository*), and the brew `shellenv` post
+(`unless_linked = [".bashrc", ".profile", ".bash_profile"]`) is not planned when either links any of them.
 The profile's own file is then the one that puts brew's `shellenv` and `~/.local/bin` on `PATH`. The preview
 shows what remains, and `tests/test_planner_base.py` covers both. With `--only` the links of `files/` are not in
 the plan (they carry no module scope), so BASE keeps creating the rc files then.
@@ -530,16 +671,16 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | Step | Module | Why only you | How you complete it |
 |---|---|---|---|
 | `gh auth login` | `git-gh` | the GitHub token must not live in the repo or profile | store a token once: `keychain set <your token_ref>` (GNOME keyring; the item `[git] token_ref` names, no default), or run `gh auth login`; an expired or rejected token and an offline machine land here too |
-| git identity | `git-gh` | not planned, only warned | set `[git] name` / `email` in `profile.toml` |
+| git identity | `git-gh` | planned from the first source that knows it; only when none does: warned, not an error | set `[git] name` / `email` in `profile.toml`, or `git config --global user.name ...` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
-| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` (or `pkexec`); `--yes` only skips the apt confirmation, never the password |
+| `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) the run stops with exit 6 and the command to run from a normal terminal, or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
 | polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
 | AMO signing key | `firefox` | the key belongs to the owner's AMO account | `secret-tool store` the items `purpose=amo-jwt-issuer` and `purpose=amo-jwt-secret` (the install output prints the commands) |
 | signed extension missing | `firefox-policy` | nothing to force-install yet | do the AMO step above first |
 | extension not active | `firefox-autologin` | Firefox must show the WebExtension-backend prompt | apply `firefox-policy`, restart Firefox, answer the prompt, check `about:policies` |
-| Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (see *Firefox*): without it the bridge step is skipped. Until firefox-passkey-qr PR 2 is merged the installer cannot run unattended: the module reports a manual step, run `passkey-qr install` in `~/dev/firefox-passkey-qr` |
+| Home Assistant token | `firefox-passkey-qr` (opt-in; needed only on a PC without Bluetooth) | the long-lived HA token belongs to the owner | `secret-tool store` it as `purpose ha-token` (the exact command is under *Firefox*): without it the bridge step waits for you (the other steps still run; `needs manual`, re-run `apply` after storing it) |
 | gh login or clone | `dotfiles` | the repository is found through your gh login | `gh auth login`; set `[modules.dotfiles] repo` or pass `--dotfiles-repo OWNER/NAME`; move a directory that is in the way; resolve a diverged checkout |
 | rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
@@ -550,9 +691,11 @@ Request 13. `scripts/bootstrap.sh` (POSIX `sh`, at most 40 lines) takes a stock 
 `git` to a running `init`: when `git`, `curl`, the CA bundle or `python3-gi` is missing it runs `sudo apt-get update`
 and `sudo apt-get install -y git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
 without them), clones this project's repository (`$UBUNTU_TWEAKS_REPO`, default `alex-mextner/ubuntu-tweaks`) with its submodules into `~/ubuntu-tweaks` (or
-`$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated), then runs
+`$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated; that directory is the stable
+checkout of *Checkout*), then runs
 `bin/ubuntu-tweak init "$@"`. The commit is explicit: with no arguments it is the **preview**; `--yes` is the
-only word that turns it into `init --commit --yes` (apply and install without asking); any other argument
+only word that turns it into `init --commit` (apply and install without asking: `--commit` is the consent);
+any other argument
 (`--commit`, `--no-sudo`) goes to `init` unchanged. It is the one-liner of the README:
 `curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scripts/bootstrap.sh | sh -s -- --yes`
 (once on `main`; with no `curl` at all, `wget -qO- <url> | sh -s -- --yes`, or `sudo apt-get install -y curl` first).
@@ -1005,7 +1148,9 @@ when python3 is missing) and exit 10 for a needed manual step; options arrive as
 
 ### The `dotfiles` module
 
-Init step 10 (request 9, generalized by request 14). `kind = "system"` with `root = false` (the installer runs as
+Init step 3b (request 9, generalized by request 14, moved before the shell and brew steps by request 20, `order` 35
+and `phase = "base"` instead of 110 and `system`; `apply --commit` therefore clones the profile right after the
+tools it needs and before `shell-rc` and `brew`). `kind = "system"` with `root = false` (the installer runs as
 the user, no sudo, see *Service modules*), **enabled by default** and a machine opts out with `[modules.dotfiles]
 enabled = false` in its `machine.toml`. It is a no-op with a clear message when there is nothing to find. Options
 (`[modules.dotfiles]` in `profile.toml` / `machine.toml`, JSON in `UBUNTU_TWEAK_MODULE_CONFIG`, never secrets):
@@ -1023,6 +1168,17 @@ missing) and exit 10 for a needed manual step. It asks `ubuntu_tweaks/identity.p
 ubuntu_tweaks.identity resolve`, *Profile discovery*) which repository to use and where, so the engine and the
 module always agree.
 
+**rc files from the repository (request 20).** The installer above links nothing; the *plan* does, through
+`ubuntu_tweaks/dotfiles_rc.py`. When the dotfiles checkout carries a shell rc file at its root, one of
+`.zprofile`, `.zshrc`, `.profile`, and the profile's `files/` does not link that name, the plan links
+`~/<name>` to the checkout's file (kinds `dotfiles-link` / `dotfiles-link-replace`, scope `dotfiles`; the
+repository's own `installer.sh` installs them the same way, by symlinks from `$HOME`). A real file already
+there is copied to `backup/<UTC timestamp>/` first (invariant 5). The profile wins (a name its `files/` links is
+never taken from the repository), `--only` drops the links, and `[modules.dotfiles] enabled = false` switches
+them off. This is what makes `shell-rc` a pure fallback (*Base modules*). Other files of the repository
+(`.gitconfig`, `.tmux.conf`, `.vimrc`, `aliases.zsh`, ...) are not linked: they are the author's and may not suit
+this machine (a mac `gpg.program`); only the git identity is read from `.gitconfig` (*git and gh*).
+
 | Situation | `install.sh` | `--check` |
 |---|---|---|
 | a repository is known and its checkout is absent | `gh repo clone <owner/name> <dir>` when `gh` is logged in, else `git clone https://github.com/<owner/name>` (a public repository); a URL or a path is `git clone`d as given; the checkout is recorded for the next command | drift: the checkout is missing |
@@ -1031,14 +1187,14 @@ module always agree.
 | gh is missing, logged out or unreachable and no checkout is on disk | exit 10: `needs manual: not logged in to GitHub: run `gh auth login``; never a prompt | drift (exit 3) with the same text |
 | the checkout is another repository (`origin`), a regular file, a directory that is not a checkout, behind with local changes, diverged | exit 10, nothing is changed | drift |
 
-- **It never touches non-profile files.** It writes nothing in `$HOME` but the checkout and the one state file
-  `~/.local/state/ubuntu-tweaks/dotfiles.json` (*Profile discovery*), links nothing, and fast-forwards only a
-  tree without local changes; tests assert a `.zshrc` in the repository stays byte-identical and `$HOME` holds
-  only the checkout.
-- **The profile arrives in the same run, before any other module runs.** The plan of `init`/`apply` is built
+- **It never touches non-profile files itself.** The installer writes nothing in `$HOME` but the checkout and the
+  one state file `~/.local/state/ubuntu-tweaks/dotfiles.json` (*Profile discovery*), links nothing, and
+  fast-forwards only a tree without local changes; tests assert a `.zshrc` in the repository stays byte-identical
+  and `$HOME` holds only the checkout. The shell rc files are linked by the plan (below), not by the installer.
+- **The profile arrives in the same run, before the shell and brew steps.** The plan of `init`/`apply` is built
   before the clone, so it holds the modules only and its header says the repository is not cloned yet. When the
-  profile was missing, `apply --commit` clones it **first**: the BASE-phase tool installs (`git`, `gh`) run, then the `dotfiles`
-  module's action, and no other action runs before it. Then it looks for the profile again (`identity.locate`), re-resolves the
+  profile was missing, `apply --commit` clones it **first**: the BASE-phase actions that sort before the `dotfiles`
+  module (the tool installs: `git`, `gh`), then the module's action, and no other action runs before it. Then it looks for the profile again (`identity.locate`), re-resolves the
   configuration, prints `profile: <dir> (cloned by this run)` and rebuilds the plan with it, so a profile that
   disables a module is honoured before that module runs, and one `init --commit` on a fresh machine applies the
   settings too. No other system module triggers it. If the clone failed, the run ends as before, with the
@@ -1121,7 +1277,7 @@ Scan, Logs) belong to `apps`, so `unmapped` only lists schemas no rule knows (ti
 
 `ubuntu-tweak capture` is the read-only inventory of the live system, printed as the exact
 diff the profile would receive. `--dry-run` is the explicit no-write mode: the same as the
-default preview, and it excludes `--commit` (exit 2, "not allowed with argument"). `--summary`
+default preview, and it excludes `--commit` (exit 2, *Dry run*); it also refuses `--report FILE`, which writes a file (exit 2). `--summary`
 prints only the SUMMARY block and the totals line and cannot be combined with `--commit` (exit 2):
 nothing is written that was not shown in full. With `--commit` it writes into the profile working tree and
 does not run `git commit`: the user reviews `git diff` in `.files` (the second preview) and
@@ -1347,7 +1503,7 @@ first, default 100, stable otherwise); see *Init pipeline*.
 | `compile-schemas` | `gschemas.compiled` newer than every `*.gschema.xml` (satisfied when the extension has no schema) | `glib-compile-schemas` |
 | `package` | apt / snap / flatpak name is installed | install the missing names; never remove |
 | `login-shell` (root) | the passwd entry's shell is named like the wanted one (`getent passwd <user>`) | `chsh -s /usr/bin/<shell> <user>` through sudo |
-| `shell-rc` | the file exists (a dangling symlink counts) | create it with `O_EXCL`, only while absent |
+| `shell-rc` | the file exists (a dangling symlink counts), or the profile or the dotfiles checkout provides it | create it with `O_EXCL`, only while absent; planned only when neither the profile's `files/` nor the dotfiles checkout carries that file |
 | `git-config` | `git config --global --get <key>` equals the profile value | `git config --global <key> <value>` |
 | `git-credential` | the global `credential.https://<host>.helper` list names `gh auth git-credential` | `gh auth setup-git --hostname <host> --force` |
 | `gh-login` | `gh auth status --hostname <host>` exits 0 | `keychain exec --stdin <ref> -- gh auth login --with-token`; no token: `needs manual` |
@@ -1481,6 +1637,89 @@ one. `--lang ru` translates the `status`, `apply` and `init` texts and every per
 two tables are checked for the same keys by `tests/test_ui.py`); everything else stays English.
 Covered by `tests/test_ui.py` (gating, helper goldens plain and ANSI, wrapping at 60/80/120 columns,
 the `status` layout against `tests/golden/status_explained.txt`, ANSI-stripped equals uncolored).
+
+### Session log
+
+Request 16. Every run of `ubuntu-tweak` (every command, `--help` and usage errors, a handled error, an unexpected
+exception, Ctrl-C) writes everything the user saw to one log file, so an agent (or you) can read what happened
+afterwards without asking for a paste. One module, `ubuntu_tweaks/sessionlog.py`, does it as a **tee at the CLI
+entry**: `cli.main` opens the session before it parses anything, replaces `sys.stdout` / `sys.stderr` with tees and
+closes the session after the exit code is known. No command logs anything itself. There is no opt-out: every run
+is logged (the file is private, see below), `--dry-run` and `--plain` runs included; the log directory is the only
+place a dry run may write.
+
+- **Where.** `<state>/ubuntu-tweaks/logs/<UTC timestamp>-<command>.log`, `<state>` = `$XDG_STATE_HOME` else
+  `~/.local/state` (the rule of `backup` and the dotfiles cache). The timestamp is `20261022T183012Z`;
+  `<command>` is the subcommand that was run, `none` when parsing failed before one was known (a usage error,
+  `--help`); the file is created before the arguments are parsed, as `...-none.log`, and renamed once the command
+  is known. A name that exists gets `-2`, `-3`, ... before `.log`. `latest.log` in the same directory is a
+  relative symlink to the newest log (replaced atomically, so a reader never sees it missing). The directory is
+  mode `0700`, the files `0600`.
+- **Content.** A `# session` header (`# argv:` as run, `# started:` UTC, `# host:`, `# cwd:`, `# engine:`,
+  `# python:`), then the session text, then a footer: `# end: <UTC time>, <seconds> s, exit <code>`, one line for how
+  the run did not end normally (`# interrupted (Ctrl-C)` with exit 130, `# terminated (SIGTERM)` with exit 143, best
+  effort, `# exception: <type>` for an unexpected exception: its traceback is in the body, printed to stderr as
+  always), and the facts the run learned (`# profile: <dir>`, `# machine: <name>`). `--help` and usage errors
+  (`SystemExit`) are logged with their exit code and then exit as before. The file is flushed on every complete line, so
+  it can be read while the run is still going; a header without a footer means the process is still running or was
+  killed with SIGKILL.
+- **The session text** is what the user saw, in the order it was written, as plain text: ANSI escape sequences
+  (CSI/SGR and OSC) are removed, a carriage-return redraw (a progress line rewritten in place) is collapsed to its
+  last state, and every **stderr** line is prefixed `! ` (stdout lines carry no prefix), so one stream of text
+  tells which stream said what. Terminal escapes and colors are never in the log, whatever `--color` says.
+- **Child output.** `Process.execute` and `process.run(capture=False)` (apt, git, the module installers, the child
+  `apply --commit` of `update`) used to let the child write to the terminal directly, which no tee can see. They now
+  give the child pipes for stdout and stderr and copy the bytes as they arrive (raw `os.read` chunks, not
+  line-buffered, so a prompt without a newline appears at once) to `sys.stdout` / `sys.stderr`, so the user sees the
+  same text and the tee logs it. stdin stays the terminal: a child may still read an answer. A tool that
+  checks `isatty` prints its plain, progress-less output because its stdout is a pipe now (a child `ubuntu-tweak`
+  is told with `--color always` when the parent shows the explained, colored layout, so `update` keeps it;
+  `ui.cli_flags`); a Python child gets `PYTHONUNBUFFERED=1` so its prompts are not held back. `Process.query`
+  and `run(capture=True)` return their output to the caller and show nothing, so they log nothing. After the child
+  has exited, the copy waits at most two seconds for output still in the pipes: a daemon the child left behind
+  can hold the pipe open and must not hang the run (such a daemon gets `SIGPIPE` on its next write once this
+  process has exited; daemons detach their output). SIGTERM sent to `ubuntu-tweak` ends it with exit 143 without
+  killing a running child (which may die of that `SIGPIPE` on its next write); Ctrl-C reaches the child through the
+  terminal too, and a child that has not exited a quarter of a second later is killed. **Limit:** a child that is
+  not Python and does not flush its stdio buffers shows a prompt that has no newline only when the buffer fills,
+  because its stdout is a pipe; such a prompt is neither shown nor logged until then. debconf's dialog frontends,
+  which want a terminal, fall back to a plainer one. The two streams of a child are read by two threads: their
+  relative order is not guaranteed, the order within each stream is.
+- **Prompts and answers.** `sys.stdin` is wrapped too: what this process reads from the terminal (`input()`,
+  `readline`, iteration, `read`) is logged as `> <typed text>`, the prompt that was the unfinished stdout line in
+  front of it (`> Install foo? [y/N] y`). To make `input()` go through that path the wrapper has no file
+  descriptor (`fileno()` raises `io.UnsupportedOperation`; `isatty()` still answers for the real terminal), which
+  costs `input()` its readline line editing. **Not captured:** the password prompt of `sudo` / `pkexec` (they open
+  `/dev/tty` themselves; the password never passes through this process, so it cannot be logged), and anything you
+  type into a *child's own* prompt (an installer asking `[Y/n]`): that input goes from the terminal straight to the
+  child; only the child's printed question appears in the log.
+- **Masking.** Secrets never reach the log. Every line written to the log (never the terminal) goes through
+  `capture.secrets.mask_secrets`, which reuses the *capture* value patterns for PEM blocks (kept per stream), API
+  tokens, JWTs, URL credentials (only the `user:password@` part is replaced, scheme and host stay) and long base64
+  runs and replaces each match by `***`. E-mail addresses, LAN IP addresses and 40-hex git object ids are **not**
+  masked: they are not credentials, and the log exists to be analyzed (a commit id or a host in an error message
+  is the evidence). In the `argv` header the value after a flag whose name contains `token`, `password` or
+  `secret` (`--token X` and `--token=X`; the value may start with `-`) is `***` too, and so is what is typed at a
+  prompt that, or the line before it, or an unfinished stderr line (where `getpass` writes), contains one of those
+  words (a secret need not look like one). A line is held back until its newline arrives; one of more than 256 KiB
+  is logged in pieces, cut after a space where there is one so a token is not split. A PEM block whose `END` never comes is masked
+  for at most 200 lines.
+- **Never breaks the command.** When the log cannot be created (no writable state directory, no `$HOME`) or a
+  write fails (disk full, permissions), logging is switched off for the rest of the run and one warning line goes
+  to stderr once; the command carries on and keeps its exit code.
+- **Retention.** The newest 50 logs are kept (`sessionlog.KEEP_LOGS`): after the new log exists, older `*.log`
+  files in the directory are deleted (never `latest.log`, never the file it points at, never any other file).
+- **Nested runs.** `update --commit` runs `apply --commit` in a child `ubuntu-tweak`. The outer run exports
+  `UBUNTU_TWEAK_SESSION_LOG=<its log>` for its lifetime; a process that finds it set and its directory writable
+  writes no log of its own (its output already flows through the outer run's pipes into the outer log).
+- **Test seam.** `UBUNTU_TWEAK_LOG_DIR` names the log directory itself (replacing the path above); `tests/__init__.py`
+  points it at a temporary directory so no test writes into the real state directory. It is not an opt-out for
+  users: unset it and every run is logged.
+
+Covered by `tests/test_sessionlog.py` (escape stripping, `\r` collapsing, stream marks, masking, header and
+footer, modes, symlink, retention, the failure / Ctrl-C / usage-error / unexpected-exception logs, the nested-run
+rule, prompts and typed answers, child output through the pipes with unchanged errors, a failing log write) and
+`tests/test_process.py`.
 
 ### Service modules
 
@@ -1758,7 +1997,7 @@ Mozilla's deb, so a machine opts in with `[modules.firefox-passkey-qr] enabled =
 `machine.toml`). It runs the installer of <https://github.com/alex-mextner/firefox-passkey-qr> (checkout
 `~/dev/firefox-passkey-qr`, cloned when missing from `repo`: the manifest's `[source] repo` unless the profile
 sets one; options `checkout`, `repo`, `ha_url`, `remove_snap`). Read
-from its source: five steps, each asking first: (1) apt build/runtime packages, (2) Mozilla's Firefox deb
+from its source: five steps (it asks first; `--yes` answers): (1) apt build/runtime packages, (2) Mozilla's Firefox deb
 with the apt pin and a copy of the snap profile, optionally removing the snap, (3) the Bluetooth step,
 (4) `credentialsd` and a patched `xdg-desktop-portal` built from source into `/usr/local`, (5) the
 native-messaging link and the Mozilla-signed `credentialsd-helper` add-on. **Step 3 is the installer's own
@@ -1769,18 +2008,47 @@ never decides this. Verified by running the real installer's `--dry-run --yes in
 machine's `hci0` the step prints `local adapter(s) found: hci0 - nothing to do`; with an empty
 `PASSKEY_QR_BLUETOOTH_DIR` and `HA_URL` set it lists the bridge commands.
 
+- *One command on a new machine*: enable the module in the profile (`profile.toml` for every machine, or one
+  `machines/<host>/machine.toml`), store the Home Assistant token if the PC has no Bluetooth, run bootstrap:
+
+  ```toml
+  [modules.firefox-passkey-qr]
+  enabled = true
+  # ha_url = "http://100.x.y.z:8123"   # only when the lookup (homeassistant.local, tailscale peers) must not be used
+  # remove_snap = true                  # also remove the Firefox snap once the deb works (default: keep it)
+  ```
+
+  ```sh
+  secret-tool store --label='Home Assistant token' application ubuntu-tweaks purpose ha-token   # once, PC without Bluetooth
+  sh bootstrap.sh --yes      # the module's step runs `passkey-qr --yes install`
+  ```
+
+  The installer's package, build and install steps were run on a stock Ubuntu 26.04.1 root in an unprivileged
+  `bwrap` (no systemd session); the session-bound steps were verified on `ubuntu-pc`.
 - *Preview*: the module's `plan` is the installer's `--dry-run` output (every command, `sudo` marked, the
   token never printed), indented under the action.
-- *Run*: only through the installer's own bypass: `passkey-qr --yes [--remove-snap] install`. The installer
-  had neither `--yes` nor a check, so they are added upstream
-  (<https://github.com/alex-mextner/firefox-passkey-qr/pull/2>, branch `feat/yes-check-plan`, not merged):
-  `--yes` never prompts, a missing token skips the bridge step, a running Firefox stops the Firefox step,
-  and **the snap is kept unless `--remove-snap`** (profile option `remove_snap`, default false). Until that
-  PR is merged and the checkout updated, the module reports `needs manual: run <installer> install
-  interactively` and the fact stays Missing; it never runs the installer without `--yes` and never fakes
-  success. The feature is detected from the installer's `--help`, not from a version number.
-- *Check*: the installer's `check` (exit 0/3: Firefox deb, a Bluetooth adapter, `credentialsd`, the
-  native-messaging manifest, apt packages); an installer without it is judged from its `status` rows.
+- *Run*: only through the installer's own bypass: `passkey-qr --yes [--remove-snap] install`
+  (<https://github.com/alex-mextner/firefox-passkey-qr/pull/2>). `--yes` never prompts and never closes,
+  starts or opens a browser; **the snap is kept unless `--remove-snap`** (profile option `remove_snap`,
+  default false). What only a person can do does not stop the other steps: it is skipped, listed at the end
+  and the installer exits **3** (reserved: its failures exit 1), which the module reports as `needs manual`
+  pointing at the lines the installer printed (the fact stays Missing, the next `apply` continues; any other
+  non-zero exit stays an error). What waits for a person: Home Assistant's token (the Bluetooth step only), a running Firefox (the
+  profile copy and the switch of the start profile), no Bluetooth and no Home Assistant at all (a USB dongle), a
+  second Firefox install registered in `installs.ini`, and a session that has to log out and in once for the
+  new D-Bus activation files. Firefox is not restarted: the policy is in place and the extension installs
+  at its next start. With an older checkout that has no `--yes`, the module reports `needs manual: run
+  <installer> install interactively`; it never runs the installer without `--yes` and never fakes success.
+  The feature is detected from the installer's `--help`, not from a version number.
+- *Check*: the installer's `check` (exit 0/3, read-only, no log file): Firefox deb, a Bluetooth adapter, the
+  build dependencies, `credentialsd`, libdex and the patched portal installed, the portal answering with the
+  Credential interface, the native-messaging link, the portal accepting the helper's app id, the Firefox
+  policy entry for the add-on; an installer without `check` is judged from its `status` rows. The row
+  "Firefox restarted: extension active" is context only: it needs a started Firefox.
+- *Policy entry*: the installer writes the add-on into `/etc/firefox/policies/policies.json` itself
+  (`normal_installed`, merged with the other entries) and treats a `force_installed` entry for the same URL as
+  already satisfied, so `[modules.firefox-policy] credentialsd_helper = true` and this module never fight over
+  the file.
 - *Secrets*: Home Assistant's long-lived token comes from the Secret Service (`purpose ha-token`) into the
   installer's `HA_TOKEN` for that run only; the installer itself stores it in
   `~/.config/ha-ble-vhci/token` (mode 600), which is outside every repository and profile, and its URL is the
@@ -1858,6 +2126,21 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   empty machine as a golden file (`tests/golden/init_empty_machine.txt`; regenerate with
   `UPDATE_GOLDEN=1` and review the diff); `doctor` reporting `planned`. Everything goes through
   `FakeProcess` and a fake root directory (`StepEnv.root`); nothing touches the real system.
+- Elevation and the repair run (`tests/test_elevation.py`, `tests/test_root_wiring.py`; `FakeProcess` and a `Host`
+  value, never the real sudo): already root, NOPASSWD, the terminal path asking once for N root actions and
+  refreshing the ticket, askpass, pkexec, and the typed errors (`no-new-privs`, `no-tool`, `no-prompt`, wrong
+  password) with exit 6 and the command in the message; `--no-sudo`, previews, `--dry-run` and plans without root
+  actions never ask; `apply` and `init` acquire before the first root action and install the missing packages in
+  the same run without a question (`tests/test_apply_commands.py`); `--dry-run` for every command, with `--commit`
+  a usage error (`tests/test_dry_run.py`).
+- Dotfiles rc files, git identity and staged settings (`tests/test_dotfiles_links.py`, `tests/test_planner_base.py`
+  `RcFileTests` / `GitTests`, `tests/test_planner_settings.py` `PendingExtensionSchemaTests`): the repository's
+  `.zprofile` / `.zshrc` / `.profile` become `dotfiles-link` actions (a real file is `dotfiles-link-replace` with a
+  backup), the profile's `files/` wins, `--only` and a disabled module drop them, `shell-rc` plans only what neither
+  provides; the identity comes from the profile, git's own value, the dotfiles `.gitconfig` or `gh api user` in that
+  order and warns, with what to do, only when nothing knows it; settings of a submodule that is not checked out are
+  `staged`, a checked-out extension without the schema is still `skipped`; the `init` golden file shows the new
+  order (`dotfiles` before `shell-rc` before `brew`).
 - Profile discovery and profile modules (`tests/test_identity.py`, `tests/test_profile_modules.py`,
   `modules/dotfiles/tests/test_install.py`; no PyGObject needed): a fake `gh` (found, none, several, forks and
   archived skipped, logged out, missing, offline, a listing as long as the limit), the cache (one hour, one
@@ -1873,6 +2156,19 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
 
 ## Decisions
 
+- **`rig` as the model for the command surface (request 18); what stays different.** `rig`'s `init` / `apply` /
+  `doctor` / `--dry-run` were read (`~/dev/rig-cli`, `riglib/cli.py`, README). Aligned: `init` and `apply` are the
+  only commands that set a machine up, `apply` previews by default and one run converges (idempotent, `0 changed`),
+  `doctor --yes` installs dependencies, `--only`, exit 0 ok / 1 internal / 2 invalid config / 3 drift / 4 unknown
+  item. Kept different, because a decision of the user is recorded (preview-by-default with an explicit
+  `--commit`, requests 7 and 8, invariant 1) or the project has its own meaning: (1) the commit word is `--commit`
+  on `apply`, `init`, `update`, `capture`, `note`, `bundle-move` (rig: the positional `apply commit`, and `--commit`
+  only on `config set`); (2) `--dry-run` together with `--commit` is a usage error, exit 2 (rig: `--dry-run`
+  silently wins over `commit`), as ordered in request 19; (3) rig's `apply --yes` means "commit"; here `--yes` is
+  only `doctor`'s commit word, and `init` / `apply` need no `--yes` at all (`--commit` is the consent and the apt
+  install is part of it); (4) rig's `init` only scaffolds and its `apply` never installs dependencies: here
+  `init --commit` / `apply --commit` install the missing apt packages too (request 18); (5) exit codes 5 and 6 differ
+  (rig: missing target / not a repo; here: refused / no root); (6) no `--plan` / `--notes` / `-v` on `apply` yet.
 - **Python, stdlib plus `python3-gi`**, not bash: the plan/preview and the typed dconf
   diff are the core of the tool, and bash cannot compare GVariants. Not a plugin of a personal dev
   tool: this repo is public, and its users have no reason to install one.

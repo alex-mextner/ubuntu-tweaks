@@ -21,9 +21,9 @@ sha256 = "5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148"
 
 [[post]]
 name = "shellenv"
-description = "wire `brew shellenv` into ~/.bashrc (zsh gets it from ~/.zprofile, module zsh)"
+description = "wire `brew shellenv` into ~/.bashrc (zsh gets it from ~/.zprofile: your dotfiles' one, or module shell-rc's)"
 after = "install"
-unless_linked = [".bashrc", ".profile", ".bash_profile"]   # a profile that links one of them wires brew itself
+unless_linked = [".bashrc", ".profile", ".bash_profile"]   # a profile or dotfiles repository that links one of them wires brew itself
 run = ["/bin/sh", "-c", "printf '\\n# Homebrew (added by ubuntu-tweak)\\n[ -x /home/linuxbrew/.linuxbrew/bin/brew ] && eval \"$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\"\\n' >> \"$HOME/.bashrc\""]
 check = ["/bin/sh", "-c", "grep -qs 'brew shellenv' \"$HOME/.bashrc\" \"$HOME/.profile\" \"$HOME/.bash_profile\""]
 

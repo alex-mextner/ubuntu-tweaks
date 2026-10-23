@@ -1,20 +1,22 @@
 """``ubuntu-tweak doctor [--yes]``: check the tools the CLI and the modules need.
 
-Accessed via: ``bin/ubuntu-tweak doctor``; ``commands/init.py`` reuses ``requirements`` /
-``missing`` / ``install``.
+Accessed via: ``bin/ubuntu-tweak doctor``; ``commands/apply.py`` and ``commands/init.py`` run
+``ensure_requirements`` (and reuse ``requirements`` / ``missing`` / ``install``) so one ``--commit`` repairs everything.
 
 Checks ``python3-gi`` (importable ``gi``), ``dconf-cli`` (``dconf``), ``git``, ``glib-compile-schemas``
 (package ``libglib2.0-bin``) and every enabled module's ``[deps] apt`` (``dpkg-query``). A requirement
 that an enabled module installs itself (``[install] apt``: ``git`` by ``base-tools`` / ``git-gh``, a
 module's dependency) is reported ``planned``, not ``MISSING``: ``init`` / ``apply`` install it, so
 ``doctor`` does not fail on tools the pipeline is about to install. Read-only unless ``--yes``, which
+first obtains root once (``elevation.RootSession``: exit 6 with the command to run when it cannot) and
 installs the missing apt packages with ``sudo apt-get install -y`` (without sudo when already root).
 Exit 0 when nothing is missing, 3 when something is (still missing after ``--yes`` counts too). Does
 not import PyGObject: it must work without it.
 
 Public API: ``Requirement(label, apt, needed_by, present, planned_by=None)``, ``requirements(ctx)``,
-``planned_installs(ctx)``, ``missing(requirements)``, ``install(missing)``, ``register(subparsers)``,
-``run(ctx, args)``.
+``planned_installs(ctx)``, ``missing(requirements)``, ``install(missing)``, ``ensure_requirements(ctx, args, root,
+*, command, ...)`` (the requirements step that ``apply`` and ``init`` run with ``--commit``: install, no question),
+``register(subparsers)``, ``run(ctx, args)``.
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ from dataclasses import dataclass
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Phase
-from ubuntu_tweaks.commands._support import has_gi
+from ubuntu_tweaks.commands._support import has_gi, root_session, say
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.elevation import RootSession
 from ubuntu_tweaks.errors import ExitCode
 from ubuntu_tweaks.manifest import module_defaults
 from ubuntu_tweaks.process import elevate
@@ -144,6 +147,40 @@ def report(needed: Sequence[Requirement]) -> list[Requirement]:
     return absent
 
 
+def ensure_requirements(
+    ctx: Context,
+    args: argparse.Namespace,
+    root: RootSession,
+    *,
+    command: str,
+    show_report: bool = False,
+    skipped: str = "apply",
+) -> int | None:
+    """The requirements step of ``apply`` / ``init``: with ``--commit`` the missing apt packages are installed
+    (root is obtained once, through ``root``; no question: ``--commit`` is the consent), without it the packages
+    are only named. Returns the exit code that ends the run (3: still missing after the install, or
+    ``python3-gi`` missing so that ``skipped`` cannot be computed), ``None`` when the plan can be built."""
+    needed = requirements(ctx, honor_planned=not args.no_sudo)  # no sudo: the module's apt batch cannot run
+    absent = report(needed) if show_report else missing(needed)
+    if absent:
+        packages = " ".join(sorted({item.apt for item in absent}))
+        if not args.commit:
+            say("info", f"{command} --commit would first install: sudo apt-get install -y {packages}")
+        elif args.no_sudo:
+            say("manual", f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
+        else:
+            root.require(1, f"apt-get install {packages}")
+            install(absent)
+            absent = missing(needed)
+            if absent:
+                say("error", "Still missing after install: " + ", ".join(item.label for item in absent))
+                return int(ExitCode.DRIFT)
+    if missing([item for item in needed if item.apt == "python3-gi"]):
+        say("error", f"{skipped} skipped: python3-gi is missing (install it first).")
+        return int(ExitCode.DRIFT)
+    return None
+
+
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("doctor", help="check required packages and binaries (--yes installs them)")
     parser.add_argument("--yes", action="store_true", help="install the missing apt packages with sudo")
@@ -174,7 +211,9 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
                 f"{len(absent)} missing. Install with: ubuntu-tweak doctor --yes   (sudo apt-get install -y {packages})"
             )
         return int(ExitCode.DRIFT)
-    install(absent)
+    with root_session(args, "doctor --yes") as root:
+        root.require(1, f"apt-get install {packages}")
+        install(absent)
     print("After install:")
     absent = report(needed)
     return int(ExitCode.DRIFT if absent else ExitCode.OK)

@@ -1,17 +1,17 @@
-"""``ubuntu-tweak init [--commit] [--yes] [--no-sudo]``: set up a fresh system.
+"""``ubuntu-tweak init [--commit] [--no-sudo]``: set up a fresh system.
 
 Accessed via: ``bin/ubuntu-tweak init`` (and the ``install.sh`` wrapper, which passes ``--commit``).
 
 Steps: ``doctor`` -> the ``apply`` plan extended with the symlink ``~/.local/bin/ubuntu-tweak``
 -> the CLI (submodule init is a ``submodule`` action of the plan, ``git submodule update --init
---recursive``). Without ``--commit`` everything is only printed (invariant 1). With ``--commit``
-missing apt packages are installed first, after a confirmation on a terminal or at once with
-``--yes``; without either, ``init`` stops and names the command (``--no-sudo`` skips the install
-and goes on). A missing *default* profile is not an error: the header says which dotfiles repository gh
+--recursive``). Without ``--commit`` (or with ``--dry-run``) everything is only printed (invariant 1). With
+``--commit`` the missing apt packages are installed first, with no question (``--commit`` is the consent;
+``--no-sudo`` skips the install and goes on). A missing *default* profile is not an error: the header says which dotfiles repository gh
 found, none, or ``needs manual: ... gh auth login`` (``reconcile.header_lines``) and the plan covers the modules only. The CLI link has its own kinds
 (``cli-link``, ``cli-link-replace``): it is not extension code, so it triggers neither the re-login
 hint nor the staged settings pass; ``--only`` limits ``init`` to the named modules, so it drops the
-CLI link. Re-running is safe (every action is idempotent).
+CLI link. Re-running is safe (every action is idempotent). With ``--commit`` (and no ``--no-sudo``) root is obtained
+once, through one ``elevation.RootSession`` shared by the apt install and the plan (exit 6 when it cannot be).
 
 Pipeline order (spec, *Init pipeline*): there is no list of steps in this file. The ``apply`` plan is
 ordered by ``(phase, order)`` and every pipeline step is a module whose ``module.toml`` declares its
@@ -23,13 +23,13 @@ dock 80, optional modules 100+) and ``phase``; a tool a module installs itself i
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.commands import doctor
+from ubuntu_tweaks.commands._support import root_session
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.errors import ExitCode
+from ubuntu_tweaks.elevation import RootSession
 from ubuntu_tweaks.symlink import SymlinkAction
 
 CLI_LINK = Path(".local/bin/ubuntu-tweak")
@@ -38,15 +38,8 @@ CLI_LINK = Path(".local/bin/ubuntu-tweak")
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("init", help="fresh system: doctor, submodules, CLI link, apply (--commit runs it)")
     parser.add_argument("--commit", action="store_true", help="install packages and apply (default: preview only)")
-    parser.add_argument("--yes", action="store_true", help="install missing apt packages without asking")
     parser.add_argument("--no-sudo", action="store_true", help="skip actions that need root and say so")
-    parser.set_defaults(handler=run)
-
-
-def _confirm(question: str) -> bool:
-    if not sys.stdin.isatty():
-        return False
-    return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
+    parser.set_defaults(handler=run, plans_links=True)  # links into the stable checkout (spec *Checkout*)
 
 
 def _step(number: int, key: str) -> None:
@@ -56,34 +49,18 @@ def _step(number: int, key: str) -> None:
         print("doctor:" if number == 1 else "apply:")
 
 
-def _say(kind: str, text: str) -> None:
-    print(ui.say(kind, text))
-
-
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    with root_session(args, "init --commit", skip="init --commit --no-sudo") as root:
+        return _run(ctx, args, root)
+
+
+def _run(ctx: Context, args: argparse.Namespace, root: RootSession) -> int:
     if ui.rich():
         print(ui.heading("ubuntu-tweak init") + " " + ui.style("(set up this machine)", "dim"))
     _step(1, "init.step.doctor")
-    needed = doctor.requirements(ctx, honor_planned=not args.no_sudo)  # no sudo: the module's apt batch cannot run
-    absent = doctor.report(needed)
-    if absent:
-        packages = " ".join(sorted({item.apt for item in absent}))
-        if not args.commit:
-            _say("info", f"init --commit would install: sudo apt-get install -y {packages}")
-        elif args.no_sudo:
-            _say("manual", f"Not installing {packages} (--no-sudo). Later: sudo apt-get install -y {packages}")
-        elif args.yes or _confirm(f"Install {packages} with sudo apt-get?"):
-            doctor.install(absent)
-            absent = doctor.missing(needed)
-            if absent:
-                _say("error", "Still missing after install: " + ", ".join(item.label for item in absent))
-                return int(ExitCode.DRIFT)
-        else:
-            _say("error", f"Missing packages: {packages}. Re-run with --yes, or run: ubuntu-tweak doctor --yes")
-            return int(ExitCode.DRIFT)
-    if doctor.missing([item for item in needed if item.apt == "python3-gi"]):
-        _say("error", "apply preview skipped: python3-gi is missing (install it first).")
-        return int(ExitCode.DRIFT)
+    blocked = doctor.ensure_requirements(ctx, args, root, command="init", show_report=True, skipped="apply preview")
+    if blocked is not None:
+        return blocked
 
     from ubuntu_tweaks import reconcile
 
@@ -98,4 +75,5 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         extra_actions=[cli_link],
         title="",
         preview_footer="init.preview_footer",
+        root=root,
     )

@@ -24,9 +24,12 @@ Public API:
 - ``header_lines(ctx, title) -> list[str]``, ``engine_version(ctx)``, ``print_warnings(lines)``: the
   explained (``ui.rich()``) header and warnings block of ``apply`` / ``status``.
 - ``apply(ctx, *, commit, no_sudo, extra_actions=(), backend_factory=open_backend,
-  relogin_hint=False, relocate=None, title="apply", preview_footer="apply.footer") -> int``: prints the
+  relogin_hint=False, relocate=None, title="apply", preview_footer="apply.footer", root=None) -> int``: prints the
   preview, or executes and prints ``N changed`` (interactive: numbered progress and a summary, see the
   spec's *Output*). ``title`` / ``preview_footer`` let ``init`` and ``update`` frame the same preview.
+  ``root`` is the ``elevation.RootSession`` that asks for root once, before the first root action (also again
+  after a rebuild that adds root actions); without one ``apply`` makes its own for the call. A preview and
+  ``--no-sudo`` never ask.
 - ``RELOGIN_HINT``.
 """
 
@@ -40,7 +43,9 @@ from pathlib import Path
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.actions import Action, ActionFailed, ExecutionResult, Phase, Plan
+from ubuntu_tweaks.checkout import warning_line
 from ubuntu_tweaks.context import Context
+from ubuntu_tweaks.elevation import RootSession
 from ubuntu_tweaks.extension import RELOGIN_HINT, extension_modules, tilde
 from ubuntu_tweaks.planners import build_actions, collect_warnings
 from ubuntu_tweaks.identity import Location, locate, missing_lines
@@ -51,6 +56,7 @@ from ubuntu_tweaks.settings import (
     default_extension_roots,
     extension_schema_dirs,
 )
+from ubuntu_tweaks.setkey import STAGED
 
 type BackendFactory = Callable[[Context], SettingsBackend]
 
@@ -125,20 +131,33 @@ def header_lines(ctx: Context, title: str) -> list[str]:
     lines = [ui.heading(f"ubuntu-tweak {title}")] if title else []
     lines += ui.kv(rows)
     lines += [ui.style(line, "yellow") for line in profile_lines(ctx)[2:]]
+    if ctx.running_root is not None and ctx.running_root != ctx.repo_root:
+        lines.append(ui.style(warning_line(ctx.repo_root, ctx.running_root), "yellow"))
     return lines
 
 
 def print_warnings(warnings: list[str]) -> None:
-    if not warnings:
-        return
+    """Warnings first; lines that wait for extension code this very run installs (``staged``) get their own block
+    that says they are not errors."""
+    real = [line for line in warnings if not line.startswith(f"{STAGED} ")]
+    staged = [line for line in warnings if line.startswith(f"{STAGED} ")]
     if ui.rich():
-        print()
-        print(ui.section(ui.t("warnings"), len(warnings), "need"))
-        for line in warnings:
-            print("\n".join(ui.wrap(line, first="  ", names=("yellow",))))
+        for title, lines, kind, color in (
+            (ui.t("warnings"), real, "need", "yellow"),
+            (ui.t("staged"), staged, "info", "cyan"),
+        ):
+            if lines:
+                print()
+                print(ui.section(title, len(lines), kind))
+                for line in lines:
+                    print("\n".join(ui.wrap(line, first="  ", names=(color,))))
         return
-    print("Warnings:")
-    print("\n".join(f"  {line}" for line in warnings))
+    if real:
+        print("Warnings:")
+        print("\n".join(f"  {line}" for line in real))
+    if staged:
+        print("Staged (not an error: the same `apply --commit` applies them once the extension code is installed):")
+        print("\n".join(f"  {line}" for line in staged))
 
 
 def _print_preview(ctx: Context, plan: Plan, backend: SettingsBackend, *, no_sudo: bool, title: str) -> None:
@@ -164,12 +183,18 @@ DOTFILES_MODULE = "dotfiles"
 
 
 def _profile_acquisition(ctx: Context, plan: Plan) -> tuple[Action, ...]:
-    """What to run first when the profile is missing and this plan would clone it: the BASE-phase tool installs
-    (``git`` and ``gh`` come from there), then the dotfiles module's action, and nothing else."""
+    """What to run first when the profile is missing and this plan would clone it: the BASE-phase actions that
+    sort before the dotfiles module (``git`` and ``gh`` come from there), then the module's action, and nothing
+    else. The shell and brew steps sort after it, so the repository's rc files are in place before they run."""
     if ctx.profile.exists:
         return ()
     clone = tuple(a for a in plan.actions if a.kind == "system-module" and a.scope == DOTFILES_MODULE)
-    return (*(a for a in plan.actions if a.phase == Phase.BASE), *clone) if clone else ()
+    if not clone:
+        return ()
+    before = tuple(
+        a for a in plan.actions if a.phase == Phase.BASE and (a.phase, a.order) < (clone[0].phase, clone[0].order)
+    )
+    return (*before, *clone)
 
 
 def _arrived_profile(ctx: Context, relocate: Callable[[], Location] | None) -> Profile | None:
@@ -194,6 +219,7 @@ def apply(
     relocate: Callable[[], Location] | None = None,
     title: str = "apply",
     preview_footer: str = "apply.footer",
+    root: RootSession | None = None,
 ) -> int:
     extras = tuple(extra_actions)
     backend = backend_factory(ctx)
@@ -207,7 +233,43 @@ def apply(
             else:
                 print("Preview only, nothing was changed. Run with --commit to apply.")
         return 0
+    session = root or RootSession(command="ubuntu-tweak apply --commit", skip="ubuntu-tweak apply --commit --no-sudo")
+    try:
+        return _commit(
+            ctx,
+            plan,
+            extras=extras,
+            no_sudo=no_sudo,
+            backend_factory=backend_factory,
+            relogin_hint=relogin_hint,
+            relocate=relocate,
+            root=session,
+        )
+    finally:
+        if root is None:
+            session.close()
 
+
+def _require_root(root: RootSession, plan: Plan, *, no_sudo: bool, ran_before: bool) -> None:
+    """Ask for root before the first root action of ``plan`` runs (a no-op after the first success);
+    ``ran_before``: this run already executed actions."""
+    if no_sudo:
+        return
+    pending = [action for action in plan.actions if action.needs_root]
+    root.require(len(pending), ", ".join(sorted({action.kind for action in pending})), ran_before=ran_before)
+
+
+def _commit(
+    ctx: Context,
+    plan: Plan,
+    *,
+    extras: tuple[Action, ...],
+    no_sudo: bool,
+    backend_factory: BackendFactory,
+    relogin_hint: bool,
+    relocate: Callable[[], Location] | None,
+    root: RootSession,
+) -> int:
     executed: list[str] = []
 
     def runnable(pending: Plan) -> int:
@@ -232,6 +294,9 @@ def apply(
     number = 1
     manual: dict[tuple[str, str | None, str], tuple[Action, str]] = {}
     acquire = _profile_acquisition(ctx, plan)
+    # with a profile still to clone, only what the clone stage runs is certain: the profile may switch the rest
+    # off, and the rebuilt plan asks for itself in the loop below
+    _require_root(root, Plan(acquire, 0) if acquire else plan, no_sudo=no_sudo, ran_before=False)
     if acquire:
         # the profile decides which modules are on (a profile may switch ssh-server off): clone it first, alone
         progress["total"] = runnable(Plan(acquire, 0))
@@ -247,6 +312,8 @@ def apply(
         plan = Plan(tuple(a for a in rebuilt.actions if _manual_key(a) not in manual), rebuilt.satisfied)
     result = ExecutionResult(0, (), ())
     while True:
+        # a rebuilt plan may hold root actions the first one did not
+        _require_root(root, plan, no_sudo=no_sudo, ran_before=bool(executed))
         staged = _is_staged(plan)
         if staged and number == MAX_PASSES:
             raise ActionFailed(f"the plan still installs extension code after {MAX_PASSES - 1} passes")

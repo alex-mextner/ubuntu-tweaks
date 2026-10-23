@@ -61,7 +61,7 @@ class BootstrapTests(TempDirCase):
         )
 
     def test_yes_is_the_only_word_that_turns_the_preview_into_a_commit(self) -> None:
-        self.assertEqual(self.run_script("--yes")[-1], "ubuntu-tweak init --commit --yes")
+        self.assertEqual(self.run_script("--yes")[-1], "ubuntu-tweak init --commit")
 
     def test_other_arguments_go_to_init_unchanged(self) -> None:
         self.assertEqual(self.run_script("--commit", "--no-sudo")[-1], "ubuntu-tweak init --commit --no-sudo")

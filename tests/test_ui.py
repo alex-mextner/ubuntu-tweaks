@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -105,6 +106,16 @@ class ColorGatingTests(UiCase):
         self.assertEqual(ui.cli_flags(), [])
         ui.configure(color="always", plain=False, lang="ru")
         self.assertEqual(ui.cli_flags(), ["--color", "always", "--lang", "ru"])
+
+    def test_a_child_of_a_coloring_terminal_is_told_color_always_because_its_stdout_is_a_pipe(self) -> None:
+        with contextlib.redirect_stdout(Tty()):
+            self.assertEqual(ui.cli_flags(), ["--color", "always"])
+            ui.configure(color="auto", plain=True)
+            self.assertEqual(ui.cli_flags(), ["--plain"])
+
+    def test_a_forced_color_on_a_pipe_does_not_make_the_child_explain_itself(self) -> None:
+        with mock.patch.dict(os.environ, {"CLICOLOR_FORCE": "1"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ui.cli_flags(), [])
 
 
 class HelperGoldenTests(UiCase):

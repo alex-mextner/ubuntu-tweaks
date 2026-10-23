@@ -6,7 +6,9 @@ is ``run(ctx: Context, args: argparse.Namespace) -> int | None`` (``None`` means
 
 Public API:
 
-- ``Context(repo_root, profile, only)``: ``repo_root`` is the umbrella checkout, ``profile`` a
+- ``Context(repo_root, profile, only, running_root)``: ``repo_root`` is the umbrella checkout (the *stable*
+  checkout, ``checkout.stable_checkout``: what plans link into and read modules from), ``running_root`` the
+  checkout whose code runs (informational: ``None`` means the same as ``repo_root``), ``profile`` a
   ``Profile`` (already resolved from ``--profile`` / ``--machine``), ``only`` the frozenset
   from ``--only a,b`` (empty = everything); ``modules_dir`` is ``repo_root / "modules"``;
   ``manifests()`` is every module, the profile's own included (``manifest.discover_modules``);
@@ -31,6 +33,7 @@ class Context:
     repo_root: Path
     profile: Profile
     only: frozenset[str] = frozenset()
+    running_root: Path | None = None
 
     @property
     def modules_dir(self) -> Path:

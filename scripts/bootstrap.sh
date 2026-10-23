@@ -1,7 +1,7 @@
 #!/bin/sh
 # One command on a stock Ubuntu (no curl, no git): the four prerequisites, the checkout, `ubuntu-tweak init`.
 #   sh bootstrap.sh          preview only (init without --commit)
-#   sh bootstrap.sh --yes    init --commit --yes: install and apply without asking
+#   sh bootstrap.sh --yes    init --commit: install and apply (the commit is the consent; nothing is asked)
 #   sh bootstrap.sh ARGS     anything else goes to `ubuntu-tweak init` as it is (--commit, --no-sudo)
 # Spec: docs/specs/ubuntu-tweak-cli.md, "One command on a fresh machine". Prerequisites are installed
 # even for the preview: without git and python3-gi there is nothing to preview with.
@@ -31,6 +31,6 @@ fi
 
 if [ "${1:-}" = "--yes" ]; then
     shift
-    set -- --commit --yes "$@"
+    set -- --commit "$@"
 fi
 exec "$DIR/bin/ubuntu-tweak" init "$@"

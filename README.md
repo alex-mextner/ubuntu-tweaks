@@ -7,6 +7,9 @@ My personal Ubuntu (GNOME, Wayland) tweaks.
 One command on a stock Ubuntu: the script installs `git curl ca-certificates python3-gi` with `sudo`, clones this
 repo with its submodules to `~/ubuntu-tweaks` (override with `UBUNTU_TWEAKS_DIR`) and runs `ubuntu-tweak init`.
 
+The CLI keeps its links (extensions, `~/.local/bin/ubuntu-tweak`) in one stable checkout: `$UBUNTU_TWEAKS_DIR`, else the main
+working tree of the repo it runs from, so running from a temporary git worktree never leaves dangling links (spec: *Checkout*).
+
 First, your settings profile lives in a repo of your own GitHub account:
 
 ```sh
@@ -21,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/alex-mextner/ubuntu-tweaks/main/scr
 ```
 
 Without `--yes` it only previews (`init` without `--commit`); `--yes` is the explicit consent that turns it into
-`init --commit --yes`. No `curl` yet: `wget -qO- <same url> | sh -s -- --yes` or `sudo apt-get install -y curl`
+`init --commit`. No `curl` yet: `wget -qO- <same url> | sh -s -- --yes` or `sudo apt-get install -y curl`
 first. `init` ends with a **Manual steps** block (gh token, AMO key, iCloud sign-in, ...): what only you can
 finish, each with how, all in the spec's *Manual steps* table. The same by hand:
 
@@ -40,8 +43,7 @@ The dotfiles repo is found through `gh` in your account under the names `.files`
 Then log out and back in (the Shell on Wayland loads extension code only at login). Repo
 extensions, including the dock submodule, are symlinked into
 `~/.local/share/gnome-shell/extensions`, so the repo stays the source of truth. Re-running is safe.
-`./install.sh` still works: it is `bin/ubuntu-tweak init --commit`; a non-interactive run needs
-`--yes` to install missing apt packages (`./install.sh --yes`).
+`./install.sh` still works: it is `bin/ubuntu-tweak init --commit`.
 
 Upgrading a clone from before the dock rename (submodule path
 `gnome-extensions/dash2dock-lite@icedman.github.com` → `gnome-extensions/hyperdock`):
@@ -59,13 +61,27 @@ private settings profile (default `<your dotfiles repo>/ubuntu`, found through `
 `$UBUNTU_TWEAK_PROFILE`; per-machine overlay named by `/etc/hostname` or `--machine`). Every
 mutating command previews first and changes nothing without `--commit`.
 
+**Root.** Actions marked `[sudo]` need root. With `--commit` (and no `--no-sudo`) the tool asks for your sudo
+password **once**, before the first root action, and keeps the sudo ticket alive for the whole run; a preview never
+asks. Where it cannot ask (a sandbox with `no_new_privs`, no terminal, a wrong password) it stops before the first
+root action with exit **6**, says why and prints the command to run from a normal terminal.
+
+**One command repairs everything.** `ubuntu-tweak apply --commit` (and `init --commit` on a fresh machine) asks for
+sudo once, installs the apt packages that are missing (what `doctor --yes` does), applies the whole plan and ends with
+`N changed` and what only you can finish, each with the reason. `--commit` is the consent: nothing else is asked.
+There is no separate `fix` command. A second run says `0 changed`.
+
+**`--dry-run` everywhere.** Every command accepts `--dry-run`: it previews exactly like the run without `--commit`,
+changes nothing, never asks for sudo and says `dry run: nothing was changed`; together with `--commit` it is a usage
+error (exit 2).
+
 | Command | What it does |
 |---|---|
 | `init [--commit]` | fresh system: `doctor`, submodules, CLI link in `~/.local/bin`, then `apply`; preview without `--commit` |
-| `apply [--commit] [--no-sudo]` | print the plan (what would change), or run it; a second run says `0 changed` |
+| `apply [--commit] [--no-sudo]` | print the plan (what would change), or repair the machine: sudo once, missing apt packages, then the plan; a second run says `0 changed` |
 | `status` | Missing / Modified / Extra; exit 3 when anything declared is missing or modified |
 | `update [--commit]` | `git pull --ff-only`, update submodules, then `apply` |
-| `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them |
+| `doctor [--yes]` | check `python3-gi`, `dconf-cli`, `git`, `glib-compile-schemas` and module deps; `--yes` installs them (asks for sudo once) |
 | `list`, `machine` | read-only: modules (kind, enabled, source); machine overlay and where each setting comes from |
 | `capture [--commit] [--dry-run] [--summary] [--report FILE] [--only …] [-v]` | read-only inventory of the live system, printed as the exact diff the profile would get (SUMMARY block first; `--dry-run` is the explicit no-write mode, `--summary` prints only the summary); `--commit` writes it into the profile working tree (never runs git) |
 | `bundles [--show NAME]` | read-only: the settings bundles, where each applies, shadowed / duplicated / conflicting keys |
@@ -75,11 +91,19 @@ mutating command previews first and changes nothing without `--commit`.
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`
 (local extension); `memguard` and `apple-hid-battery` are root-level `system` modules. The `init` pipeline is a
-module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `brew` 40, `ssh-server` 50,
+module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `dotfiles` 35, `shell-rc` 36,
+`brew` 40, `ssh-server` 50,
 `passwords-app` 60 / `passwords-app-polkit` 61, `firefox` 70 / `firefox-policy` 71 / `firefox-autologin` 72 /
 `firefox-passkey-qr` 73 (off by default), `hyperdock` 80, then your settings and `files/`, then the opt-in `rig`
-100 (+ tmux, omp, ctmux) and `dotfiles` 110 (spec: *Init pipeline*; switch one off with
+100 (+ tmux, omp, ctmux) (spec: *Init pipeline*; switch one off with
 `[modules.<name>] enabled = false` in `machine.toml`).
+
+**Your dotfiles repository comes first.** `dotfiles` clones it right after `git` and `gh`, and the plan links its
+shell rc files (`.zprofile`, `.zshrc`, `.profile` at the repository root) into `$HOME`; a real file already there is
+backed up first, and a name your profile's `files/` links wins. `shell-rc` only creates a minimal `~/.zprofile` /
+`~/.zshrc` for what neither has. The git identity is taken from `[git]` in the profile, else what `git config --global`
+already has, else the repository's `.gitconfig`, else `gh api user`; only when nothing knows it, the plan warns
+(not an error). Settings that wait for extension code the same run installs are listed as *staged*, not skipped.
 
 `passwords-app`, `passwords-app-polkit`, `firefox`, `firefox-policy`, `firefox-autologin`, `firefox-passkey-qr`
 and `rig` integrate tools published by the project author (passwords-app, firefox-passkey-qr, rig, ctmux). Each
@@ -90,6 +114,14 @@ fetches its tool from one `[source] repo` URL in its `module.toml`, which a prof
 Tests: `scripts/ci.sh`; the end-to-end check on a scratch dconf and HOME is `scripts/integration.sh`
 (module preset, two settings bundles with reasons, machine overlay, linked files, `capture` preview; it never
 touches your dconf).
+
+### Session log
+
+Every run writes everything it printed (stdout, stderr marked with `! `, the questions it asked and your answers,
+colors removed, secrets masked) to `~/.local/state/ubuntu-tweaks/logs/<UTC timestamp>-<command>.log`
+(`$XDG_STATE_HOME` honoured; mode `0600`). **`~/.local/state/ubuntu-tweaks/logs/latest.log`** is the newest one: point an
+agent at it ("read latest.log and tell me what went wrong"). The newest 50 are kept. Not logged: the sudo password
+prompt and anything you type into a child tool's own prompt. Details: spec, *Session log*.
 
 ### Settings workflow: preview → commit → review → PR
 
