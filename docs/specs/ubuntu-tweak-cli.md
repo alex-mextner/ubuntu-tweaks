@@ -1957,7 +1957,10 @@ top-level entry of `~/.config`, `~/.local/share`, `~/.local/bin`, and the dotfil
 (a changed conffile, `/etc/default`, system units, polkit, sudoers.d, apt sources: read without root where
 the file allows it, else reported as `needs root to read`), `apt:<name>` (manually installed packages), `snap:`,
 `flatpak:`, `brew:`, `pipx:`, `uv:`, `npm:`, `bun:`, `cargo:`, `unit:<name>` (enabled systemd user units and
-timers), `autostart:<name>`, `extension:<uuid>`, `cron:`, `ssh:`, `git:`.
+timers), `autostart:<name>`, `extension:<uuid>`, `cron:`, `ssh:`, `git:`, and `disk:` (the ids `disk:uuid:<UUID>`,
+`disk:label:<label>`, `disk:dev:<path>`, `disk:fstab:<mount point or source>` and the single `disk:loops`: a filesystem
+of a block device, see the `disk` adapter). `coverage --check-profile` accepts a `match` that leads into any of these
+schemes.
 
 **Adapter interface** (`ubuntu_tweaks/adapters/<name>.py`, found like planners: dropping a file registers it):
 
