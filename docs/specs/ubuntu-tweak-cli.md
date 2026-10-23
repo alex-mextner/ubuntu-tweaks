@@ -2052,7 +2052,7 @@ uuid = "fcbf521d-af6b-463d-9959-d25f686b3379"   # exactly one of uuid | label | 
 fstype = "apfs"                                  # ext2/3/4 xfs btrfs f2fs exfat vfat ntfs hfsplus udf iso9660 apfs
 description = "MacBook backups (USB, APFS)"      # the comment above the fstab line
 # optional, with their defaults:
-mountpoint = "/mnt/mac-backups"   # /mnt/<name>; "~/x" is the desktop user's home; system directories are refused
+mountpoint = "/mnt/mac-backups"   # default /mnt/<name>; allowed: below /mnt, /media/<you>, or "~/x" in the desktop user's home. Refused: those directories themselves, other homes, /var /root /etc /boot /usr /opt /srv /tmp /proc /sys /dev /run /snap, /
 read_only = true                  # true for ntfs, apfs, hfsplus, udf, iso9660 (a foreign OS owns the disk); false for the rest
 driver = "auto"                   # apfs: auto | fuse | kernel; ntfs: ntfs3 | ntfs-3g
 owner = "alex"                    # uid/gid for filesystems without POSIX owners (ntfs exfat vfat hfsplus udf iso9660 apfs); default the desktop user
@@ -2060,8 +2060,12 @@ automount = true                  # x-systemd.automount: mounted on first access
 device_timeout = "10s"            # x-systemd.device-timeout: how long a missing disk delays anything
 idle_timeout = "5min"             # x-systemd.idle-timeout (unmount when idle); default unset
 volume = 0                        # apfs container volume number
-options = ["noatime"]             # extra fstab options (not ro/rw/uid/gid/nofail/x-systemd.*)
+options = ["noatime"]             # extra fstab options (not ro/rw/uid/gid/nofail/x-systemd.*); "noexec" is yours to add; "suid" / "dev" opt out of the hardening below
 ```
+
+Every string value (description, label, owner, ...) is free of control, format and line-separator characters (newline, tab,
+U+0085, U+2028, bidi controls, ...): the values end up in a line-oriented file and a description such as
+`x\n/dev/sda1 / ext4 ...` must never become a second fstab line (`ConfigError`, exit 2, naming the key).
 
 Nothing declared, nothing planned: the module is on by default and belongs to no init step. The declaration is parsed by
 `ubuntu_tweaks/disks.py` (pure; every error names its key and exits 2), the module is `modules/disks/disks` (the *Service
@@ -2069,39 +2073,62 @@ modules* contract: `check`, `status`, `plan`, `install`; options through `UBUNTU
 
 Facts, in the order `status` prints them (per disk unless noted):
 
-1. the driver: `apfs-fuse` built and installed (`/usr/local/bin/apfs-fuse`, stamped with the pinned commit) and `fuse3`;
+1. the driver: `apfs-fuse` built and installed (`/usr/local/bin/apfs-fuse`: a regular file owned by root, not writable by group or
+   others, stamped with the pinned commit and `root-build`, so a binary an older version built as the desktop user is rebuilt by root) and `fuse3`;
    or `apfs-dkms` (the `apfs` kernel module loadable); or `ntfs-3g`. Other filesystems need nothing;
 2. the device `/dev/disk/by-uuid/<uuid>` (by-label, by-partuuid): informational, **never drift**: an unplugged disk is not a
    failure (the entry is `nofail`, so the machine boots without it);
-3. the entry in the managed block of `/etc/fstab`: `# BEGIN ubuntu-tweaks disks` ... `# END ubuntu-tweaks disks`, text-equal
-   to the generated line, e.g. `/dev/disk/by-uuid/fcbf521d-... /mnt/mac-backups fuse.apfs-fuse
-   ro,allow_other,uid=1000,gid=1000,nofail,x-systemd.automount,x-systemd.device-timeout=10s 0 0`; the block lists no disk the
-   profile does not declare (a removed declaration removes its line, and the block when it was the last); no other line of the
-   file uses the same device or mount point (a `manual` fact naming the line numbers);
-4. the mount point exists (`/mnt/...` stays root's; directories created inside the user's home belong to the user);
+3. the managed block of `/etc/fstab`: `# BEGIN ubuntu-tweaks disks` ... `# END ubuntu-tweaks disks`, **text-equal to the generated
+   block, comments included** (a changed `description`, `options` or driver is drift and is rewritten; a hand-edited comment
+   inside the block too), e.g. `/dev/disk/by-uuid/fcbf521d-... /mnt/mac-backups fuse.apfs-fuse
+   ro,allow_other,uid=1000,gid=1000,nosuid,nodev,nofail,x-systemd.automount,x-systemd.device-timeout=10s 0 0`; the block lists
+   no disk the profile does not declare (a removed declaration removes its line, and the block when it was the last); no other
+   line of the file uses the same device or mount point (a `manual` fact naming the line numbers);
+   **hardening**: every entry carries `nosuid,nodev` (a disk another machine wrote can hold setuid files and device nodes that
+   a root-mounted tree would honour); `noexec` is not added (working checkouts and `node_modules/.bin` need `exec`), declare
+   `options = ["noexec"]` for a disk that only stores data, `options = ["suid"]` / `["dev"]` to opt out on purpose;
+4. the mount point exists, is a real directory and no component of it below `/mnt`, `/media/<user>` or the home is a symbolic
+   link (a root mount through a link lands wherever it points; a link there is a `manual` fact and a `needs manual` line of
+   `plan`); `/mnt/...` stays root's, directories created inside the user's home are the user's;
 5. systemd knows the generated mount unit (`LoadState=loaded`) and its automount unit is active (`mount` unit when
    `automount = false` and the disk is attached);
 6. when something is mounted there: it is read-only exactly when declared (a `manual` fact: the module never remounts or
    unmounts a busy filesystem).
 
-`install`, as root, in this order: build or install the driver; create the mount points; verify the candidate `/etc/fstab`
-with `findmnt --verify` (refused, nothing written, when it has **more** errors than the current file: errors the file already
-had are not the module's to block on) and write it atomically after saving the original once as `/etc/fstab.pre-ubuntu-tweaks`;
+`install`, as root, in this order: refuse (`needs manual`, exit 10, **nothing installed, created, stopped or written**) when a
+mount point of *any* declared disk has a symbolic link on its path, when the home directory a mount point lives in does not
+exist (root never creates it), or when a disk the profile no longer asks for (declaration removed, mount point moved,
+`automount` switched off) is **still mounted** (stopping its automount unit detaches the filesystem; this module never
+unmounts: `umount` it, then run again); `plan` prints the same three as `needs manual:` lines, never as the `mkdir` or
+`systemctl stop` they would otherwise be; build or install the driver; create the mount points one directory at a time
+through descriptors (`mkdir` and `open` relative to the parent with `O_NOFOLLOW`, `fchown` of the directory just opened
+for what lands in the user's home), so a link swapped in after the check is refused, never followed; **a mount point that
+already exists is only `lstat`ed, never opened** (opening the directory of an active automount unit would mount the disk,
+and fail with it unplugged); verify the candidate `/etc/fstab` with `findmnt --verify` (refused, nothing written, when it
+has **more** errors than the current file: errors the file already had are not the module's to block on); stop the
+automount unit of every line the block in the file has and the new one does not, because systemd keeps a running unit
+after its fstab line is gone (done **before** the file changes, so a failed stop leaves the old block and the next run
+stops it; asked once more right before the stop, because a driver build can take minutes and a disk mounted meanwhile is
+refused, not detached); write the file atomically after saving the original once as `/etc/fstab.pre-ubuntu-tweaks`;
 `systemctl daemon-reload`; `systemctl start <automount>` and, when the disk is attached, `systemctl start <mount>`, so the
-mount works at once and the next `check` is green. It never formats, repairs, unmounts, remounts or writes to a disk, and never
-touches a line of `/etc/fstab` outside its block.
+mount works at once and the next `check` is green. It never formats, repairs, unmounts, remounts or writes to a disk, and
+never touches a line of `/etc/fstab` outside its block.
+A mount point inside another declared mount point is refused when the declarations are parsed (creating it would open the other disk's automount point). `plan` stops at the `needs manual:` lines, as `install` does. The first refusal covers the state before anything runs; the busy re-check right before the stop can still follow a driver build and mount-point creation, and says only that the fstab was not changed. A link planted in the user's home *after* `install` is reported by `check`, not prevented: the home is the desktop user's own tree, so use `/mnt` where that matters.
+`/media/<user>/...` is allowed next to `/mnt/...` and the home, but udisks2 manages that directory for removable media too:
+prefer `/mnt` for a disk that is meant to stay.
 
 **Drivers and the APFS decision.** Nothing in Ubuntu 26.04 mounts APFS out of the box:
 
 | | `apfs-fuse` (default) | `apfs-dkms` (`driver = "kernel"`) |
 |---|---|---|
-| what | userspace, `sgan81/apfs-fuse`, last commit 2023-03-12, **read-only**, no packages: the module builds the pinned commit with `cmake` as the desktop user (`runuser`) and installs `apfs-fuse` and `apfsutil` into `/usr/local/bin` as root; GCC 15 needs `-include cstdint -include vector -include cstring` and cmake 4 needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` | Ubuntu's `apfs-dkms` 0.3.18 (universe; `linux-apfs-rw`), kernel module, **experimental write support** |
+| what | userspace, `sgan81/apfs-fuse`, last commit 2023-03-12, **read-only**, no packages: the module builds the pinned commit with `cmake` **as root in a fresh `0700` directory under `/var/tmp`** (the source is content-pinned and the checkout is verified with `git rev-parse HEAD` before anything is built; nothing a user can write is ever copied into `/usr/local/bin`, where systemd runs it as root) and installs `apfs-fuse` and `apfsutil` there (each build result is read once through a no-follow descriptor and written by root); GCC 15 needs `-include cstdint -include vector -include cstring` and cmake 4 needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` | Ubuntu's `apfs-dkms` 0.3.18 (universe; `linux-apfs-rw`), kernel module, **experimental write support** |
 | builds on this machine | yes: container `ubuntu:26.04`, GCC 15.2, mounts and reads the real disk | yes: `make -C /lib/modules/7.0.0-38-generic/build M=...` produced `apfs.ko`, vermagic `7.0.0-38-generic` (also upstream v0.3.22) |
-| Secure Boot | no kernel module, nothing to sign | SecureBoot is **enabled** here and only Canonical's CA is enrolled: an unsigned DKMS module is refused by the kernel; the module reports the MOK enrollment (`mokutil --import`, reboot) as a manual step |
+| Secure Boot | no kernel module, nothing to sign | SecureBoot is **enabled** here and only Canonical's CA is enrolled: an unsigned DKMS module is refused by the kernel. The module counts the kernel driver as working only when the kernel can load it: `apfs` is listed in `/proc/filesystems` (`loaded`), or the module is installed and, under lockdown (`/sys/kernel/security/lockdown` `[integrity]` / `[confidentiality]` or `sig_enforce`), signed by a Canonical key or by a key `mokutil --list-enrolled` lists. `modinfo -F sig_key` is compared with the **Subject Key Identifier** and the **Serial Number** fields of the listing only (hex without colons, case or leading zeros; a short serial is read from its `(0x..)` form), never with other hex such as an Authority Key Identifier or a modulus. **Unsigned, signed by a key that is not enrolled, or a listing that cannot be read are `blocked`**: `auto` stays on FUSE, an explicit `driver = "kernel"` is a `manual` fact (and a `needs manual` plan line) with the remedy. `install` always tries `modprobe apfs` when it is not loaded (the proof), and a refusal is `needs manual` with the MOK enrollment (`mokutil --import`, reboot) on the first and on every later apply, before anything is written |
 | failure mode | a crash ends one process | a bug is a kernel oops; the write support "may corrupt your data" (upstream README) |
 
-`driver = "auto"` (the default) takes the kernel module only when the running kernel can already load one or when the
-declaration says `read_only = false`; otherwise FUSE. **Read-only is the default for APFS** because the disks are
+`driver = "auto"` (the default) takes the kernel module only when it is loaded or usable by the rule above, or when the
+declaration says `read_only = false`; otherwise FUSE, so `auto` never switches a working FUSE entry to a module Secure Boot
+would reject. **Read-only is the default for APFS** because the disks are
 Apple's volumes: nothing here needs to change them, and a write bug would destroy the only copy of a backup. Read-write needs
 `read_only = false`, which selects the kernel module (`mount ... rw,readwrite`); declaring it with `driver = "fuse"` is
 invalid config (`apfs-fuse cannot write`). A FileVault-encrypted volume is detected with `apfsutil` (`FileVault: Yes`) and
@@ -2117,9 +2144,13 @@ loops) are excluded with that reason, the ones declared in `[modules.disks.mount
 every foreign filesystem, the label as `description`. A Windows partition (`ntfs`, `Windows 11`) is proposed read-only and
 never mounted by force.
 
-**Real-root verification.** `modules/disks/tests` (a stateful fake machine and a scratch `/etc`) and `tests/test_disks_lib.py`
-exercise everything above. A real build, `findmnt --verify` and a `mount` through the generated fstab line were run as root in a
-container with the disk attached read-only, and the real `systemd-fstab-generator` turned the block into
+**Real-root verification.** `modules/disks/tests` (a stateful fake machine and a scratch `/etc`; one test runs the real
+`findmnt --verify` over the generated lines and asserts no parse error and no error about an unplugged disk) and
+`tests/test_disks_lib.py` exercise everything above; both suites pass as a normal user and as root (fixed non-root uid in the
+fixtures). A real build as root, `findmnt --verify` and a `mount` through the generated fstab line were run as root in a
+container with the disk attached read-only (`--device /dev/sda2:/dev/sda2:r`): `ro,nosuid,nodev,...,allow_other` fuse mount, a
+write gives `Read-only file system`, a second install changes nothing, a changed description is drift then applied, an empty
+declaration stops the automount and restores the original fstab. The real `systemd-fstab-generator` turned the block into
 `mnt-mac\x2dbackups.mount` and `.automount` (run on the workstation). A container cannot show what needs the machine's own
 systemd and udev; these are checked after the user's `apply --commit`: the first access to `/mnt/mac-backups` mounting it,
 the mount coming back after a reboot and after re-plugging the disk (`systemctl status mnt-mac\x2dbackups.automount`,

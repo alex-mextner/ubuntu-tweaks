@@ -14,15 +14,20 @@ lives in ``machines/<host>/machine.toml``): ``uuid`` / ``label`` / ``partuuid``,
 ``/etc/fstab`` (everything else in the file is left alone) and never unmounts, formats or repairs anything.
 
 An unplugged disk is not drift: its entry is ``nofail`` and ``x-systemd.automount``, so the machine boots without it
-and the disk mounts on first access once it is attached. Spec: docs/specs/ubuntu-tweak-cli.md, *Disks*.
+and the disk mounts on first access once it is attached. Every entry is ``nosuid,nodev``. ``install`` refuses a mount
+point behind a symbolic link before it changes anything, builds apfs-fuse as root in a private directory (never in
+a tree a user can write) and stops the automount units of declarations that are gone. Spec:
+docs/specs/ubuntu-tweak-cli.md, *Disks*.
 """
 
 from __future__ import annotations
 
+import enum
 import os
 import pwd
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
@@ -52,13 +57,38 @@ FSTAB_BACKUP = "etc/fstab.pre-ubuntu-tweaks"
 APFS_FUSE_BIN = "usr/local/bin/apfs-fuse"
 APFSUTIL_BIN = "usr/local/bin/apfsutil"
 APFS_FUSE_STAMP = "usr/local/share/ubuntu-tweaks/apfs-fuse.commit"
+# What the stamp says: the commit and who built it. A binary an earlier version built as the desktop user carries a stamp
+# of the commit alone, so it is never taken for this one and is rebuilt by root.
+APFS_FUSE_RECIPE = "root-build"
 APFS_FUSE_PACKAGES = ("fuse3",)
 APFS_FUSE_BUILD_DEPS = ("git", "cmake", "g++", "make", "pkg-config", "libfuse3-dev", "libbz2-dev", "zlib1g-dev", "libattr1-dev", "ca-certificates")
 # apfs-fuse's last commit predates GCC 15, whose headers no longer pull in these three by accident
 APFS_FUSE_CXXFLAGS = "-include cstdint -include vector -include cstring"
 NTFS_3G_PACKAGE = "ntfs-3g"
+PROC_FILESYSTEMS = "proc/filesystems"
+LOCKDOWN = "sys/kernel/security/lockdown"
+SIG_ENFORCE = "sys/module/module/parameters/sig_enforce"
+BLOCK_FACT = "/etc/fstab block is the generated text, comments included"
+SECURE_BOOT_REMEDY = (
+    "With Secure Boot on, DKMS modules must be signed with an enrolled key: `sudo mokutil --import "
+    '/var/lib/shim-signed/mok/MOK.der`, reboot and confirm in the blue screen; or declare driver = "fuse" '
+    "(read-only, no kernel module)"
+)
 _VERIFY_SUMMARY = re.compile(r"(\d+) parse errors?, (\d+) errors?")
 _FILEVAULT = re.compile(r"^Volume (\d+) .*?^FileVault:\s*(\w+)", re.MULTILINE | re.DOTALL)
+# The two fields of an enrolled certificate that can equal ``modinfo -F sig_key``: its Subject Key Identifier (colon-separated
+# hex on the next line) and its Serial Number (colon-separated hex, or ``<decimal> (0x<hex>)`` for a short one). Hex printed
+# elsewhere in the listing (Authority Key Identifier, moduli, signatures) is not an enrolled key.
+_ENROLLED_ID = re.compile(
+    r"(?:Subject Key Identifier|Serial Number):\s*(?P<colon>[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2})+|\d+ \(0x(?P<short>[0-9A-Fa-f]+)\))"
+)
+
+
+class KernelApfs(enum.StrEnum):
+    LOADED = "loaded"  # registered in the running kernel: the one proof that it loads
+    USABLE = "usable"  # installed and nothing says the kernel refuses it (what a non-root check can know)
+    BLOCKED = "blocked"  # installed, but Secure Boot lockdown rejects it or its key cannot be verified
+    MISSING = "missing"
 
 
 def lookup_owner(name: str) -> tuple[int, int]:
@@ -67,6 +97,17 @@ def lookup_owner(name: str) -> tuple[int, int]:
     except KeyError:
         raise ModuleError(f"owner {name!r} is not a user of this machine") from None
     return entry.pw_uid, entry.pw_gid
+
+
+def key_id(text: str) -> str:
+    """A key or serial number without colons, case or leading zeros, so the spellings of ``modinfo`` and ``mokutil`` meet."""
+    return text.replace(":", "").strip().lstrip("0").lower()
+
+
+def enrolled_key_ids(listing: str) -> set[str]:
+    """The Subject Key Identifiers and Serial Numbers of ``mokutil --list-enrolled`` output, as ``key_id`` spells them.
+    ``short`` is the ``0x`` form of a short serial; ``colon`` is the colon-separated form (the long serial, the key id)."""
+    return {key_id(found.group("short") or found.group("colon")) for found in _ENROLLED_ID.finditer(listing)}
 
 
 class Disks(Module):
@@ -81,18 +122,34 @@ class Disks(Module):
         *,
         is_root: bool,
         owner_ids: Callable[[str], tuple[int, int]] = lookup_owner,
+        chown: Callable[[int, int, int], None] = os.fchown,
+        trusted_uid: int = 0,
     ) -> None:
         self._process = process
         self._root = root
         self._account = account
         self._is_root = is_root
         self._owner_ids = owner_ids
-        self._specs = lib.parse_disks(options, home=str(account.home))
+        self._chown = chown  # given an open directory: no path, so no link can be followed
+        self._trusted_uid = trusted_uid  # the owner a root-run binary must have
+        self._specs = lib.parse_disks(options, home=str(account.home), user=account.name)
+        self._kernel: tuple[KernelApfs, str] | None = None
+        self._home = str(account.home).rstrip("/")
 
     # -- facts about the machine ------------------------------------------------------------------
 
     def _path(self, relative: str) -> Path:
         return self._root / relative
+
+    def _rooted(self, absolute: str | Path) -> Path:
+        """``absolute`` as seen from the module's root (``/`` in production, a scratch directory in tests)."""
+        return self._root / str(absolute).lstrip("/")
+
+    def _read(self, relative: str) -> str:
+        try:
+            return self._path(relative).read_text(encoding="utf-8")
+        except OSError:
+            return ""
 
     def _query(self, *argv: str) -> tuple[int, str]:
         result = self._process.query(list(argv), timeout=30)
@@ -108,14 +165,51 @@ class Disks(Module):
         code, out = self._query("dpkg-query", "-W", "-f=${Status}", package)
         return code == 0 and "install ok installed" in out
 
-    def _kernel_apfs(self) -> str | None:
-        """The version of the ``apfs`` kernel module the running kernel can load, else None."""
+    def _apfs_loaded(self) -> bool:
+        return any(line.split()[-1:] == ["apfs"] for line in self._read(PROC_FILESYSTEMS).splitlines())
+
+    def _modules_must_be_signed(self) -> bool:
+        lockdown = self._read(LOCKDOWN)
+        return "[integrity]" in lockdown or "[confidentiality]" in lockdown or self._read(SIG_ENFORCE).strip() == "Y"
+
+    def _apfs_kernel_state(self) -> tuple[KernelApfs, str]:
+        """``(state, reason)`` of the ``apfs`` kernel module; asked of the machine once per run (``_forget_kernel``
+        after something changed it), because every answer costs up to four processes."""
+        if self._kernel is None:
+            self._kernel = self._probe_apfs_kernel()
+        return self._kernel
+
+    def _forget_kernel(self) -> None:
+        self._kernel = None
+
+    def _probe_apfs_kernel(self) -> tuple[KernelApfs, str]:
+        if self._apfs_loaded():
+            return KernelApfs.LOADED, ""
         code, out = self._query("modinfo", "-F", "version", "apfs")
-        return out.splitlines()[0].lstrip("v") if code == 0 and out else None
+        if code != 0 or not out:
+            return KernelApfs.MISSING, ""
+        if not self._modules_must_be_signed():
+            return KernelApfs.USABLE, ""
+        code, signer = self._query("modinfo", "-F", "signer", "apfs")
+        if code == 0 and signer.startswith("Canonical"):
+            return KernelApfs.USABLE, ""
+        code, key = self._query("modinfo", "-F", "sig_key", "apfs")
+        if code != 0 or not key:
+            return KernelApfs.BLOCKED, "the apfs module is unsigned and this kernel only loads signed modules (Secure Boot lockdown)"
+        code, listing = self._query("mokutil", "--list-enrolled")
+        if code != 0:
+            # An answer the module cannot verify is not a working driver: auto stays on FUSE, install still tries modprobe.
+            return KernelApfs.BLOCKED, f"the apfs module is signed with key {key} but `mokutil --list-enrolled` cannot say whether it is enrolled"
+        if key_id(key) not in enrolled_key_ids(listing):
+            return KernelApfs.BLOCKED, f"the apfs module is signed with key {key}, which is not enrolled (Secure Boot lockdown)"
+        return KernelApfs.USABLE, ""
+
+    def _apfs_kernel_ok(self) -> bool:
+        return self._apfs_kernel_state()[0] in (KernelApfs.LOADED, KernelApfs.USABLE)
 
     def _driver(self, spec: lib.DiskSpec) -> str:
         auto = spec.fstype == "apfs" and spec.driver == "auto"
-        return lib.resolve_driver(spec, kernel_apfs=auto and self._kernel_apfs() is not None)
+        return lib.resolve_driver(spec, kernel_apfs=auto and self._apfs_kernel_ok())
 
     def _ids(self, spec: lib.DiskSpec) -> tuple[int, int] | None:
         if not spec.maps_owner:
@@ -169,15 +263,19 @@ class Disks(Module):
     # -- drivers ------------------------------------------------------------------------------------
 
     def _apfs_fuse_ok(self) -> bool:
-        binary = self._path(APFS_FUSE_BIN)
+        """The pinned build is installed as a regular file only root can write (a binary systemd runs as root)."""
         try:
-            stamped = self._path(APFS_FUSE_STAMP).read_text(encoding="utf-8").strip()
+            info = self._path(APFS_FUSE_BIN).lstat()
         except OSError:
             return False
-        return binary.is_file() and os.access(binary, os.X_OK) and stamped == lib.PINNED_APFS_FUSE[1]
+        executable = bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        others_can_write = bool(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        root_only = stat.S_ISREG(info.st_mode) and executable and not others_can_write and info.st_uid == self._trusted_uid
+        return root_only and self._read(APFS_FUSE_STAMP).strip() == self._stamp()
 
-    def _apfs_kernel_ok(self) -> bool:
-        return self._kernel_apfs() is not None
+    @staticmethod
+    def _stamp() -> str:
+        return f"{lib.PINNED_APFS_FUSE[1]} {APFS_FUSE_RECIPE}"
 
     def _driver_findings(self) -> list[Finding]:
         found: list[Finding] = []
@@ -188,9 +286,12 @@ class Disks(Module):
             for package in APFS_FUSE_PACKAGES:
                 found.append(Finding(self._package_installed(package), f"package {package}"))
         if "apfs-kernel" in needs:
-            found.append(
-                Finding(self._apfs_kernel_ok(), f"package {lib.APFS_DKMS_PACKAGE}: the apfs kernel module for the running kernel")
-            )
+            subject = f"package {lib.APFS_DKMS_PACKAGE}: the apfs kernel module for the running kernel"
+            state, reason = self._apfs_kernel_state()
+            if state is KernelApfs.BLOCKED:
+                found.append(Finding(False, subject, f"{reason}. {SECURE_BOOT_REMEDY}", manual=True))
+            else:
+                found.append(Finding(state is not KernelApfs.MISSING, subject))
         if "ntfs-3g" in needs:
             found.append(Finding(self._package_installed(NTFS_3G_PACKAGE), f"package {NTFS_3G_PACKAGE}"))
         return found
@@ -208,7 +309,7 @@ class Disks(Module):
                 "attached" if present else "not attached now; the entry mounts it as soon as it is",
             ),
             Finding(entry in managed, f"{who} /etc/fstab entry", "" if entry in managed else entry),
-            Finding(self._path(spec.mountpoint.lstrip("/")).is_dir(), f"{who} mount point {spec.mountpoint}"),
+            self._mountpoint_finding(spec, who),
             Finding(self._loaded(mount_unit), f"{who} systemd knows {mount_unit}"),
         ]
         if spec.automount:
@@ -229,6 +330,13 @@ class Disks(Module):
                 )
             )
         return found
+
+    def _mountpoint_finding(self, spec: lib.DiskSpec, who: str) -> Finding:
+        subject = f"{who} mount point {spec.mountpoint}"
+        problem = self._mountpoint_problem(spec)
+        if problem is not None:
+            return Finding(False, subject, f"{problem}: remove or fix it by hand", manual=True)
+        return Finding(self._rooted(spec.mountpoint).is_dir(), subject)
 
     def findings(self) -> list[Finding]:
         text = self._fstab()
@@ -255,32 +363,62 @@ class Disks(Module):
         extra = [line for line in managed or [] if line not in expected]
         if extra:
             found.append(Finding(False, "/etc/fstab block lists only declared disks", f"stale: {extra[0]}"))
+        generated, current = lib.fstab_block(entries), lib.managed_block(text)
+        entry_facts_ok = not extra and all(entry in (managed or []) for entry in expected)
+        if current is not None and entry_facts_ok and current != generated:
+            found.append(Finding(False, BLOCK_FACT, lib.block_drift(generated, current)))
         return found
 
     # -- plan ---------------------------------------------------------------------------------------
 
+    def _stop_lines(self, entries: list[tuple[lib.DiskSpec, str, str]]) -> list[str]:
+        lines = []
+        for unit, point, mounted in self._active_dropped(entries):
+            if mounted:
+                lines.append(f"needs manual: {self._busy_message(point)}")
+            else:
+                lines.append(f"systemctl stop {unit}  # {point} is no longer asked for and nothing is mounted behind it")
+        return lines
+
     def plan(self) -> list[str]:
         if not self._specs:
-            return ["remove the ubuntu-tweaks disks block from /etc/fstab"] if lib.managed_lines(self._fstab()) is not None else []
+            if lib.managed_lines(self._fstab()) is None:
+                return []
+            return ["remove the ubuntu-tweaks disks block from /etc/fstab"] + self._stop_lines([])
         lines: list[str] = []
         needs = self._needs()
         if "apfs-fuse" in needs and not self._apfs_fuse_ok():
             url, commit = lib.PINNED_APFS_FUSE
-            lines.append(f"apt-get install {' '.join(APFS_FUSE_BUILD_DEPS)}; build apfs-fuse {commit[:7]} from {url} as {self._account.name}")
+            lines.append(f"apt-get install {' '.join(APFS_FUSE_BUILD_DEPS)}; build apfs-fuse {commit[:7]} from {url} as root in a private directory")
             lines.append(f"install /{APFS_FUSE_BIN} and /{APFSUTIL_BIN}")
-        if "apfs-kernel" in needs and not self._apfs_kernel_ok():
-            lines.append(f"apt-get install {lib.APFS_DKMS_PACKAGE} linux-headers-$(uname -r); modprobe apfs")
+        if "apfs-kernel" in needs:
+            state, reason = self._apfs_kernel_state()
+            if state is KernelApfs.MISSING:
+                lines.append(f"apt-get install {lib.APFS_DKMS_PACKAGE} linux-headers-$(uname -r); modprobe apfs")
+            elif state is KernelApfs.BLOCKED:
+                lines.append(f"needs manual: {reason}. {SECURE_BOOT_REMEDY}")
+            elif state is KernelApfs.USABLE:
+                lines.append("modprobe apfs  # installed, not loaded yet")
         if "ntfs-3g" in needs and not self._package_installed(NTFS_3G_PACKAGE):
             lines.append(f"apt-get install {NTFS_3G_PACKAGE}")
         entries = self._entries()
         for spec, _, _ in entries:
-            if not self._path(spec.mountpoint.lstrip("/")).is_dir():
+            problem = self._mountpoint_problem(spec)
+            if problem is not None:
+                lines.append(f"needs manual: {spec.name}: {problem}")
+            elif not self._rooted(spec.mountpoint).is_dir():
                 lines.append(f"mkdir {spec.mountpoint}")
-        managed = lib.managed_lines(self._fstab()) or []
-        changed = [entry for _, _, entry in entries if entry not in managed]
-        if changed or len(managed) != len(entries):
+        lines += self._stop_lines(entries)
+        manual = [line for line in lines if line.startswith("needs manual:")]
+        if manual:  # install refuses before it does anything else: so does the plan
+            return manual + ["nothing else is done until this is settled"]
+        generated, current = lib.fstab_block(entries), lib.managed_block(self._fstab())
+        if current != generated:
+            write, remove = lib.block_changes(generated, current)
             lines.append(f"write the ubuntu-tweaks block of /etc/fstab ({len(entries)} disk(s)); the rest of the file stays")
-            lines += [f"  {entry}" for entry in changed]
+            lines += [f"  {line}" for line in write] + [f"  remove: {line}" for line in remove]
+            if not write and not remove:
+                lines.append("  (the lines are the same; their order or the marker lines differ)")
         for spec, _, _ in entries:
             mount_unit, automount_unit = self._units(spec)
             unit = automount_unit if spec.automount else mount_unit
@@ -293,34 +431,43 @@ class Disks(Module):
     def _run(self, *argv: str) -> None:
         self._process.execute(list(argv))
 
-    def _as_user(self, *argv: str) -> list[str]:
-        """Source from the internet is fetched and compiled as the desktop user; only the install step is root."""
-        if self._account.uid == 0:
-            return list(argv)
-        return ["runuser", "-u", self._account.name, "--", *argv]
+    def _scratch(self) -> Path:
+        """A fresh directory only root can enter: nothing built in it is ever user-writable."""
+        base = self._path("var/tmp")
+        base.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="ubuntu-tweaks-disks-", dir=base))
 
     def _apt_install(self, *packages: str) -> None:
         with environment(DEBIAN_FRONTEND="noninteractive"):
             self._run("apt-get", "install", "-y", *packages)
 
-    def _scratch(self) -> Path:
-        base = self._path("var/tmp")
-        base.mkdir(parents=True, exist_ok=True)
-        work = Path(tempfile.mkdtemp(prefix="ubuntu-tweaks-disks-", dir=base))
-        os.chown(work, self._account.uid, -1)
-        return work
-
     def _fetch(self, work: Path, url: str, commit: str) -> Path:
         src = work / "src"
-        self._run(*self._as_user("git", "clone", "--no-checkout", url, str(src)))
-        self._run(*self._as_user("git", "-C", str(src), "checkout", "--detach", commit))
-        self._run(*self._as_user("git", "-C", str(src), "submodule", "update", "--init", "--recursive"))
+        self._run("git", "clone", "--no-checkout", url, str(src))
+        self._run("git", "-C", str(src), "checkout", "--detach", commit)
+        code, head = self._query("git", "-C", str(src), "rev-parse", "HEAD")
+        if code != 0 or head != commit:
+            raise ModuleError(
+                f"the apfs-fuse checkout is at {head or 'an unknown commit'}, not the pinned {commit[:7]}: nothing was installed"
+            )
+        self._run("git", "-C", str(src), "submodule", "update", "--init", "--recursive")
         return src
 
-    def _install_file(self, source: Path, destination: Path, mode: int = 0o755) -> None:
-        write_file(destination, source.read_bytes(), mode)
+    @staticmethod
+    def _read_built(source: Path) -> bytes:
+        """The bytes of a build result that is a regular file (never a link): read once, through one descriptor."""
+        try:
+            descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as error:
+            raise ModuleError(f"the build result {source} is missing or a symbolic link ({error.strerror}); nothing was installed") from None
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ModuleError(f"the build result {source} is not a regular file; nothing was installed")
+            return stream.read()
 
     def _build_apfs_fuse(self) -> None:
+        """Fetch the pinned commit, build it and install it, all as root in a private directory: root runs only
+        what the pin determines, and nothing a user can write is ever copied into ``/usr/local/bin``."""
         url, commit = lib.PINNED_APFS_FUSE
         self._apt_install(*APFS_FUSE_BUILD_DEPS, *APFS_FUSE_PACKAGES)
         work = self._scratch()
@@ -328,54 +475,144 @@ class Disks(Module):
             src = self._fetch(work, url, commit)
             build = work / "build"
             self._run(
-                *self._as_user(
-                    "cmake", "-S", str(src), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
-                    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", f"-DCMAKE_CXX_FLAGS={APFS_FUSE_CXXFLAGS}",
-                )
+                "cmake", "-S", str(src), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", f"-DCMAKE_CXX_FLAGS={APFS_FUSE_CXXFLAGS}",
             )  # fmt: skip
-            self._run(*self._as_user("cmake", "--build", str(build), "-j", str(min(os.cpu_count() or 2, 4))))
-            for name, destination in (("apfs-fuse", APFS_FUSE_BIN), ("apfsutil", APFSUTIL_BIN)):
-                self._install_file(build / name, self._path(destination))
-            write_file(self._path(APFS_FUSE_STAMP), commit + "\n")
+            self._run("cmake", "--build", str(build), "-j", str(min(os.cpu_count() or 2, 4)))
+            built = {  # both are read before either is written: a bad second result leaves nothing half installed
+                destination: self._read_built(build / name)
+                for name, destination in (("apfs-fuse", APFS_FUSE_BIN), ("apfsutil", APFSUTIL_BIN))
+            }
+            for destination, data in built.items():
+                write_file(self._path(destination), data, 0o755)
+            write_file(self._path(APFS_FUSE_STAMP), self._stamp() + "\n")
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
     def _install_apfs_kernel(self) -> None:
-        _, release = self._query("uname", "-r")
-        self._apt_install(lib.APFS_DKMS_PACKAGE, f"linux-headers-{release}")
+        if self._apfs_kernel_state()[0] is KernelApfs.MISSING:
+            _, release = self._query("uname", "-r")
+            self._apt_install(lib.APFS_DKMS_PACKAGE, f"linux-headers-{release}")
         loaded = self._process.query(["modprobe", "apfs"], timeout=30)
+        self._forget_kernel()
         if loaded.returncode != 0:
             detail = (loaded.stderr or loaded.stdout or "").strip()
             raise NeedsManual(
-                f"{lib.APFS_DKMS_PACKAGE} built the apfs module but the kernel refuses to load it ({detail}). With "
-                "Secure Boot on, DKMS modules must be signed with an enrolled key: `sudo mokutil --import "
-                '/var/lib/shim-signed/mok/MOK.der`, reboot and confirm in the blue screen; or declare driver = "fuse" '
-                "(read-only, no kernel module)"
+                f"{lib.APFS_DKMS_PACKAGE} built the apfs module but the kernel refuses to load it ({detail}). "
+                f"{SECURE_BOOT_REMEDY}"
             )
 
     def _install_drivers(self) -> None:
         needs = self._needs()
         if "apfs-fuse" in needs and not (self._apfs_fuse_ok() and self._package_installed("fuse3")):
             self._build_apfs_fuse()
-        if "apfs-kernel" in needs and not self._apfs_kernel_ok():
+        if "apfs-kernel" in needs and not self._apfs_loaded():
             self._install_apfs_kernel()
         if "ntfs-3g" in needs and not self._package_installed(NTFS_3G_PACKAGE):
             self._apt_install(NTFS_3G_PACKAGE)
 
+    def _anchor(self, spec: lib.DiskSpec) -> str:
+        anchor = lib.mountpoint_anchor(spec.mountpoint, self._home, self._account.name)
+        if anchor is None:  # the declaration parser refuses these: only a hand-built spec gets here
+            raise ModuleError(f"{spec.name}: mount point {spec.mountpoint} is not below /mnt, /media/<user> or the home directory")
+        return anchor
+
+    def _mountpoint_parts(self, spec: lib.DiskSpec) -> tuple[str, tuple[str, ...]]:
+        anchor = self._anchor(spec)
+        return anchor, Path(spec.mountpoint).relative_to(anchor).parts
+
+    def _mountpoint_problem(self, spec: lib.DiskSpec) -> str | None:
+        """What stops a root mount at this path: a home that is not there (root never creates a user's home), a link
+        (a mount through it lands wherever it points) or a file."""
+        anchor, parts = self._mountpoint_parts(spec)
+        if anchor == self._home and not self._rooted(anchor).is_dir():
+            return f"the home directory {anchor} does not exist"
+        for count in range(1, len(parts) + 1):
+            directory = Path(anchor, *parts[:count])
+            path = self._rooted(directory)
+            if path.is_symlink():
+                return f"{directory} is a symbolic link"
+            if not path.exists():
+                return None
+            if not path.is_dir():
+                return f"{directory} is not a directory"
+        return None
+
+    def _mounted_filesystem(self, point: str) -> bool:
+        """A real filesystem (not just the autofs trigger) is mounted at ``point``."""
+        code, out = self._query("findmnt", "-rn", "-o", "FSTYPE", "-M", point)
+        return code == 0 and any(line.split()[:1] not in ([], ["autofs"]) for line in out.splitlines())
+
+    def _active_dropped(self, entries: list[tuple[lib.DiskSpec, str, str]]) -> list[tuple[str, str, bool]]:
+        """``(unit, mount point, a filesystem is mounted behind it)`` of every running automount unit that the block
+        in the file has and the new one does not (declaration removed, mount point moved, ``automount`` off)."""
+        wanted = {self._units(spec)[1] for spec, _, _ in entries if spec.automount}
+        points = lib.automount_points(lib.managed_lines(self._fstab()) or [])
+        return [
+            (unit, point, self._mounted_filesystem(point))
+            for unit, point in sorted(points.items())
+            if unit not in wanted and self._unit_is("is-active", unit, "active")
+        ]
+
+    @staticmethod
+    def _busy_message(point: str) -> str:
+        return (
+            f"{point} is still mounted and the profile no longer asks for its automount unit (declaration removed, mount "
+            f"point moved or automount switched off): unmount it yourself (`umount {point}`), then run this again"
+        )
+
+    def _refuse_unsafe(self, entries: list[tuple[lib.DiskSpec, str, str]]) -> None:
+        """Before anything is installed, created or written, everything only a person can settle stops the run: a
+        home that is not there or a link on a declared mount point, and a disk the profile no longer asks for that is
+        still mounted (stopping its automount unit would detach it; this module never unmounts)."""
+        problems = [
+            f"{spec.name}: mount point {spec.mountpoint}: {problem}"
+            for spec, _, _ in entries
+            if (problem := self._mountpoint_problem(spec)) is not None
+        ]
+        problems += [self._busy_message(point) for _, point, mounted in self._active_dropped(entries) if mounted]
+        if problems:
+            raise NeedsManual("; ".join(problems) + "; nothing was changed")
+
     def _make_mountpoint(self, spec: lib.DiskSpec) -> None:
-        """``/mnt/<name>`` stays root's (systemd mounts over it); directories made inside the user's home are the user's."""
-        target = self._path(spec.mountpoint.lstrip("/"))
-        if target.is_dir():
-            return
-        created = []
-        for directory in (target, *target.parents):
-            if directory.exists():
-                break
-            created.append(directory)
-        target.mkdir(parents=True, exist_ok=True)
-        if self._account.uid != 0 and self._account.home in Path(spec.mountpoint).parents:
-            for directory in created:
-                os.chown(directory, self._account.uid, -1)
+        """Create the mount point one directory at a time through descriptors (``mkdir`` and ``open`` relative to the
+        parent, ``O_NOFOLLOW``), so a link swapped in after the check is refused instead of followed. ``/mnt/<name>``
+        stays root's (systemd mounts over it); directories made inside the user's home are handed to the user. A
+        mount point that already exists is only ``lstat``ed, never opened: opening the directory of an active
+        automount unit would mount the disk (and fail, with the disk unplugged)."""
+        anchor, parts = self._mountpoint_parts(spec)
+        base = self._rooted(anchor)
+        base.mkdir(parents=True, exist_ok=True)  # /mnt and /media/<user>; a home was checked to exist
+        handed_over = self._account.uid != 0 and anchor == self._home
+        parent = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for index, part in enumerate(parts):
+                last = index == len(parts) - 1
+                created = False
+                try:
+                    os.mkdir(part, 0o755, dir_fd=parent)
+                    created = True
+                except FileExistsError:
+                    pass
+                if last and not created:
+                    if not stat.S_ISDIR(os.stat(part, dir_fd=parent, follow_symlinks=False).st_mode):
+                        raise ModuleError(f"{spec.name}: {spec.mountpoint} is not a real directory; remove it by hand")
+                    return
+                if last and not (created and handed_over):
+                    return
+                try:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                except OSError as error:
+                    raise ModuleError(
+                        f"{spec.name}: {part!r} on the way to {spec.mountpoint} is not a real directory ({error.strerror}); "
+                        "remove it by hand"
+                    ) from None
+                os.close(parent)
+                parent = child
+                if created and handed_over:
+                    self._chown(child, self._account.uid, -1)
+        finally:
+            os.close(parent)
 
     def _fstab_errors(self, text: str) -> tuple[int, str]:
         """``findmnt --verify`` errors (parse errors included) of an fstab text, and its report."""
@@ -387,22 +624,23 @@ class Disks(Module):
         summary = _VERIFY_SUMMARY.search(report)
         return (int(summary.group(1)) + int(summary.group(2)) if summary else 0), report
 
-    def _write_fstab(self, entries: list[tuple[lib.DiskSpec, str, str]]) -> bool:
-        """Install the managed block; True when the file changed. A file that findmnt likes less than the current
-        one is never written (errors the file already had are not ours to block on)."""
-        text = self._fstab()
+    def _prepare_fstab(self, text: str, entries: list[tuple[lib.DiskSpec, str, str]]) -> str | None:
+        """The new ``/etc/fstab`` text, or ``None`` when ``text`` is already right. A file that findmnt likes less
+        than the current one is refused (errors the file already had are not ours to block on); nothing is written."""
         merged = lib.merge_fstab(text, lib.fstab_block(entries))
         if merged == text:
-            return False
+            return None
         before, _ = self._fstab_errors(text)
         after, report = self._fstab_errors(merged)
         if after > before:
             raise ModuleError(f"findmnt --verify rejects the new /etc/fstab (nothing was written):\n{report}")
+        return merged
+
+    def _commit_fstab(self, text: str, merged: str) -> None:
         backup = self._path(FSTAB_BACKUP)
         if text and not backup.exists():
             write_file(backup, text)
         write_file(self._path(FSTAB), merged, 0o644)
-        return True
 
     def _apfs_encrypted(self, spec: lib.DiskSpec) -> bool:
         """FileVault on the volume ``spec`` mounts: apfs-fuse would ask for a password no unit can type."""
@@ -418,12 +656,18 @@ class Disks(Module):
         if not self._is_root:
             raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
         entries = self._entries()
+        self._refuse_unsafe(entries)
         if self._specs:
             self._install_drivers()
         for spec, _, _ in entries:
             self._make_mountpoint(spec)
-        changed = self._write_fstab(entries)
-        if changed or self._needs_reload(entries):
+        text = self._fstab()
+        merged = self._prepare_fstab(text, entries)
+        # Stop before the new block goes in: a failure leaves the old block, so the next run finds the unit again.
+        self._stop_dropped_automounts(entries)
+        if merged is not None:
+            self._commit_fstab(text, merged)
+        if merged is not None or self._needs_reload(entries):
             self._run("systemctl", "daemon-reload")
         failures: list[str] = []
         manual: list[str] = []
@@ -446,6 +690,17 @@ class Disks(Module):
             raise ModuleError("\n".join(failures))
         if manual:
             raise NeedsManual("; ".join(manual))
+
+    def _stop_dropped_automounts(self, entries: list[tuple[lib.DiskSpec, str, str]]) -> None:
+        """Stop the automount units the profile no longer asks for: systemd keeps a running unit after its fstab line is
+        gone. Asked again here, because a driver build can take minutes between the first look and this stop: a
+        filesystem mounted meanwhile is refused (nothing is unmounted; the fstab is still the old one)."""
+        dropped = self._active_dropped(entries)
+        busy = [self._busy_message(point) for _, point, mounted in dropped if mounted]
+        if busy:
+            raise NeedsManual("; ".join(busy) + "; the fstab was not changed")
+        for unit, _, _ in dropped:
+            self._run("systemctl", "stop", unit)
 
     def _needs_reload(self, entries: list[tuple[lib.DiskSpec, str, str]]) -> bool:
         return any(not self._loaded(self._units(spec)[0]) for spec, _, _ in entries)

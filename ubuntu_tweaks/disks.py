@@ -15,19 +15,26 @@ Read-only is the default for the filesystems whose Linux write support can damag
 
 Public API:
 
-- ``DiskSpec`` (frozen) and ``parse_disks(options, *, home) -> list[DiskSpec]`` (``ConfigError`` names the key).
+- ``DiskSpec`` (frozen) and ``parse_disks(options, *, home, user) -> list[DiskSpec]`` (``ConfigError`` names the key).
 - ``resolve_driver(spec, *, kernel_apfs) -> str``: the driver that will mount ``spec`` (``auto`` resolved).
 - ``fstab_entry(spec, driver, ids) -> str`` and ``fstab_block(entries) -> str``; ``merge_fstab(text, block)``;
-  ``managed_lines(text)``; ``foreign_references(text, spec)``: the managed block and the lines outside it that
-  already name the same device or mount point.
+  ``managed_lines(text)`` (the entry lines) and ``managed_block(text)`` (the whole block, comments included);
+  ``foreign_references(text, spec)``: the managed block and the lines outside it that already name the same device
+  or mount point.
 - ``unit_name(path, suffix)``: ``systemd-escape -p --suffix`` for a mount point.
 - ``udev_encode(label)``, ``fstab_escape(text)``.
 - ``PINNED_APFS_FUSE`` (the source the module builds, by commit) and ``APFS_DKMS_PACKAGE`` (Ubuntu's DKMS package).
+
+Hardening: every entry is ``nosuid,nodev`` (a disk another machine wrote can carry setuid files and device nodes);
+``options = ["suid"]`` / ``["dev"]`` opt out, ``noexec`` is the declaration's choice. Mount points are only
+``/mnt/<name>``, ``/media/<user>/<name>`` or a directory inside the user's home. Every string value is free of
+control, format and line-separator characters, because values end up in a line-oriented file.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -46,8 +53,24 @@ _PATH = re.compile(r"/[A-Za-z0-9._@+/-]*")
 _TIMEOUT = re.compile(r"[0-9]+(?:ms|s|min|m|h)?")
 _OPTION = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:=@+/-]*")
 _RESERVED = {"ro", "rw", "defaults", "auto", "noauto", "user", "users", "nofail", "uid", "gid", "readwrite"}
-_FORBIDDEN_MOUNTPOINTS = {"/", "/home", "/root", "/var", "/opt", "/srv", "/tmp"}
-_FORBIDDEN_PREFIXES = ("/boot", "/etc", "/usr", "/bin", "/sbin", "/lib", "/proc", "/sys", "/dev", "/run", "/snap")
+_SYSTEM_ROOTS = (
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/snap",
+    "/srv",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+)
 _FIELDS = {
     "uuid",
     "label",
@@ -164,12 +187,21 @@ def _fail(name: str, message: str) -> ConfigError:
     return ConfigError(f"[modules.disks.mounts.{name}] {message}")
 
 
+def _unsafe(char: str) -> bool:
+    """Control, format, unassigned and private-use characters (category C*) and the line and paragraph separators
+    (Zl, Zp): all of them split or hide text in a line-oriented file."""
+    category = unicodedata.category(char)
+    return category.startswith("C") or category in ("Zl", "Zp")
+
+
 def _text(name: str, table: Mapping[str, object], key: str) -> str | None:
     value = table.get(key)
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise _fail(name, f"{key} must be a non-empty string, got {value!r}")
+    if any(_unsafe(char) for char in value):
+        raise _fail(name, f"{key} must not contain control or line-separator characters, got {value!r}")
     return value
 
 
@@ -180,22 +212,41 @@ def _flag(name: str, table: Mapping[str, object], key: str, default: bool) -> bo
     return value
 
 
-def _mountpoint(name: str, raw: str | None, home: str) -> str:
+def _is_system(path: str) -> bool:
+    return path == "/" or any(path == root or path.startswith(root + "/") for root in _SYSTEM_ROOTS)
+
+
+def mountpoint_anchor(path: str, home: str, user: str) -> str | None:
+    """The directory ``path`` must live below (``/mnt``, ``/media/<user>`` or the user's home), ``None`` when it
+    lives below none of them. The one rule behind the declaration check and the module's directory creation. A home
+    is a directory of its own below a parent (``/home/alice``): ``/home`` or a system directory is no home, or every
+    other user's home would be a valid mount point."""
+    base = home.rstrip("/")
+    if path == base or base.startswith(path.rstrip("/") + "/"):
+        return None  # the home itself, or a directory the home lives in (a home under /mnt must not be mounted over)
+    candidates = ([base] if base.count("/") >= 2 and not _is_system(base) else []) + ["/mnt", f"/media/{user}"]
+    return next((anchor for anchor in candidates if path.startswith(anchor + "/")), None)
+
+
+def _mountpoint(name: str, raw: str | None, home: str, user: str) -> str:
+    """``/mnt/<name>`` by default; else only below ``/mnt``, ``/media/<user>`` or the user's own home."""
     if raw is None:
         return f"/mnt/{name}"
     path = raw
     if path == "~" or path.startswith("~/"):
         path = home.rstrip("/") + path[1:]
-        if path.rstrip("/") == home.rstrip("/"):
-            raise _fail(name, "mountpoint must be a directory inside your home, not the home directory itself")
     if not _PATH.fullmatch(path):
         raise _fail(name, f"mountpoint {raw!r} must be an absolute path of letters, digits and . _ - + @ /")
     segments = path.rstrip("/").split("/")[1:]
     if ".." in segments or "." in segments or "" in segments:
         raise _fail(name, f"mountpoint {raw!r} must not contain '.', '..' or empty segments")
     clean = str(PurePosixPath(path))
-    if clean in _FORBIDDEN_MOUNTPOINTS or any(clean == p or clean.startswith(p + "/") for p in _FORBIDDEN_PREFIXES):
-        raise _fail(name, f"mountpoint {clean} is a system directory: use /mnt/<name> or a directory of your own")
+    if mountpoint_anchor(clean, home, user) is None:
+        raise _fail(
+            name,
+            f"mountpoint {clean} is not allowed: use a directory below /mnt, /media/{user} or your home "
+            "(the directory itself, other users' homes and system directories are refused)",
+        )
     return clean
 
 
@@ -215,7 +266,7 @@ def _options(name: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _parse_one(name: str, table: object, home: str) -> DiskSpec:
+def _parse_one(name: str, table: object, home: str, user: str) -> DiskSpec:
     if not _NAME.fullmatch(name):
         raise ConfigError(f"[modules.disks.mounts.{name}] the name must be lowercase letters, digits, . _ -")
     if not isinstance(table, dict):
@@ -260,7 +311,7 @@ def _parse_one(name: str, table: object, home: str) -> DiskSpec:
         ident=ident,
         fstype=fstype,
         driver=driver,
-        mountpoint=_mountpoint(name, _text(name, table, "mountpoint"), home),
+        mountpoint=_mountpoint(name, _text(name, table, "mountpoint"), home, user),
         read_only=_flag(name, table, "read_only", filesystem.read_only_default),
         owner=owner,
         automount=_flag(name, table, "automount", True),
@@ -272,7 +323,7 @@ def _parse_one(name: str, table: object, home: str) -> DiskSpec:
     )
 
 
-def parse_disks(options: Mapping[str, object], *, home: str) -> list[DiskSpec]:
+def parse_disks(options: Mapping[str, object], *, home: str, user: str) -> list[DiskSpec]:
     """The ``[modules.disks]`` table (the module's options) as specs, in name order; every error names its key."""
     unknown = sorted(set(options) - {"mounts"})
     if unknown:
@@ -280,7 +331,7 @@ def parse_disks(options: Mapping[str, object], *, home: str) -> list[DiskSpec]:
     mounts = options.get("mounts", {})
     if not isinstance(mounts, dict):
         raise ConfigError("[modules.disks.mounts] must be a table of [modules.disks.mounts.<name>] tables")
-    specs = [_parse_one(name, mounts[name], home) for name in sorted(mounts)]
+    specs = [_parse_one(name, mounts[name], home, user) for name in sorted(mounts)]
     for field in ("mountpoint", "source"):
         seen: dict[str, str] = {}
         for spec in specs:
@@ -290,6 +341,13 @@ def parse_disks(options: Mapping[str, object], *, home: str) -> list[DiskSpec]:
                     f"[modules.disks.mounts] {seen[value]} and {spec.name} share the same {field} {value}"
                 )
             seen[value] = spec.name
+    for outer in specs:
+        for inner in specs:
+            if inner.mountpoint.startswith(outer.mountpoint + "/"):
+                raise ConfigError(
+                    f"[modules.disks.mounts] {inner.name} ({inner.mountpoint}) lies inside the mount point of "
+                    f"{outer.name} ({outer.mountpoint}): creating it would open the other disk's automount point"
+                )
     return specs
 
 
@@ -309,6 +367,14 @@ def fstab_type(spec: DiskSpec, driver: str) -> str:
     if spec.fstype == "apfs":
         return "fuse.apfs-fuse" if driver == "fuse" else "apfs"
     return spec.fstype
+
+
+_OPT_OUT = {"nosuid": "suid", "nodev": "dev"}  # the option every entry gets -> the option that opts out of it
+
+
+def _nosuid_nodev(extra: Sequence[str]) -> list[str]:
+    """The hardening every entry gets unless the declaration opts out (``suid`` / ``dev``) or already has it."""
+    return [option for option, opt_out in _OPT_OUT.items() if option not in extra and opt_out not in extra]
 
 
 def mount_options(spec: DiskSpec, driver: str, ids: tuple[int, int] | None) -> list[str]:
@@ -331,6 +397,7 @@ def mount_options(spec: DiskSpec, driver: str, ids: tuple[int, int] | None) -> l
             options.append("readwrite")
         if spec.volume:
             options.append(f"vol={spec.volume}")
+    options += _nosuid_nodev(spec.options)
     options += spec.options
     options.append("nofail")
     if spec.automount:
@@ -388,6 +455,48 @@ def managed_lines(text: str) -> list[str] | None:
     if span is None:
         return None
     return [line for line in lines[span[0] + 1 : span[1]] if line.strip() and not line.lstrip().startswith("#")]
+
+
+def managed_block(text: str) -> str | None:
+    """The managed block as written (marker lines, descriptions and entries); ``None`` when the file has none.
+    Comparing it with ``fstab_block`` is the drift test that also sees a changed description."""
+    lines = text.splitlines()
+    span = _block_span(lines)
+    if span is None:
+        return None
+    return "\n".join(lines[span[0] : span[1] + 1]) + "\n"
+
+
+def block_changes(generated: str, current: str | None) -> tuple[list[str], list[str]]:
+    """``(lines to write, lines to remove)`` between the generated block and the one in the file; the marker lines
+    are left out (their wording is not a change anybody has to act on)."""
+
+    def body(block: str | None) -> list[str]:
+        return [line for line in (block or "").splitlines() if not line.startswith((MARK_BEGIN, MARK_END))]
+
+    new, old = body(generated), body(current)
+    return [line for line in new if line not in old], [line for line in old if line not in new]
+
+
+def block_drift(generated: str, current: str | None) -> str:
+    """One line saying how the block in the file differs from the generated one."""
+    write, remove = block_changes(generated, current)
+    if write:
+        return f"expected: {write[0]}"
+    if remove:
+        return f"unexpected: {remove[0]}"
+    return "the marker lines or the order of the lines differ"
+
+
+def automount_points(lines: Sequence[str]) -> dict[str, str]:
+    """``automount unit -> mount point`` of every entry line that asks for ``x-systemd.automount``."""
+    found = {}
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 4 and "x-systemd.automount" in fields[3].split(","):
+            point = fstab_unescape(fields[1])
+            found[unit_name(point, "automount")] = point
+    return found
 
 
 def merge_fstab(text: str, block: str) -> str:
