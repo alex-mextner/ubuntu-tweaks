@@ -11,7 +11,8 @@ enabled or not, the profile's ``coverage.toml`` and the machine overlay's):
   (``coverage.ITEM_PREFIXES``: ``dconf:/``, ``file:~/``, ``etc:/``, ``apt:``...), so ``~/.config/x`` or
   ``file:/home/me/x`` are caught;
 - no pattern is listed twice in one layer (the first match of a layer wins, so the second never applies), and no layer
-  restates a lower layer's identical pattern with the same class (redundant; a different class is a real override);
+  restates a lower layer's identical pattern with the same class, reason and ticket (redundant; another class, or the
+  same class with its own reason or ticket, is a real override);
 - with ``online``, every ticket exists and is open, asked of ``gh issue view`` (skipped with a note when ``gh`` is
   not installed; ``#N`` is asked in the profile's own checkout, ``owner/repo#N`` with ``--repo``).
 
@@ -127,6 +128,12 @@ def _pattern_problems(located: Sequence[_Located]) -> list[str]:
     ]
 
 
+def _same_statement(lower: Rule, upper: Rule) -> bool:
+    """True when the two rules agree on class, reason and ticket. A rule that keeps the class
+    but gives the real reason (a restore pointer for a ``secret``) or its own ticket is an override."""
+    return (lower.coverage, lower.reason, lower.ticket) == (upper.coverage, upper.reason, upper.ticket)
+
+
 def _duplicate_problems(sources: Sequence[tuple[Layer, list[_Located]]]) -> list[str]:
     by_layer: dict[Layer, list[_Located]] = {layer: [] for layer in Layer}
     for layer, located in sources:
@@ -159,7 +166,7 @@ def _duplicate_problems(sources: Sequence[tuple[Layer, list[_Located]]]) -> list
                     ),
                     None,
                 )
-                if nearest is not None and nearest.rule.coverage is item.rule.coverage:
+                if nearest is not None and _same_statement(nearest.rule, item.rule):
                     problems.append(
                         f"{item.where}: match {pattern!r} is redundant: {nearest.where} already says "
                         f"{item.rule.coverage.value}"
