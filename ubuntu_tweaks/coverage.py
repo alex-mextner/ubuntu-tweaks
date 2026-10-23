@@ -125,6 +125,7 @@ ITEM_PREFIXES = (
     "cron:",
     "ssh:",
     "git:",
+    "disk:",
 )
 
 TICKET = re.compile(r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+")

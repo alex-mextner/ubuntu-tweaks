@@ -184,7 +184,22 @@ class MatchTests(CheckCase):
         self.assertEqual(self.check_match("*", "*Cache*", "fi*", "file:*", "d*"), [])
 
     def test_the_prefixes_cover_every_adapter_scheme(self) -> None:
-        for scheme in ("dconf", "file", "etc", "apt", "snap", "flatpak", "brew", "pipx", "uv", "npm", "bun", "cargo"):
+        schemes = (
+            "dconf",
+            "file",
+            "etc",
+            "apt",
+            "snap",
+            "flatpak",
+            "brew",
+            "pipx",
+            "uv",
+            "npm",
+            "bun",
+            "cargo",
+            "disk",
+        )
+        for scheme in schemes:
             self.assertTrue(any(prefix.startswith(scheme + ":") for prefix in ITEM_PREFIXES), scheme)
 
     def test_patterns_that_can_never_match_any_item_are_flagged(self) -> None:
