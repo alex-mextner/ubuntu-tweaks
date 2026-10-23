@@ -1421,7 +1421,7 @@ commits through the repo's PR flow. `--report FILE.md` writes the same report as
 (full values; the terminal clips a cell at 80 characters). `-v` also lists entries equal to
 the profile, already-linked files and every cache-state candidate. `--only` takes panel ids
 (and `shell-extensions`, to audit the extension skip rules) and the section names `files`,
-`packages`, `system`; a section not named is not computed and an unknown name is invalid
+`packages`, `system`, `units`; a section not named is not computed and an unknown name is invalid
 config (exit 2).
 
 The report opens with the **SUMMARY** block (also printed alone by `--summary`): the keys in scope
@@ -1448,7 +1448,10 @@ schemas. Then, in this order:
 2. **Files → `files/…`**: only allow-list candidates (`include_files` plus the built-ins
    `mimeapps.list`, `user-dirs.dirs`, `gtk-3.0/bookmarks`, `gtk-3.0/settings.ini`,
    `gtk-4.0/settings.ini`, `glib-2.0/settings/keyfile`, `monitors.xml` (machine overlay),
-   `autostart/*.desktop`, hand-written dotfiles the user chose; globs relative to `$HOME`, an
+   `autostart/*.desktop`, the systemd user units and their drop-ins (`systemd/user/*.{service,timer,socket,path,target}`
+   and `*.d/*.conf`; a unit file with a secret finding, such as a token in `Environment=`, is listed under *not
+   adopted* with the finding kinds and skipped alone: it never makes `--commit` refuse and it stays where it is),
+   hand-written dotfiles the user chose; globs relative to `$HOME`, an
    absolute path or `..` is refused with exit 5), plus a `candidates` listing of everything
    else in `~/.config` and the `$HOME` dotfiles with a class and a reason (below), so the user
    can promote an entry by adding it to `include_files`. Nothing outside the allow-list is
@@ -1463,6 +1466,16 @@ schemas. Then, in this order:
    only when `$XDG_DATA_HOME/flatpak` exists, with flatpak's cache redirected to a temporary
    directory, because a plain `flatpak list` creates `~/.local/share/flatpak`) and **System** (a `system.toml` proposal:
    timezone into the machine overlay, locale and console keyboard shared).
+   **Units** (a `units.toml` proposal, section `3b` of the report, `--only units`): the entries of
+   `~/.config/systemd/user/*.wants` and `*.requires` (what `systemctl --user enable` creates) whose unit file lives in
+   `~/.config/systemd/user` (an instance counts through its template); units the system or the desktop ships are not
+   proposed. Marks `+` (not yet in `enable`) and `=` (already there); a unit the profile `disable`s is left out. `--commit`
+   appends the new names to `enable` in `units.toml` (shared; created when missing), with the unit's `Description=`
+   as the trailing reason comment, in place (`toml_edit`: existing order and comments stay), re-parsed and compared
+   with the intended data first. The unit files themselves arrive through the allow-list of section 2: a unit whose file section 2 did not adopt
+   (a secret in it) is not proposed, and a description with a secret is not used as a reason. A secret in the unit file or in a
+   drop-in keeps the unit out of the proposal under `--only units` too. `--only units` proposes without adopting files,
+   so use `--only files,units` to get both; an explicit `--only units` with nothing to propose still prints the block.
 4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (volatile runtime keys an app or
    the daemon rewrites by itself, never captured: window geometry `window-*`, recents, app-picker-layout,
    `last-*` / `*-last-*` / `last-selected-*` markers, `prompt-check`, timestamps, and
@@ -2546,6 +2559,11 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   `auto` and `include`, changed-only, the SUMMARY block, `--dry-run` / `--summary` exclusivity and a
   `capture --commit` into a profile of hand-written, commented bundles that must come out
   byte-identical except for the changed values.
+  Capture of units (`tests/test_capture_units.py`): unit files and drop-ins adopted, a unit with a token skipped alone
+  while the rest of `--commit` goes on, the proposal (enabled units whose file is in the user directory, instances
+  through their template, system units left out, `disable`d ones left out, `=` for names already held), `--only
+  units`, the report block, `--commit` appending to `units.toml` with comments kept and the `Description=` as the
+  reason, and a second capture proposing nothing.
 - Integration: `scripts/integration.sh` runs `dbus-run-session` with a scratch
   `DCONF_PROFILE` and a temporary `HOME`/`XDG_*` (including `XDG_RUNTIME_DIR`) against a scratch
   copy of the engine with a fixture module (so no network or root is needed): a module settings

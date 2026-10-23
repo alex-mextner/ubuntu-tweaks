@@ -111,6 +111,20 @@ def _planned_writes(plan: CapturePlan) -> list[tuple[Path, str]]:
 
             writes.append((profile.packages_toml, _toml_text(profile.packages_toml, add_packages, data)))
 
+    new_units = [item for item in plan.units or () if item.mark == "+"]
+    if new_units:
+        data = read_toml(profile.units_toml)
+        current = data.get("enable", [])
+        data["enable"] = [*(current if isinstance(current, list) else []), *(item.name for item in new_units)]
+
+        def add_units(doc: TomlDoc) -> None:
+            doc.append_to_array((), "enable", [item.name for item in new_units])
+            for item in new_units:
+                if item.reason:
+                    doc.set_item_comment((), "enable", item.name, item.reason)
+
+        writes.append((profile.units_toml, _toml_text(profile.units_toml, add_units, data)))
+
     if plan.system is not None:
         for machine_level, path in ((False, profile.system_toml), (True, profile.overlay_system_toml)):
             items = [i for i in plan.system if i.machine == machine_level and i.mark != "="]

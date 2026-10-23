@@ -156,6 +156,13 @@ include_files = [
   ".config/glib-2.0/settings/keyfile",
   ".config/monitors.xml",
   ".config/autostart/*.desktop",
+  # systemd user units and their drop-ins (units.toml enables them); a file with a secret finding is skipped
+  ".config/systemd/user/*.service",
+  ".config/systemd/user/*.timer",
+  ".config/systemd/user/*.socket",
+  ".config/systemd/user/*.path",
+  ".config/systemd/user/*.target",
+  ".config/systemd/user/*.d/*.conf",
 ]
 # Adopted into machines/<machine>/files/ instead of files/.
 machine_files = [".config/monitors.xml"]
