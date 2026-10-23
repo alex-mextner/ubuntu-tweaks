@@ -28,7 +28,7 @@ if [[ "${UBUNTU_TWEAKS_SCRATCH:-}" != "1" ]]; then
     mkdir -p "$tmp/home" "$tmp/profile" "$tmp/runtime"
     chmod 700 "$tmp/runtime"
     printf 'user-db:user\n' >"$tmp/dconf-profile"
-    env -u UBUNTU_TWEAK_PROFILE -u DBUS_SESSION_BUS_ADDRESS \
+    env -u UBUNTU_TWEAK_PROFILE -u DBUS_SESSION_BUS_ADDRESS -u UBUNTU_TWEAK_LOG_DIR -u UBUNTU_TWEAK_SESSION_LOG \
         UBUNTU_TWEAKS_SCRATCH=1 \
         UBUNTU_TWEAKS_PARENT_BUS="${DBUS_SESSION_BUS_ADDRESS:-}" \
         UBUNTU_TWEAKS_SCRATCH_ROOT="$tmp" \
@@ -179,10 +179,12 @@ grep -q "# the weekday matters on this desk" "$profile/settings/regrouped.ini" |
 tweak status "${flags[@]}" || fail "a note changed what applies"
 
 echo "== capture (preview; the scratch dconf and HOME are all it can see)"
-# Every file and symlink of the profile and of HOME before and after, but for dconf's own database
-# and flatpak's user installation (`flatpak list`, which the packages section runs, creates it).
+# Every file and symlink of the profile and of HOME before and after, but for dconf's own database,
+# flatpak's user installation (`flatpak list`, which the packages section runs, creates it) and the
+# session log: a preview writes nothing except that log (spec: Session log).
 snapshot() {
-    find "$profile" "$HOME" \( -path "$HOME/.config/dconf" -o -path "$HOME/.local/share/flatpak" \) -prune -o \
+    find "$profile" "$HOME" \( -path "$HOME/.config/dconf" -o -path "$HOME/.local/share/flatpak" \
+        -o -path "$HOME/.local/state/ubuntu-tweaks/logs" \) -prune -o \
         \( -type f -o -type l \) -printf '%p %y %s %T@ %l\n' | sort
 }
 before="$(snapshot)"
