@@ -3,6 +3,7 @@
 Nothing here reads the real $HOME or /etc, runs a real tool or touches the live dconf database.
 """
 
+import gzip
 import hashlib
 import os
 import unittest
@@ -15,11 +16,12 @@ except ModuleNotFoundError as error:
     raise unittest.SkipTest("PyGObject (python3-gi) is not importable in this interpreter") from error
 
 from tests.util import TempDirCase, write
-from ubuntu_tweaks.adapters import discover_adapters
+from ubuntu_tweaks.adapters import discover_adapters, scan
 from ubuntu_tweaks.adapters import dconf, etc, extensions, files, packages, units
 from ubuntu_tweaks.adapters._system import System, system, use
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.coverage import ITEM_PREFIXES, Coverage, Finding, Item, Rules
+from ubuntu_tweaks.coverage_rules import load_rules
 from ubuntu_tweaks.process import CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, SettingsError, UserKey
@@ -599,8 +601,8 @@ class PackagesTests(AdapterCase):
         ("brew", "leaves"): ok("jq\n"),
         ("pipx", "list", "--short"): ok("ruff 0.5.0\n"),
         ("uv", "tool", "list"): ok("httpie v3.2.4\n- http\n- https\n"),
-        ("npm", "ls", "-g", "--depth=0", "--parseable"): ok(
-            "/usr/lib\n/usr/lib/node_modules/npm\n/usr/lib/node_modules/@scope/tool\n"
+        ("npm", "ls", "-g", "--depth=0", "--parseable", "--prefix", "{home}/.local"): ok(
+            "{home}/.local/lib\n{home}/.local/lib/node_modules/@scope/tool\n{home}/.local/lib/node_modules/corepack\n"
         ),
         ("bun", "pm", "ls", "-g"): ok(
             "/home/u/.bun/install/global node_modules (2)\n├── prettier@3.0.0\n└── @a/b@1.2.3\n"
@@ -608,8 +610,18 @@ class PackagesTests(AdapterCase):
         ("cargo", "install", "--list"): ok("ripgrep v14.1.0:\n    rg\nfd-find v10.0.0:\n    fd\n"),
     }
 
+    def responses(self) -> dict[tuple[str, ...], CommandResult]:
+        """``RESPONSES`` with ``{home}`` replaced by the scratch home (npm is listed under ``~/.local``)."""
+        home = str(self.home)
+        return {
+            tuple(part.replace("{home}", home) for part in argv): CommandResult(
+                result.returncode, result.stdout.replace("{home}", home), result.stderr
+            )
+            for argv, result in self.RESPONSES.items()
+        }
+
     def test_each_manager_is_listed_and_ids_carry_the_manager(self) -> None:
-        self.machine(self.RESPONSES)
+        self.machine(self.responses())
         self.assertEqual(
             self.ids(packages.discover(self.ctx)),
             [
@@ -619,14 +631,14 @@ class PackagesTests(AdapterCase):
                 "snap:firefox",
                 "flatpak:org.gimp.GIMP",
                 "brew:jq",
-                "pipx:ruff",
                 "uv:httpie",
                 "npm:@scope/tool",
-                "npm:npm",
+                "npm:corepack",
                 "bun:@a/b",
                 "bun:prettier",
                 "cargo:fd-find",
                 "cargo:ripgrep",
+                "pipx:ruff",
             ],
         )
 
@@ -661,14 +673,319 @@ class PackagesTests(AdapterCase):
             },
         )
 
-    def test_capture_writes_packages_toml_for_the_managers_it_has_a_key_for(self) -> None:
-        self.machine(self.RESPONSES)
+    def test_capture_writes_packages_toml_for_every_manager_it_has_a_key_for(self) -> None:
+        self.machine(self.responses())
         (proposal,) = packages.capture(self.ctx, list(packages.discover(self.ctx)))
         self.assertEqual(proposal.title, "packages.toml")
         self.assertIn('apt = [\n  "curl",\n  "git",\n]\n', proposal.text)
         self.assertIn('brew = [\n  "jq",\n]\n', proposal.text)
-        self.assertNotIn("pipx", proposal.text)
-        self.assertEqual(len(proposal.items), 6)  # 2 apt, 2 snap, 1 flatpak, 1 brew: not pipx, uv, npm, bun, cargo
+        self.assertIn('pipx = [\n  "ruff",\n]\n', proposal.text)
+        self.assertIn('npm = [\n  "@scope/tool",\n  "corepack",\n]\n', proposal.text)
+        self.assertIn('bun = [\n  "@a/b",\n  "prettier",\n]\n', proposal.text)
+        self.assertIn('cargo = [\n  "fd-find",\n  "ripgrep",\n]\n', proposal.text)
+        self.assertEqual(len(proposal.items), 13)  # all but uv:httpie, which has no receipt and is only a comment
+
+    def test_tool_manager_entries_are_owned_by_name_not_by_spec(self) -> None:
+        write(
+            self.profile_root / "packages.toml",
+            'uv = ["glances[web]", "Git_Filter.Repo", "hyper-qa @ git+https://git.example.com/acme/qa-cli.git"]\n'
+            'npm = ["@openai/codex@0.5.1"]\nbun = ["cf"]\ncargo = ["wasm-bindgen-cli@0.2.100"]\n',
+        )
+        write(self.profile_root / "machines/box/packages.toml", 'pipx = ["black"]\n')
+        self.machine()
+        self.assertEqual(
+            packages.owned(self.ctx),
+            {
+                "uv:glances": "packages.toml",
+                "uv:git-filter-repo": "packages.toml",
+                "uv:hyper-qa": "packages.toml",
+                "pipx:glances": "packages.toml",  # what apply installs when uv fails: owned too
+                "pipx:git-filter-repo": "packages.toml",
+                "pipx:hyper-qa": "packages.toml",
+                "bun:@openai/codex": "packages.toml",
+                "npm:@openai/codex": "packages.toml",
+                "bun:cf": "packages.toml",
+                "cargo:wasm-bindgen-cli": "packages.toml",
+                "pipx:black": "packages.toml",
+            },
+        )
+
+    def test_a_fallback_install_is_owned_too_so_coverage_agrees_with_apply(self) -> None:
+        write(self.profile_root / "packages.toml", 'uv = ["Glances[web]"]\nnpm = ["agent-browser"]\n')
+        self.machine()
+        owned = packages.owned(self.ctx)
+        self.assertEqual(owned["pipx:glances"], "packages.toml")
+        self.assertEqual(owned["bun:agent-browser"], "packages.toml")
+        self.assertNotIn("pipx:agent-browser", owned)
+
+    def test_npm_is_listed_under_the_user_prefix(self) -> None:
+        self.machine(self.responses())
+        list(packages.discover(self.ctx))
+        self.assertIn(
+            ("npm", "ls", "-g", "--depth=0", "--parseable", "--prefix", str(self.home / ".local")),
+            self.process.queries,
+        )
+
+
+class PackagesClassifyTests(AdapterCase):
+    """apt and snap items capture refuses are ``excluded`` with capture's own reason, not ``untracked``."""
+
+    MANUAL = ["base-pkg", "bash-completion", "libfoo-runtime", "libssl-dev", "mytool", "ubuntu-desktop", "vim-tiny"]
+
+    def machine_with(self, *, baseline: bool, snaps: str = "") -> None:
+        if baseline:
+            path = self.rootfs / "var/log/installer/initial-status.gz"
+            path.parent.mkdir(parents=True)
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                handle.write("Package: base-pkg\nStatus: install ok installed\n\nPackage: libfoo-runtime\n")
+        manual = "".join(f"{name}\n" for name in self.MANUAL)
+        priorities = "".join(f"{name}\t{'important' if name == 'vim-tiny' else 'optional'}\n" for name in self.MANUAL)
+        self.machine(
+            {
+                ("apt-mark", "showmanual"): ok(manual),
+                ("dpkg-query", "-W", "-f=${Package}\t${Priority}\n", *self.MANUAL): ok(priorities),
+                ("apt-cache", "depends", "--no-recommends", "--no-suggests", "--no-conflicts", "--no-breaks",
+                 "--no-replaces", "--no-enhances", "ubuntu-desktop"): ok("ubuntu-desktop\n  Depends: bash-completion\n"),
+                ("snap", "list"): ok(snaps),
+            }
+        )  # fmt: skip
+
+    def classified(self) -> dict[str, tuple[Coverage, str]]:
+        rules = load_rules(self.ctx)
+        return {
+            finding.item.id: (finding.coverage, finding.reason)
+            for finding in scan(self.ctx, rules)
+            if finding.item.adapter == "packages"
+        }
+
+    def test_the_installer_baseline_and_capture_ignore_rules_exclude_with_the_capture_reason(self) -> None:
+        self.machine_with(baseline=True)
+        found = self.classified()
+
+        self.assertEqual(found["apt:base-pkg"], (Coverage.EXCLUDED, "installer baseline"))
+        self.assertEqual(found["apt:libfoo-runtime"], (Coverage.EXCLUDED, "installer baseline"))
+        self.assertEqual(
+            found["apt:vim-tiny"],
+            (Coverage.EXCLUDED, "distribution base (capture rule: priority required or important)"),
+        )
+        self.assertEqual(found["apt:ubuntu-desktop"][0], Coverage.EXCLUDED)  # an engine rule claims it first
+        self.assertEqual(found["apt:mytool"][0], Coverage.UNTRACKED)  # a decision capture would propose
+        self.assertEqual(found["apt:libssl-dev"][0], Coverage.UNTRACKED)  # `keep` wins over the lib* ignore
+
+    def test_without_the_baseline_file_the_metapackage_dependencies_are_the_base(self) -> None:
+        self.machine_with(baseline=False)
+        found = self.classified()
+
+        self.assertEqual(
+            found["apt:bash-completion"],
+            (
+                Coverage.EXCLUDED,
+                "distribution base (capture rule: dependency of ubuntu-desktop, ubuntu-desktop-minimal, "
+                "ubuntu-minimal, ubuntu-standard, ubuntu-server)",
+            ),
+        )
+        self.assertEqual(found["apt:base-pkg"][0], Coverage.UNTRACKED)
+
+    def test_ignored_and_seeded_snaps_are_excluded_and_applications_stay_untracked(self) -> None:
+        seed = self.rootfs / "var/lib/snapd/seed/seed.yaml"
+        write(seed, "snaps:\n  - name: seeded-app\n")
+        self.machine_with(
+            baseline=True,
+            snaps="Name Version Rev Tracking Publisher Notes\n"
+            "core22 1 2 latest canonical base\ngnome-42-2204 1 2 latest canonical -\n"
+            "seeded-app 1 2 latest x -\nfirefox 1 2 latest mozilla -\n",
+        )
+        found = self.classified()
+
+        self.assertEqual(found["snap:core22"][0], Coverage.EXCLUDED)
+        self.assertEqual(found["snap:gnome-42-2204"][0], Coverage.EXCLUDED)
+        self.assertEqual(found["snap:seeded-app"], (Coverage.EXCLUDED, "installer baseline"))
+        self.assertEqual(found["snap:firefox"][0], Coverage.UNTRACKED)
+
+    def test_a_declared_name_stays_tracked_even_when_capture_would_refuse_it(self) -> None:
+        write(self.profile_root / "packages.toml", 'apt = ["base-pkg"]\n')
+        self.machine_with(baseline=True)
+        self.assertEqual(self.classified()["apt:base-pkg"][0], Coverage.TRACKED)
+
+    def test_a_profile_coverage_rule_beats_the_capture_opinion(self) -> None:
+        write(
+            self.profile_root / "coverage.toml",
+            '[[coverage]]\nmatch = ["apt:base-pkg"]\nclass = "secret"\nreason = "profile says so"\n',
+        )
+        self.machine_with(baseline=True)
+        self.assertEqual(self.classified()["apt:base-pkg"], (Coverage.SECRET, "profile says so"))
+
+    def test_the_opinion_names_the_capture_rule_for_what_no_other_rule_claims(self) -> None:
+        self.machine_with(baseline=True, snaps="Name Version Rev Tracking Publisher Notes\nbare 1 2 latest c base\n")
+        for item_id, reason in (
+            ("apt:ubuntu-desktop", "distribution base (capture rule: Ubuntu metapackage)"),
+            ("snap:bare", "distribution base (capture rule: snap base or snapd)"),
+            ("apt:mytool", None),
+        ):
+            with self.subTest(item=item_id):
+                finding = packages.classify(self.ctx, Item("packages", item_id, "package"), Rules())
+                self.assertEqual(None if finding is None else finding.reason, reason)
+        self.assertIsNone(packages.classify(self.ctx, Item("packages", "uv:glances", "package"), Rules()))
+
+    def test_a_second_scan_sees_what_changed_since_the_first(self) -> None:
+        self.machine_with(baseline=True)
+        self.assertEqual(self.classified()["apt:base-pkg"][0], Coverage.EXCLUDED)
+        write(self.profile_root / "packages.toml", 'apt = ["base-pkg"]\n')
+        self.assertEqual(self.classified()["apt:base-pkg"][0], Coverage.TRACKED)
+
+    def test_the_classification_reads_without_executing_anything(self) -> None:
+        self.machine_with(baseline=True)
+        self.classified()
+        self.assertEqual(self.process.executed, [])
+
+
+class PackagesCaptureSourceTests(AdapterCase):
+    def tool(self, name: str, receipt: str | None) -> None:
+        if receipt is not None:
+            write(self.home / ".local/share/uv/tools" / name / "uv-receipt.toml", receipt)
+
+    def proposal_text(self, uv_listing: str) -> str:
+        self.machine({("uv", "tool", "list"): ok(uv_listing)})
+        (proposal,) = packages.capture(self.ctx, list(packages.discover(self.ctx)))
+        return proposal.text
+
+    def test_a_git_receipt_gives_a_pep_508_direct_reference(self) -> None:
+        self.tool(
+            "hyper-qa", '[tool]\nrequirements = [{ name = "hyper-qa", git = "https://git.example.com/u/qa-cli.git" }]\n'
+        )
+        text = self.proposal_text("hyper-qa v0.1\n- hyper-qa\n")
+        self.assertEqual(text, 'uv = [\n  "hyper-qa @ git+https://git.example.com/u/qa-cli.git",\n]\n')
+
+    def test_uvs_wire_form_of_a_git_source_is_translated(self) -> None:
+        self.tool(
+            "netprint",
+            '[tool]\nrequirements = [{ name = "netprint", git = "https://h/x.git?rev=v1.2&subdirectory=cli#0123abcd" }]\n',
+        )
+        self.tool("plain", '[tool]\nrequirements = [{ name = "plain", git = "https://h/y.git#0123abcd" }]\n')
+        text = self.proposal_text("netprint v1\nplain v1\n")
+        self.assertIn('"netprint @ git+https://h/x.git@v1.2#subdirectory=cli"', text)
+        self.assertIn('"plain @ git+https://h/y.git"', text)  # no ref asked for: the resolved commit is not pinned
+
+    def test_a_cargo_crate_installed_from_git_is_flagged_not_reduced_to_a_name(self) -> None:
+        self.machine(
+            {
+                ("cargo", "install", "--list"): ok(
+                    "ripgrep v14.1.0:\n    rg\nqa-cli v0.1.0 (https://git.example.com/acme/qa-cli#abc):\n    qa\n"
+                )
+            }
+        )
+        (proposal,) = packages.capture(self.ctx, list(packages.discover(self.ctx)))
+        self.assertEqual(
+            proposal.text, 'cargo = [\n  # "qa-cli",  # source unknown: set the spec by hand\n  "ripgrep",\n]\n'
+        )
+        self.assertEqual([item.id for item in proposal.items], ["cargo:ripgrep"])
+
+    def test_a_pinned_git_ref_and_subdirectory_are_kept(self) -> None:
+        self.tool(
+            "netprint",
+            '[tool]\nrequirements = [{ name = "netprint", git = "https://h/x.git", rev = "abc123", subdirectory = "cli" }]\n',
+        )
+        text = self.proposal_text("netprint v1\n")
+        self.assertIn('"netprint @ git+https://h/x.git@abc123#subdirectory=cli"', text)
+
+    def test_a_registry_receipt_keeps_extras_and_specifier(self) -> None:
+        self.tool("glances", '[tool]\nrequirements = [{ name = "glances", extras = ["web"], specifier = ">=4" }]\n')
+        self.tool("esphome", '[tool]\nrequirements = [{ name = "esphome" }]\n')
+        text = self.proposal_text("esphome v2026\nglances v4\n")
+        self.assertEqual(text, 'uv = [\n  "esphome",\n  "glances[web]>=4",\n]\n')
+
+    def test_a_path_receipt_gives_a_file_url(self) -> None:
+        self.tool("local-tool", '[tool]\nrequirements = [{ name = "local-tool", directory = "/src/local-tool" }]\n')
+        self.assertIn('"local-tool @ file:///src/local-tool"', self.proposal_text("local-tool v1\n"))
+
+    def test_without_a_usable_receipt_the_source_is_flagged_not_invented(self) -> None:
+        self.tool("broken", "this is not toml [[[")
+        self.tool("empty", "[tool]\n")
+        self.tool("wrong-name", '[tool]\nrequirements = [{ name = "other", git = "https://h/x.git" }]\n')
+        text = self.proposal_text("broken v1\nempty v1\nmissing v1\nwrong-name v1\n")
+        for name in ("broken", "empty", "missing", "wrong-name"):
+            self.assertIn(f'# "{name}",  # source unknown: set the spec by hand', text)
+        self.assertNotIn("git+", text)
+
+    def test_a_receipt_with_a_source_the_adapter_does_not_know_is_flagged_not_reduced_to_a_name(self) -> None:
+        self.tool("mytool", '[tool]\nrequirements = [{ name = "mytool", editable = "/src/mytool" }]\n')
+        self.tool(
+            "acme-cli", '[tool]\nrequirements = [{ name = "acme-cli", index = "https://pypi.acme.internal/simple" }]\n'
+        )
+        text = self.proposal_text("acme-cli v1\nmytool v1\n")
+        self.assertIn('# "mytool",  # source unknown', text)
+        self.assertIn('# "acme-cli",  # source unknown', text)
+        self.assertNotIn('  "mytool",\n', text)
+
+    def test_items_written_only_as_a_comment_are_not_claimed_by_the_proposal(self) -> None:
+        self.tool("esphome", '[tool]\nrequirements = [{ name = "esphome" }]\n')
+        self.machine({("uv", "tool", "list"): ok("esphome v1\nmissing v1\n")})
+        (proposal,) = packages.capture(self.ctx, list(packages.discover(self.ctx)))
+        self.assertEqual([item.id for item in proposal.items], ["uv:esphome"])
+
+    def test_a_requirement_with_a_marker_is_flagged_because_the_spec_would_lose_it(self) -> None:
+        self.tool(
+            "platform-tool",
+            '[tool]\nrequirements = [{ name = "platform-tool", marker = "python_version < \'3.12\'" }]\n',
+        )
+        self.assertIn('# "platform-tool",  # source unknown', self.proposal_text("platform-tool v1\n"))
+
+    def test_a_receipt_that_records_more_than_a_name_and_a_source_is_flagged(self) -> None:
+        self.tool("mkdocs", '[tool]\nrequirements = [{ name = "mkdocs" }, { name = "mkdocs-material" }]\n')
+        self.tool(
+            "acme-cli",
+            '[tool]\nrequirements = [{ name = "acme-cli" }]\n[tool.options]\nindex-url = "https://pypi.acme.internal/simple"\n',
+        )
+        self.tool("pinned", '[tool]\nrequirements = [{ name = "pinned" }]\npython = "3.11"\n')
+        self.tool(
+            "marked",
+            '[tool]\nrequirements = [{ name = "marked", git = "https://h/x.git", marker = "sys_platform == \'linux\'" }]\n',
+        )
+        text = self.proposal_text("acme-cli v1\nmarked v1\nmkdocs v1\npinned v1\n")
+        for name in ("acme-cli", "marked", "mkdocs", "pinned"):
+            self.assertIn(f'# "{name}",  # source unknown', text)
+
+    def test_a_credential_in_the_receipt_url_is_never_proposed(self) -> None:
+        self.tool(
+            "acme",
+            '[tool]\nrequirements = [{ name = "acme", git = "https://user:ghp_secret@github.com/acme/cli.git" }]\n',
+        )
+        self.tool(
+            "ssh-tool", '[tool]\nrequirements = [{ name = "ssh-tool", git = "ssh://git@github.com/acme/cli.git" }]\n'
+        )
+        text = self.proposal_text("acme v1\nssh-tool v1\n")
+        self.assertNotIn("ghp_secret", text)
+        self.assertIn('# "acme",  # source unknown', text)
+        self.assertIn('"ssh-tool @ git+ssh://git@github.com/acme/cli.git"', text)  # a bare user is no secret
+
+    def test_a_token_as_the_user_of_an_https_url_or_in_its_query_is_never_proposed(self) -> None:
+        self.tool(
+            "tok", '[tool]\nrequirements = [{ name = "tok", git = "https://ghp_abc123@github.com/acme/cli.git" }]\n'
+        )
+        self.tool("private", '[tool]\nrequirements = [{ name = "private", git = "https://h/x.git?token=s3cret" }]\n')
+        self.tool("wheel", '[tool]\nrequirements = [{ name = "wheel", url = "https://host/pkg.whl?token=abc" }]\n')
+        text = self.proposal_text("private v1\ntok v1\nwheel v1\n")
+        self.assertNotIn("s3cret", text)
+        self.assertNotIn("ghp_abc123", text)
+        self.assertNotIn("token=abc", text)
+        self.assertIn('# "tok",  # source unknown', text)
+        self.assertIn('# "wheel",  # source unknown', text)
+
+    def test_a_name_with_a_quote_or_newline_cannot_become_toml(self) -> None:
+        self.machine({("bun", "pm", "ls", "-g"): ok('x\n├── a"b@1\n')})
+        (proposal,) = packages.capture(
+            self.ctx, [Item("packages", 'bun:bad",\napt = ["x', "package"), Item("packages", 'uv:q"uote', "package")]
+        )
+        import tomllib
+
+        data = tomllib.loads(proposal.text)
+        self.assertEqual(sorted(data), ["bun", "uv"])  # no extra key smuggled in
+        self.assertEqual(data["bun"], ['bad",\napt = ["x'])
+        self.assertEqual(data["uv"], [])  # the uv item has no receipt: only a comment, still valid TOML
+
+    def test_a_receipt_value_that_is_not_a_valid_spec_is_flagged(self) -> None:
+        self.tool("odd", '[tool]\nrequirements = [{ name = "odd", git = "https://h/x.git; rm -rf ~" }]\n')
+        self.assertIn('# "odd",  # source unknown', self.proposal_text("odd v1\n"))
 
 
 class UnitsTests(AdapterCase):

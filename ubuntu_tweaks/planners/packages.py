@@ -17,18 +17,29 @@ Assumptions:
   off): then ``apt-get update`` runs through sudo/pkexec right before the apt batch, and only
   when some apt package is missing.
 
-Public API: ``build(ctx, backend, *, process=None)``, ``installed_apt``, ``installed_snap``,
-``installed_flatpak`` (each returns the set of installed names among the ones asked about).
+- ``uv``, ``npm``, ``bun``, ``cargo`` and ``pipx`` (``tool_packages``) are user-level too: one ``package`` action per
+  manager lists the missing entries; each is installed on its own, so one failure does not hide the others (the
+  failures are raised together once every entry was tried; any transient one makes the action retry, and a retry
+  installs only what is still missing). A manager whose binary is missing is *blocked* (``blocker``) with the
+  name of what installs it; managers are never installed here. ``uv`` falls back to ``pipx`` and ``npm`` to ``bun``:
+  an entry the primary could not install is installed by the fallback, and a name installed by either counts.
+
+Public API: ``build(ctx, backend, *, process=None, home=None)``, ``installed_apt``, ``installed_snap``,
+``installed_flatpak`` (each returns the set of installed names among the ones asked about),
+``ToolPackageAction``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
+from pathlib import Path
+from typing import NamedTuple
 
-from ubuntu_tweaks.actions import Action, Phase
+from ubuntu_tweaks import tool_packages, ui
+from ubuntu_tweaks.actions import Action, ActionFailed, Permanent, Phase, Transient, is_transient
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.errors import ConfigError
-from ubuntu_tweaks.process import Process
+from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError
+from ubuntu_tweaks.process import CommandError, Process
 from ubuntu_tweaks.settings import SettingsBackend
 
 type Lister = Callable[[Process, Sequence[str]], set[str]]
@@ -108,7 +119,169 @@ class PackageAction(Action):
         self._process.execute(self._process.elevate(argv) if self.needs_root else argv)
 
 
-def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> Sequence[Action]:
+class ManagerMissing(Action):
+    """Stands for a package manager that is not installed: what a tool action is ``blocker``."""
+
+    phase = Phase.PACKAGES
+    kind = "package-manager"
+
+    def __init__(self, manager: str) -> None:
+        self._manager = manager
+
+    def describe(self) -> str:
+        return f"{self._manager} is not installed (installed by {tool_packages.INSTALLED_BY[self._manager]})"
+
+    def check(self) -> bool:
+        return False
+
+    def run(self) -> None:
+        raise ActionFailed(self.describe())
+
+
+type Entry = tuple[str, str]  # (name, spec)
+
+
+class EntryFailure(NamedTuple):
+    spec: str
+    error: UbuntuTweakError
+    retryable: bool
+
+
+def _retryable(error: UbuntuTweakError, argv: Sequence[str], spec: str) -> bool:
+    """Whether the error names a network or lock cause. The command line and the spec are left out of the text: they quote the
+    package, and a package called ``pytest-timeout`` is not a timeout."""
+    if isinstance(error, Transient):
+        return True
+    return is_transient(
+        CommandError(str(error).replace(" ".join(argv), "").replace(spec, ""), getattr(error, "returncode", None))
+    )
+
+
+class _Installer:
+    """Installs entries one command each with one manager and remembers the ones that failed for good, so a retry
+    of the others (the action is ``Transient`` while any failure looks retryable) does not repeat them."""
+
+    def __init__(self, process: Process, manager: str, home: Path) -> None:
+        self._process = process
+        self.manager = manager
+        self._home = home
+        self._gave_up: dict[str, EntryFailure] = {}
+
+    def install(self, specs: Sequence[str]) -> None:
+        """Try every spec not given up on; raise one error for all that are failing: ``Transient`` when any looks
+        retryable, ``Permanent`` otherwise."""
+        failing: dict[str, EntryFailure] = {}
+        for spec in specs:
+            if spec in self._gave_up:
+                failing[spec] = self._gave_up[spec]
+                continue
+            argv = tool_packages.install_argv(self.manager, spec, self._home)
+            try:
+                self._process.execute(argv)
+            except UbuntuTweakError as error:
+                failure = EntryFailure(spec, error, _retryable(error, argv, spec))
+                failing[spec] = failure
+                if not failure.retryable:
+                    self._gave_up[spec] = failure
+        if not failing:
+            return
+        message = "; ".join(f"{failure.spec}: {failure.error}" for failure in failing.values())
+        if any(failure.retryable for failure in failing.values()):
+            raise Transient(message)
+        raise Permanent(message)
+
+
+class ToolPackageAction(Action):
+    """One manager's entries; ``uv`` falls back to ``pipx`` and ``npm`` to ``bun`` (``tool_packages.FALLBACK``)."""
+
+    phase = Phase.PACKAGES
+    kind = "package"
+    scope = None
+
+    def __init__(self, manager: str, entries: Sequence[Entry], process: Process, home: Path) -> None:
+        self._manager = manager
+        self.key = f"tool-package:{manager}"  # describe() changes while the action runs
+        self._fallback = tool_packages.FALLBACK.get(manager)
+        self._entries = tuple(entries)
+        self._process = process
+        self._home = home
+        self._ran: list[str] | None = None  # what run() went for: describe() stays readable after the install
+        self._primary = _Installer(process, manager, home)
+        self._via = _Installer(process, self._fallback, home) if self._fallback else None
+
+    def _missing(self) -> list[Entry]:
+        present = tool_packages.installed_names(self._process, self._manager, self._home)
+        if self._fallback is not None:
+            present |= tool_packages.installed_names(self._process, self._fallback, self._home)
+        return [(name, spec) for name, spec in self._entries if name not in present]
+
+    def check(self) -> bool:
+        return not self._missing()
+
+    def blocker(self) -> Action | None:
+        if not tool_packages.is_missing(self._process, self._manager):
+            return None
+        if self._fallback is not None and not tool_packages.is_missing(self._process, self._fallback):
+            return None
+        return ManagerMissing(self._manager)
+
+    def describe(self) -> str:
+        specs = self.missing_specs() if self._ran is None else self._ran
+        return f"{self._manager}: install {', '.join(specs)}"
+
+    def run(self) -> None:
+        specs = self.missing_specs()
+        if not specs:
+            return
+        if self._ran is None:
+            self._ran = specs  # the first attempt's list: a retry has less to do, the line keeps what was asked
+        if self._via is not None and tool_packages.is_missing(self._process, self._manager):
+            # nothing to try with the primary: the engine goes on to the fallback and reports it as one
+            raise ActionFailed(ManagerMissing(self._manager).describe())
+        self._primary.install(specs)
+
+    def alternatives(self) -> Sequence[Action]:
+        if self._via is None or tool_packages.is_missing(self._process, self._via.manager):
+            return []
+        return [_ViaFallback(self, self._via)]
+
+    def why(self) -> str:
+        blocker = self.blocker()
+        return blocker.describe() if blocker else ui.kind_why("package-user")
+
+    def missing_specs(self) -> list[str]:
+        return [spec for _, spec in self._missing()]
+
+
+class _ViaFallback(Action):
+    """The same entries installed by the fallback manager (the engine tries it when the primary failed)."""
+
+    phase = Phase.PACKAGES
+    kind = "package"
+    scope = None
+
+    def __init__(self, primary: ToolPackageAction, installer: _Installer) -> None:
+        self._primary = primary
+        self._installer = installer
+        self._specs: list[str] | None = None  # what it installed: the primary's missing list is empty afterwards
+
+    def describe(self) -> str:
+        specs = self._primary.missing_specs() if self._specs is None else self._specs
+        return f"{self._installer.manager}: install {', '.join(specs)}"
+
+    def check(self) -> bool:
+        return self._primary.check()
+
+    def run(self) -> None:
+        specs = self._primary.missing_specs()
+        if self._specs is None:
+            self._specs = specs
+        self._installer.install(specs)
+
+
+def build(
+    ctx: Context, backend: SettingsBackend, *, process: Process | None = None, home: Path | None = None
+) -> Sequence[Action]:
     runner = process or Process()
     packages = ctx.profile.load_packages()
     for manager, names in (
@@ -157,4 +330,9 @@ def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = N
                 needs_root=False,
             )
         )
+    for manager in tool_packages.TOOL_MANAGERS:
+        specs = getattr(packages, manager)
+        if specs:
+            entries = [(tool_packages.parse_spec(manager, spec), spec) for spec in specs]
+            actions.append(ToolPackageAction(manager, entries, runner, home or Path.home()))
     return actions

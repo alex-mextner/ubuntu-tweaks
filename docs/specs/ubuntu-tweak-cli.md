@@ -1017,7 +1017,7 @@ file atomically (a profile file that is a symlink is refused, exit 5):
   destination inherits the source's `machines` and `requires-module` (not its description). No
   comment is lost and no key is duplicated. A capture that changes a key held identically in several
   bundles of one layer rewrites all of them, so the profile never ends up in conflict.
-- `ubuntu-tweak note <bundle>:<dconf key path> "reason"` (also `packages:<apt|snap|flatpak>:<name>`
+- `ubuntu-tweak note <bundle>:<dconf key path> "reason"` (also `packages:<manager>:<name>`
   and `system:<key>`, e.g. `system:keyboard.layout`) adds, replaces or, with an empty text, removes
   a reason without touching anything else; the target must exist (exit 2). `--origin
   shared|overlay` chooses the layer when both hold it. A package's reason is a trailing comment
@@ -1126,6 +1126,11 @@ brew = ["gh"]                # optional: Homebrew formulae (Linuxbrew), installe
 flatpak = ["org.gnome.Extensions"]
 flatpak_remote = "flathub"   # optional: the one remote flatpaks are installed from (default flathub)
 apt_update = false           # optional: run `apt-get update` before the apt batch (default false)
+uv = ["glances[web]", "esphome==2026.1", "hyper-qa @ git+https://git.example.com/acme/qa-cli.git"]
+npm = ["@openai/codex", "opencode-ai@latest"]   # npm install -g --prefix ~/.local
+bun = ["cf"]                                    # bun add -g
+cargo = ["wasm-bindgen-cli"]                    # cargo install
+pipx = ["black"]                                # pipx install
 ```
 
 `apply` installs the missing ones and never removes. `capture` proposes
@@ -1135,7 +1140,9 @@ deliberate installs show up.
 
 A comment above a name or after it on its line (`"tmux",  # shell tools`) is that name's reason,
 and `capture --commit` keeps all of them: it appends new names to the array and leaves the order
-and the comments alone. `ubuntu-tweak note packages:apt:<name> "reason"` adds or changes one.
+and the comments alone. `ubuntu-tweak note packages:apt:<name> "reason"` adds or changes one (the manager is `apt`,
+`snap`, `flatpak`, `brew`, `uv`, `npm`, `bun`, `cargo` or `pipx`; the user-level managers are addressed by the entry's parsed name, so
+`packages:uv:glances` finds `"glances[web]"`).
 
 `brew = ["ripgrep"]` lists Homebrew formulae: the `brew` module's `formulae` post installs the missing
 ones with `brew install` after the Homebrew install itself (see *Base modules*); the lists union like the
@@ -1143,6 +1150,27 @@ others and a name starting with `-` is invalid config. There is no `brew` packag
 are a `[[post]]` of the module, so a machine without the `brew` module never plans them. `capture` does not
 scan Homebrew yet ([#48](https://github.com/alex-mextner/ubuntu-tweaks/issues/48)); the capture writer keeps
 an existing `brew` array and its comments.
+
+**User-level managers** (`uv`, `npm`, `bun`, `cargo`, `pipx`; `ubuntu_tweaks/tool_packages.py`). Each list holds
+install *specs*, the argument the manager's install command takes, and the spec's NAME is what the installed-check and
+coverage ownership compare: for `uv` / `pipx` a PEP 508 requirement (`glances[web]`, `esphome==2026.1`,
+`name @ url` with a scheme and spaces around the `@`) whose name is normalized (lower case, runs of `-_.` become `-`);
+for `npm` / `bun` `name` or `@scope/name` with an optional `@version`; for `cargo` a crate name with an optional
+`@version`. A private tool is a direct reference (`hyper-qa @ git+https://host/org/repo.git`). Entries reach the manager
+as one argv element, never through a shell, and are still validated at load time: an empty entry, one starting with `-`,
+one with whitespace outside the ` @ ` form, or with a character outside the spec grammar (`;`, `|`, `&`, `$`, backtick,
+quotes, parentheses) is invalid config (exit 2) naming the file, the manager and the entry. The lists union like the
+others; trailing-comment reasons work the same way (`note` and the `capture --commit` writer keep them). `capture --commit`
+appends only `apt`, `snap` and `flatpak` names; the proposals for the user-level managers are printed by `coverage --propose`
+(*Coverage*) and go into the file by hand. The commands: `uv tool install
+<spec>`, `npm install -g --prefix ~/.local <spec>`, `bun add -g <spec>`, `cargo install <spec>`, `pipx install <spec>`;
+installed means a row of `uv tool list`, `npm ls -g --depth=0 --parseable --prefix ~/.local`, `bun pm ls -g`,
+`cargo install --list`, `pipx list --short`. `npm` is always asked and installed with `--prefix ~/.local`: globals under another prefix (the distribution's, nvm's)
+are neither listed by coverage nor touched by `apply`. Two different specs of one NAME in the merged lists (`glances` and
+`glances[web]`, or a shared and a machine pin of `esphome`) are invalid config: keep one; so is one name under a manager and its
+fallback (`uv` and `pipx`, `npm` and `bun`), which share one installed-check. Managers are never installed
+by this file: see *Plan and actions*. They must be on the `PATH` of the `apply` process: a manager a module installed
+into a directory only a new login shell adds (Homebrew's, `~/.cargo/bin`) is reported blocked until the next run.
 
 One `package` action per manager that has names, listing what is missing right now. apt and
 snap run as one batch through sudo (`apt-get install -y …`, `snap install …`); flatpak runs
@@ -1864,6 +1892,28 @@ was used (`via fallback install-user.sh`). `--dry-run` lists the declared fallba
 managers: `packages.toml` may list `[fallback]` managers per manager (`apt = ["brew", "flatpak"]`): the names the
 primary manager could not install are offered to the next manager in order; a name a manager does not know is skipped,
 not failed.
+The user-level managers have a fixed pair, no configuration: an entry `uv` could not install is installed by `pipx`, an
+`npm` entry by `bun`; the entry counts as installed when either manager lists it, so a later run does not install it
+twice. A `uv` or `npm` action whose own binary is missing goes straight to its fallback when that one is present (and the
+engine does not repeat the same installs as an alternative). Coverage
+owns the fallback manager's name too (`uv = ["glances"]` owns `pipx:glances`), so an entry installed by the fallback is
+not reported as untracked.
+
+**User-level package actions.** `uv`, `npm`, `bun`, `cargo` and `pipx` give one `package` action per manager that has
+missing entries, user level (`needs_root = False`, never sudo). Every missing entry is installed on its own command, so
+a failing one does not hide the others; the failures are raised together once all were tried, a network or lock error
+among them makes the whole action *transient* (retried with backoff; a retry installs only what is still missing and does
+not repeat an entry that failed for good), anything else is permanent (`actions.Permanent`, never retried whatever its
+text says). Whether an entry's failure is a network or lock one is read from the failure text and exit status 75,
+with the command line left out (it quotes the package: `pytest-timeout` is not a timeout). `Process.execute` streams the
+manager's output to the terminal and the session log and puts the last three non-empty lines the child wrote to stderr into
+the `CommandError` (`<argv>: exited with status 2: <line> / <line>`, one line clipped to 400 characters), so
+`Temporary failure in name resolution`, `EAI_AGAIN`, `dns error`, `spurious network error` and the other network words of
+`actions.is_transient` are seen; a failure whose last lines say nothing of the kind is permanent (the command line and the spec are left out of the text, so a package named like a network word is not mistaken for one). A manager whose binary is missing (and, for `uv` / `npm`, whose fallback is missing too) is
+**blocked**: the line says `blocked by [package-manager] uv is not installed (installed by ...)` naming what installs
+it (the `brew` module's `tools` post for `uv` and `bun`, Node.js for `npm`, Rust for `cargo`, apt for `pipx`); the
+managers are not installed here, and everything else still runs (exit 7 like any blocked action). The check for the
+binary runs right before the action, so a manager an earlier module installed in the same run unblocks it.
 
 **Run journal.** `<state>/ubuntu-tweaks/run-journal.json` (next to the session logs) is written before the first
 action and after every action: run id, start time, the commit command, and per action its key, kind, text and status
@@ -1945,6 +1995,24 @@ separate files without merge conflicts, and inside a layer the first matching ru
 first, then `coverage.d` by name). `Finding.owner` names the file (`coverage.d/10-editors.toml`). Items the profile
 already declares are `tracked` without any rule: a bundle key, a linked file, a `packages.toml` name, a module's
 own files.
+
+**Packages.** The `packages` adapter lists `apt` (manual flag), `snap`, `flatpak`, `brew`, `pipx`, `uv` tools, `npm`
+globals (under `~/.local`), `bun` globals and `cargo` crates as `<manager>:<name>`. A declared name is tracked:
+`packages.toml` entries own the NAME parsed from the spec (`uv = ["glances[web]"]` owns `uv:glances`). An `apt` or
+`snap` item that `capture` would not propose is `excluded` with capture's own reason (`installer baseline`, or
+`distribution base (capture rule: ...)` for the `required` / `important` priority, the metapackage dependencies, the
+`[packages] ignore` and `ignore_snaps` globs): the adapter runs the same scan as `capture`
+(`capture/system_scan.scan_apt` / `scan_snaps`), so the two agree. Like every adapter opinion it is asked only for an
+item no declaration and no rule (engine, module, profile or machine) claims, so a declared name stays tracked and any
+rule wins. `capture` proposes every remaining item in `packages.toml`
+text: names, except for `uv` where the entry is the source recorded in the tool's
+`~/.local/share/uv/tools/<name>/uv-receipt.toml` (the default directory; `UV_TOOL_DIR` is not read, so such a tool is
+flagged as unknown) (`"name @ git+https://host/org/repo.git"`, with `@rev` / `#subdirectory=`
+kept (uv's own `URL?rev=...&subdirectory=...#commit` form is read too; a bare resolved commit is not pinned); `"name @ file:///abs/path"`; extras and specifier of a registry install, e.g. `"glances[web]"`). A crate that `cargo install --list` shows with a git or path source is treated the same way. `pipx`, `npm` and `bun` listings do not say where a package came from, so their items are proposed by name: check a private one by hand. A tool without a
+usable receipt, or whose receipt names a source the adapter does not translate (an editable install, a private index: a
+bare name would resolve against the public index), or that records more than one requirement (`--with`), constraints,
+a python pin or a marker (a spec would lose them), or a URL that carries a password, a token as the user of an https URL or a query other than uv's own `rev` / `tag` / `branch` /
+`subdirectory` (never proposed for a git-tracked profile), is written as the comment `# "name",  # source unknown: set the spec by hand`, never a made-up URL; such an item is not claimed by the proposal, so it stays untracked until the spec is set by hand.
 
 **Commands.** `ubuntu-tweak coverage [--json] [--class untracked|tracked|excluded|secret] [--dry-run]` scans and
 prints the table with a count per class, exit 3 while an `untracked` item **without a ticket** remains (nothing else
@@ -2706,6 +2774,12 @@ gh finds none, `init` says so and applies the modules only. `scripts/bootstrap.s
   actions never ask; `apply` and `init` acquire before the first root action and install the missing packages in
   the same run without a question (`tests/test_apply_commands.py`); `--dry-run` for every command, with `--commit`
   a usage error (`tests/test_dry_run.py`).
+- User-level package managers (`tests/test_tool_packages.py`, `tests/test_planner_tools.py`, `tests/test_coverage_adapters.py`
+  `PackagesAdapterTests`; `FakeProcess` only): spec parsing and normalization per manager with injection attempts
+  (`;`, `$(..)`, backticks, spaces, a leading `-`, a PEP 508 URL form for `npm`), listing parsers, the exact argv per
+  manager, one action per manager, per-entry failure isolation, transient classification with retry of only the
+  failed entries, a missing manager as blocked (and unblocked when installed during the run), the `uv` to `pipx` and
+  `npm` to `bun` fallbacks, and the coverage adapter: ownership, `excluded` for what capture refuses, capture text.
 - Dotfiles rc files, git identity and staged settings (`tests/test_dotfiles_links.py`, `tests/test_planner_base.py`
   `RcFileTests` / `GitTests`, `tests/test_planner_settings.py` `PendingExtensionSchemaTests`): the repository's
   `.zprofile` / `.zshrc` / `.profile` become `dotfiles-link` actions (a real file is `dotfiles-link-replace` with a

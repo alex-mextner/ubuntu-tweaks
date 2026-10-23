@@ -15,7 +15,8 @@ ones. flatpak = installed applications. Marks: ``+`` not yet in the profile's ``
 System: timezone (a machine-overlay value), locale and console keyboard (shared unless the overlay
 already sets the key), marked ``+`` / ``~`` / ``=`` against the layer the value is written to.
 
-Public API: ``Runner``, ``default_runner``, ``scan_packages``, ``scan_system``, ``PackageItem``,
+Public API: ``Runner``, ``default_runner``, ``scan_packages``, ``scan_apt`` / ``scan_snaps`` (what is proposed and
+what is refused with the reason: the coverage adapter reuses them), ``Scan``, ``scan_system``, ``PackageItem``,
 ``SystemItem``.
 """
 
@@ -109,22 +110,25 @@ def _flatpak_apps(run: Runner, user_dir: Path | None) -> set[str]:
     return names
 
 
-def scan_packages(
-    run: Runner,
-    rules: PackageRules,
-    existing: Packages,
-    *,
-    installer_baseline: Path = INSTALLER_BASELINE,
-    snap_seed: Path = SNAP_SEED,
-    flatpak_user_dir: Path | None = None,
-) -> tuple[list[PackageItem], str]:
-    """Package proposals plus a one-line note on which apt baseline was used."""
+@dataclass(frozen=True)
+class Scan:
+    """What capture proposes (``kept``, sorted) and what it refuses with the reason (``refused``)."""
+
+    kept: list[str]
+    refused: dict[str, str]
+    note: str = ""
+
+
+def scan_apt(run: Runner, rules: PackageRules, *, installer_baseline: Path = INSTALLER_BASELINE) -> Scan:
+    """The manually installed packages split into the ones capture proposes and the ones it refuses; the
+    coverage adapter asks the same question, so the two always agree."""
     baseline = _installer_baseline(installer_baseline)
     note = f"apt baseline: {installer_baseline}"
+    baseline_reason = "installer baseline"
     if baseline is None:
         baseline = _metapackage_baseline(run, rules.metapackages)
         note = "apt baseline: dependencies of " + ", ".join(rules.metapackages) + " (no installer baseline file)"
-    items: list[PackageItem] = []
+        baseline_reason = "distribution base (capture rule: dependency of " + ", ".join(rules.metapackages) + ")"
     manual = sorted(_lines(run(["apt-mark", "showmanual"])))
     priorities = (
         dict(
@@ -135,28 +139,63 @@ def scan_packages(
         if manual
         else {}
     )
+    kept: list[str] = []
+    refused: dict[str, str] = {}
     for name in manual:
         if priorities.get(name) in ("required", "important"):
-            continue
-        if name in baseline or name in rules.metapackages:
-            continue
-        if rules.ignore.matches(name) and not rules.keep.matches(name):
-            continue
-        items.append(PackageItem("apt", name, "=" if name in existing.apt else "+"))
+            refused[name] = "distribution base (capture rule: priority required or important)"
+        elif name in baseline:
+            refused[name] = baseline_reason
+        elif name in rules.metapackages:
+            refused[name] = "distribution base (capture rule: Ubuntu metapackage)"
+        elif rules.ignore.matches(name) and not rules.keep.matches(name):
+            refused[name] = "distribution base (capture rule: [packages] ignore)"
+        else:
+            kept.append(name)
+    return Scan(kept, refused, note)
+
+
+def scan_snaps(run: Runner, rules: PackageRules, *, snap_seed: Path = SNAP_SEED) -> Scan:
     seeded: set[str] = set()
     try:
         seeded = set(re.findall(r"^\s*-?\s*name:\s*(\S+)", snap_seed.read_text(encoding="utf-8"), re.MULTILINE))
     except (OSError, ValueError):
         pass
+    kept: list[str] = []
+    refused: dict[str, str] = {}
     for line in sorted(_lines(run(["snap", "list"]))[1:]):
         columns = line.split()
         name, notes = columns[0], columns[-1]
-        if "base" in notes or "snapd" in notes or rules.ignore_snaps.matches(name) or name in seeded:
-            continue
-        items.append(PackageItem("snap", name, "=" if name in existing.snap else "+"))
+        if "base" in notes or "snapd" in notes:
+            refused[name] = "distribution base (capture rule: snap base or snapd)"
+        elif rules.ignore_snaps.matches(name):
+            refused[name] = "distribution base (capture rule: [packages] ignore_snaps)"
+        elif name in seeded:
+            refused[name] = "installer baseline"
+        else:
+            kept.append(name)
+    return Scan(kept, refused)
+
+
+def scan_packages(
+    run: Runner,
+    rules: PackageRules,
+    existing: Packages,
+    *,
+    installer_baseline: Path = INSTALLER_BASELINE,
+    snap_seed: Path = SNAP_SEED,
+    flatpak_user_dir: Path | None = None,
+) -> tuple[list[PackageItem], str]:
+    """Package proposals plus a one-line note on which apt baseline was used."""
+    apt = scan_apt(run, rules, installer_baseline=installer_baseline)
+    items = [PackageItem("apt", name, "=" if name in existing.apt else "+") for name in apt.kept]
+    items += [
+        PackageItem("snap", name, "=" if name in existing.snap else "+")
+        for name in scan_snaps(run, rules, snap_seed=snap_seed).kept
+    ]
     for name in sorted(_flatpak_apps(run, flatpak_user_dir)):
         items.append(PackageItem("flatpak", name, "=" if name in existing.flatpak else "+"))
-    return items, note
+    return items, apt.note
 
 
 def _mark(current: str, recorded: str | None) -> tuple[Mark, str | None]:

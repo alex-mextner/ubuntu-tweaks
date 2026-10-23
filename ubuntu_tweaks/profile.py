@@ -72,6 +72,7 @@ from typing import Literal
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.identity import Location
 from ubuntu_tweaks.toml_edit import TomlDoc
+from ubuntu_tweaks.tool_packages import FALLBACK, TOOL_MANAGERS, parse_spec
 
 type TomlValue = str | int | float | bool | datetime | date | time | list[TomlValue] | TomlTable
 type TomlTable = dict[str, TomlValue]
@@ -217,6 +218,11 @@ class Packages:
     snap_classic: tuple[str, ...] = ()
     flatpak: tuple[str, ...] = ()
     brew: tuple[str, ...] = ()
+    uv: tuple[str, ...] = ()
+    npm: tuple[str, ...] = ()
+    bun: tuple[str, ...] = ()
+    cargo: tuple[str, ...] = ()
+    pipx: tuple[str, ...] = ()
     flatpak_remote: str = "flathub"
     apt_update: bool = False
 
@@ -267,8 +273,22 @@ def _str_tuple(table: Mapping[str, TomlValue], key: str, where: str) -> tuple[st
     return tuple(dict.fromkeys(str(item) for item in value))
 
 
+def _tool_specs(table: Mapping[str, TomlValue], manager: str, where: str) -> tuple[str, ...]:
+    specs = _str_tuple(table, manager, where)
+    for spec in specs:
+        try:
+            parse_spec(manager, spec)
+        except ConfigError as error:
+            raise ConfigError(f"{where} {error}") from None
+    return specs
+
+
 def _parse_packages(table: TomlTable, where: str) -> Packages:
-    _reject_unknown(table, ("apt", "snap", "snap_classic", "flatpak", "brew", "flatpak_remote", "apt_update"), where)
+    _reject_unknown(
+        table,
+        ("apt", "snap", "snap_classic", "flatpak", "brew", *TOOL_MANAGERS, "flatpak_remote", "apt_update"),
+        where,
+    )
     remote = _optional_str(table, "flatpak_remote", where)
     if remote is not None and (not remote or remote.startswith("-") or any(char.isspace() for char in remote)):
         raise ConfigError(f"{where}: flatpak_remote must be a remote name, got {remote!r}")
@@ -281,6 +301,7 @@ def _parse_packages(table: TomlTable, where: str) -> Packages:
         snap_classic=_str_tuple(table, "snap_classic", where),
         flatpak=_str_tuple(table, "flatpak", where),
         brew=_str_tuple(table, "brew", where),
+        **{manager: _tool_specs(table, manager, where) for manager in TOOL_MANAGERS},
         flatpak_remote=remote or "flathub",
         apt_update=apt_update,
     )
@@ -572,6 +593,25 @@ class Profile:
                 raise ConfigError(
                     f"packages.toml (shared or {self.machine} overlay) snap_classic: {name!r} is also in snap; "
                     "list it once, in snap_classic"
+                )
+        for manager in TOOL_MANAGERS:  # across both layers, so the merged lists are the place to see it
+            owners: dict[str, str] = {}
+            for spec in getattr(packages, manager):
+                name = parse_spec(manager, spec)
+                if owners.setdefault(name, spec) != spec:
+                    raise ConfigError(
+                        f"packages.toml (shared or {self.machine} overlay) {manager}: {owners[name]!r} and {spec!r} "
+                        f"both install {name}; keep one"
+                    )
+        for manager, fallback in FALLBACK.items():  # one pool for the installed-check, so one place to declare a tool
+            both = sorted(
+                {parse_spec(manager, spec) for spec in getattr(packages, manager)}
+                & {parse_spec(fallback, spec) for spec in getattr(packages, fallback)}
+            )
+            if both:
+                raise ConfigError(
+                    f"packages.toml (shared or {self.machine} overlay): {', '.join(both)} listed under both "
+                    f"{manager} and {fallback} ({fallback} is {manager}'s fallback); keep it under {manager}"
                 )
         return packages
 

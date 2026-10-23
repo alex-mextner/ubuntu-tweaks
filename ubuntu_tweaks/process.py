@@ -13,7 +13,8 @@ Public API:
 
 - ``CommandResult(returncode, stdout, stderr)`` with ``ok``.
 - ``CommandError`` (exit 1); ``returncode`` is the failed command's exit status (``None`` when it never ran).
-- ``Process``: ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
+- ``Process``: ``execute`` raises ``CommandError`` ``<argv>: exited with status N`` plus, when the child wrote to stderr, ``: <its last line>``
+  (so a retry classifier can read ``could not resolve host``); ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
   missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
   ``elevate(argv) -> list[str]`` (prefix with ``sudo --`` or ``pkexec``; unchanged when already
   root; ``CommandError`` when neither exists; while an ``elevation.RootSession`` is open it uses the prefix
@@ -22,7 +23,7 @@ Public API:
   ``use_root_prefix(prefix)`` / ``root_prefix()`` (the session's prefix; ``None`` outside a session) and
   ``run(argv, *, cwd=None, capture=False, timeout=None) -> str`` (raises ``CommandError``; the
   helper behind ``git``/``apt``/``glib-compile-schemas`` calls in the commands and submodule planners) and
-  ``run_streamed(argv, *, cwd=None, input_text=None, timeout=None) -> int`` (the child's exit status; its output
+  ``run_streamed(argv, *, cwd=None, input_text=None, timeout=None, stderr_tail=None) -> int`` (the child's exit status; its output
   is copied through the pipes described above; ``OSError`` when it cannot start, ``TimeoutExpired``).
 - ``FakeProcess(responses, effects)``: records ``queries`` and ``executed``; ``responses`` maps an
   argv tuple to a ``CommandResult`` (anything else answers 127); ``effects`` is called with
@@ -48,6 +49,8 @@ from typing import IO
 from ubuntu_tweaks.errors import UbuntuTweakError
 
 _CHUNK = 65536
+_TAIL = 2000  # characters of a child's stderr kept for the error message of a failure
+_DETAIL = 400  # ... of which the last three non-empty lines are shown on one line, clipped to this many
 _DRAIN_GRACE = 2.0  # seconds to wait for output left in the pipes once the child has exited
 _INTERRUPT_GRACE = 0.25  # seconds a child gets to react to the Ctrl-C it received too, before it is stopped
 _abandoned: list[IO[bytes]] = []  # pipes whose reader is still blocked: closing them would let the fd be reused
@@ -108,8 +111,9 @@ def elevate(argv: Sequence[str]) -> list[str]:
     raise CommandError("root is required but neither sudo nor pkexec is installed")
 
 
-def _pump(pipe: IO[bytes], stream_name: str, abandoned: threading.Event) -> None:
+def _pump(pipe: IO[bytes], stream_name: str, abandoned: threading.Event, tail: list[str] | None = None) -> None:
     """Copy ``pipe`` to ``sys.<stream_name>`` chunk by chunk (not by line, so a prompt without a newline shows).
+    ``tail``, when given, keeps the last ``_TAIL`` characters of what was read (the reason a failure shows).
 
     Once ``abandoned`` is set the caller has stopped waiting: the thread only drains, so it never writes to a
     stream the interpreter is about to tear down."""
@@ -122,6 +126,8 @@ def _pump(pipe: IO[bytes], stream_name: str, abandoned: threading.Event) -> None
         except OSError:
             break
         text = decoder.decode(chunk, final=not chunk)
+        if text and tail is not None:
+            tail[:] = ["".join(tail + [text])[-_TAIL:]]
         if text and shown and not abandoned.is_set():
             stream = getattr(sys, stream_name)
             try:
@@ -146,13 +152,19 @@ def _feed(pipe: IO[bytes], data: bytes) -> None:
 
 
 def run_streamed(
-    argv: Sequence[str], *, cwd: Path | None = None, input_text: str | None = None, timeout: float | None = None
+    argv: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    timeout: float | None = None,
+    stderr_tail: list[str] | None = None,
 ) -> int:
     """Run ``argv`` (never through a shell) and return its exit status, showing its output as it arrives.
 
     stdout and stderr are pipes that reader threads copy to ``sys.stdout`` / ``sys.stderr`` (which may be the
     session log's tees); stdin is the terminal, or ``input_text`` when given. ``OSError`` when the program cannot
     start and ``subprocess.TimeoutExpired`` (the child is stopped first) propagate as ``subprocess.run`` raises them.
+    ``stderr_tail`` (a list) ends up holding one string: the last characters the child wrote to stderr.
     """
     # A Python child on a pipe would hold its prompts back and mix its two streams: ask it not to buffer.
     environment = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -165,7 +177,13 @@ def run_streamed(
         env=environment,
     )
     readers = [
-        (threading.Thread(target=_pump, args=(pipe, name, abandoned), daemon=True), pipe, abandoned)
+        (
+            threading.Thread(
+                target=_pump, args=(pipe, name, abandoned, stderr_tail if name == "stderr" else None), daemon=True
+            ),
+            pipe,
+            abandoned,
+        )
         for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
         if pipe is not None
         for abandoned in (threading.Event(),)
@@ -263,14 +281,17 @@ class Process:
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
     def execute(self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None) -> None:
+        tail: list[str] = []
         try:
-            returncode = run_streamed(argv, cwd=cwd, input_text=input_text)
+            returncode = run_streamed(argv, cwd=cwd, input_text=input_text, stderr_tail=tail)
         except FileNotFoundError as error:
             raise CommandError(f"{argv[0]}: command not found") from error
         except OSError as error:
             raise CommandError(f"{argv[0]}: cannot run: {error.strerror or error}") from error
         if returncode != 0:
-            raise CommandError(f"{' '.join(argv)}: exited with status {returncode}", returncode)
+            lines = [line.strip() for line in "".join(tail).splitlines() if line.strip()]
+            detail = f": {' / '.join(lines[-3:])[-_DETAIL:]}" if lines else ""
+            raise CommandError(f"{' '.join(argv)}: exited with status {returncode}{detail}", returncode)
 
     def elevate(self, argv: Sequence[str]) -> list[str]:
         return elevate(argv)

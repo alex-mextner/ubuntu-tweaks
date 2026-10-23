@@ -16,7 +16,7 @@ Assumptions:
   take part. The key's comment block moves with it; a section that empties takes its own comment along
   (nothing is lost, also when the destination already holds the key); a key the destination already
   holds with the same value is merged (the source copy goes).
-- ``note`` addresses ``<bundle>:<dconf key path>``, ``packages:<apt|snap|flatpak>:<name>`` or
+- ``note`` addresses ``<bundle>:<dconf key path>``, ``packages:<apt|snap|flatpak|brew|uv|npm|bun|cargo|pipx>:<name>`` or
   ``system:<key>``; an empty text removes the reason. The key must exist; it is never created.
 
 Public API: ``Edit(path, text)``, ``EditPlan(lines, writes)``, ``plan_move(profile, destination,
@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import re
 import json
+import operator
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,9 +46,10 @@ from ubuntu_tweaks.capture.globs import compile_glob
 from ubuntu_tweaks.errors import ConfigError, RefusedError
 from ubuntu_tweaks.keyfile_doc import KeyfileDoc, comment_text, normalize_section
 from ubuntu_tweaks.profile import Origin, Profile
+from ubuntu_tweaks.tool_packages import TOOL_MANAGERS, parse_spec
 from ubuntu_tweaks.toml_edit import TomlDoc
 
-_PACKAGES_SPEC = re.compile(r"packages:(apt|snap|flatpak):(.+)")
+_PACKAGES_SPEC = re.compile(rf"packages:(apt|snap|flatpak|brew|{'|'.join(TOOL_MANAGERS)}):(.+)")
 _SYSTEM_SPEC = re.compile(r"system:([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?)")
 
 
@@ -207,7 +209,10 @@ def _note_toml(
     origin: Origin | None,
     label: str,
     filename: str,
+    same_entry: Callable[[str, str], bool] | None = None,
 ) -> EditPlan:
+    """``same_entry(entry, item)`` says whether an array entry is the addressed one (a tool package is addressed by
+    its name, the entry is a spec); the default is equality."""
     layers = [
         (o, path)
         for o, path in (
@@ -216,24 +221,39 @@ def _note_toml(
         )
         if path.is_file() and (origin is None or o == origin)
     ]
-    holders: list[tuple[Path, TomlDoc]] = []
+    holders: list[tuple[Path, TomlDoc, str | None]] = []
     for _origin, path in layers:
         doc = TomlDoc.parse(path.read_text(encoding="utf-8"), _rel(profile, path))
-        present = item in (doc.array(table, key) or ()) if item is not None else doc.has(table, key)
+        found = None
+        if item is None:
+            present = doc.has(table, key)
+        else:
+            found = next((e for e in doc.array(table, key) or () if (same_entry or operator.eq)(e, item)), None)
+            present = found is not None
         if present:
-            holders.append((path, doc))
+            holders.append((path, doc, found))
     if not holders:
         raise ConfigError(f"{label} is not in {filename}")
     if len(holders) > 1:
         raise ConfigError(f"{label} is in both {filename} files: pick one with --origin shared|overlay")
-    path, doc = holders[0]
-    if item is not None:
-        old = doc.item_reason(table, key, item)
-        doc.set_item_comment(table, key, item, text)
+    path, doc, found = holders[0]
+    if item is not None and found is not None:
+        old = doc.item_reason(table, key, found)
+        doc.set_item_comment(table, key, found, text)
     else:
         old = doc.key_reason(table, key)
         doc.set_key_comment(table, key, text)
     return EditPlan((f"{_rel(profile, path)} {label}: reason {old!r} -> {text!r}",), (Edit(path, doc.text()),))
+
+
+def _same_tool_package(manager: str) -> Callable[[str, str], bool]:
+    def same(entry: str, name: str) -> bool:
+        try:
+            return parse_spec(manager, entry) == parse_spec(manager, name)
+        except ConfigError:
+            return False
+
+    return same
 
 
 def plan_note(profile: Profile, spec: str, text: str, origin: Origin | None = None) -> EditPlan:
@@ -241,7 +261,10 @@ def plan_note(profile: Profile, spec: str, text: str, origin: Origin | None = No
     one_line = " ".join(text.split())  # a TOML trailing comment must stay on its line
     if packages := _PACKAGES_SPEC.fullmatch(spec):
         manager, name = packages.groups()
-        return _note_toml(profile, (), manager, name, one_line, origin, f"{manager} {name}", "packages.toml")
+        same_entry = _same_tool_package(manager) if manager in TOOL_MANAGERS else None
+        return _note_toml(
+            profile, (), manager, name, one_line, origin, f"{manager} {name}", "packages.toml", same_entry
+        )
     if system := _SYSTEM_SPEC.fullmatch(spec):
         table, _, key = system.group(1).rpartition(".")
         return _note_toml(
@@ -256,7 +279,5 @@ def plan_note(profile: Profile, spec: str, text: str, origin: Origin | None = No
         )
     name, separator, key_spec = spec.partition(":")
     if not separator or not name or not key_spec:
-        raise ConfigError(
-            f"{spec!r}: expected <bundle>:<dconf key path>, packages:<apt|snap|flatpak>:<name> or system:<key>"
-        )
+        raise ConfigError(f"{spec!r}: expected <bundle>:<dconf key path>, packages:<manager>:<name> or system:<key>")
     return _note_bundle(profile, name, key_spec, text, origin)
