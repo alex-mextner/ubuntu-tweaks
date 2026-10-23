@@ -84,6 +84,17 @@ class Alternative(Action):
         self.primary.done = True
 
 
+class Needy(Step):
+    """A step that names the action it lacks (``Action.blocker``)."""
+
+    def __init__(self, name: str, lacks: Action, phase: Phase) -> None:
+        super().__init__(name, phase)
+        self._lacks = lacks
+
+    def blocker(self) -> Action:
+        return self._lacks
+
+
 def quick() -> tuple[RetryPolicy, list[float]]:
     slept: list[float] = []
     return RetryPolicy(attempts=3, base=2.0, cap=30.0, sleep=slept.append, jitter=lambda low, high: high), slept
@@ -185,6 +196,18 @@ class DependencyTests(unittest.TestCase):
         enable.done = True
         result = Plan((link, enable)).execute(policy=quick()[0])
         self.assertEqual(result.blocked, ())
+
+    def test_an_action_that_names_its_own_blocker_is_blocked_and_not_run(self) -> None:
+        missing = Step("unit-file", kind="unit-file")
+        needy = Needy("enable", missing, Phase.UNITS)
+        other = Step("other", Phase.UNITS)
+        result = Plan((needy, other)).execute(policy=quick()[0])
+        self.assertEqual([(item.action, item.by) for item in result.blocked], [(needy, missing)])
+        self.assertEqual((needy.runs, other.runs), (0, 1))
+        self.assertIn("blocked by [unit-file] do unit-file", result.render_blocked())
+
+    def test_an_action_without_a_blocker_is_not_blocked(self) -> None:
+        self.assertIsNone(Step("x").blocker())
 
 
 class FallbackTests(unittest.TestCase):

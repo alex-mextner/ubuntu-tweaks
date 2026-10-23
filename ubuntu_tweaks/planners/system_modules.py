@@ -12,7 +12,8 @@ and both run with it as the working directory. ``run()`` executes the install co
 attached, so the installer's diff is visible. The merged ``[modules.<name>]`` options (without
 ``enabled``) reach ``check``, ``preview`` and ``install`` as JSON in ``UBUNTU_TWEAK_MODULE_CONFIG``, carried
 by ``env`` so sudo's ``env_reset`` keeps it; they are visible in ``ps`` and in sudo's log, so a module
-option is never a secret. Installer exit ``NEEDS_MANUAL_EXIT`` (10) is a ``ManualStepRequired``.
+option is never a secret. Installer exit ``NEEDS_MANUAL_EXIT`` (10) is a ``ManualStepRequired``, exit ``EX_TEMPFAIL``
+(75) a ``Transient`` (retried with backoff).
 
 Public API:
 
@@ -32,7 +33,7 @@ import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
-from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
+from ubuntu_tweaks.actions import EX_TEMPFAIL, Action, ActionFailed, ManualStepRequired, Phase, Transient
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.manifest import Fallback, Manifest, SourceKind, module_defaults
 from ubuntu_tweaks.identity import MODULE_CONFIG_ENV
@@ -159,6 +160,8 @@ class SystemModuleAction(Action):
                     f"{self._manifest.name}: the installer needs a manual step (exit {NEEDS_MANUAL_EXIT}; "
                     f"its output above says which){hint}"
                 ) from error
+            if error.returncode == EX_TEMPFAIL:
+                raise Transient(f"{self._manifest.name}: {error}") from error
             raise ActionFailed(f"{self._manifest.name}: {error}") from error
 
     def alternatives(self) -> Sequence[Action]:

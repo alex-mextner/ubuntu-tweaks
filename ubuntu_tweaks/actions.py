@@ -20,9 +20,9 @@ Two rules for whoever builds the candidate list, because ``Plan.build`` evaluate
 Public API:
 
 - ``Phase`` (``IntEnum``): the plan order, ``BASE`` < ``SUBMODULE`` < ``MIGRATE`` < ``SCHEMAS`` <
-  ``PACKAGES`` < ``SYSTEM`` < ``LINK`` (extension symlinks) < ``FILES`` (profile file links) <
-  ``TOGGLE`` (enable/disable) < ``SETTINGS_MODULE`` < ``SETTINGS_PROFILE`` <
-  ``SETTINGS_MACHINE`` < ``SEED``. ``BASE`` holds the init pipeline's tool installs (base tools,
+  ``PACKAGES`` < ``SYSTEM`` < ``LINK`` (extension symlinks) < ``FILES`` (profile file links) < ``UNITS`` (user
+  units: daemon-reload, enable, start, linger) < ``TOGGLE`` (enable/disable) < ``SETTINGS_MODULE`` <
+  ``SETTINGS_PROFILE`` < ``SETTINGS_MACHINE`` < ``SEED``. ``BASE`` holds the init pipeline's tool installs (base tools,
   zsh, clipboard, git/gh, brew): they run before even the submodule init.
 - ``DEFAULT_ORDER`` (100) and ``Action.order``: the tie-break inside a phase (lower first, stable
   otherwise). A module's ``order`` in ``module.toml`` sets it for the module's actions (spec,
@@ -35,6 +35,9 @@ Public API:
   ``run()`` may raise ``ManualStepRequired(message)`` when only the user can finish it (a missing
   credential): the plan goes on, the action stays unsatisfied and the message is reported as
   ``needs manual: ...`` (``ExecutionResult.manual``).
+  ``blocker() -> Action | None`` (optional, default ``None``): an action standing for what this one needs and
+  lacks (a unit file nobody provides); asked right before ``run()``, a non-``None`` answer makes the action
+  *blocked by* it: reported, never run, not a failure.
 - ``Plan.build(candidates, *, only=None) -> Plan``: when ``only`` is non-empty, keeps the
   candidates whose ``scope`` is in it (a candidate with ``scope=None`` is dropped); an empty or
   ``None`` ``only`` selects everything. Orders by ``(phase, order)`` (stable inside both), keeps the
@@ -78,6 +81,7 @@ class Phase(IntEnum):
     SYSTEM = 50
     LINK = 60
     FILES = 70
+    UNITS = 75
     TOGGLE = 80
     SETTINGS_MODULE = 90
     SETTINGS_PROFILE = 100
@@ -185,6 +189,12 @@ class Action(ABC):
     @abstractmethod
     def check(self) -> bool:
         """True when the system already matches; must not change anything."""
+
+    def blocker(self) -> Action | None:
+        """An action that must exist for this one to be tried and does not (a unit file nobody provides). Asked
+        right before ``run()``; when it returns one the action is *blocked* by it (spec, *Reconcile and failover*),
+        never run and never counted as failed."""
+        return None
 
     @abstractmethod
     def run(self) -> None:
@@ -408,6 +418,9 @@ class _Execution:
             self.observer(action, status, detail)
 
     def _blocker(self, action: Action) -> Action | None:
+        named = action.blocker()
+        if named is not None:
+            return named
         scope = action.scope
         if scope is None:
             return None

@@ -1,0 +1,876 @@
+#!/usr/bin/python3 -B
+"""apt-sources module: the profile's extra apt repositories as deb822 files with fingerprint-verified keys.
+
+    apt-sources check     exit 0 satisfied, 3 drift (read-only, no root, no network)
+    apt-sources status    the same facts, one line each, plus the sources nobody declared (`unmanaged`)
+    apt-sources plan      what `install` is going to do, with a diff for every text file (`--dry-run`)
+    apt-sources install   as root (sudo): make them true
+
+Options come from `[modules.apt-sources]` (UBUNTU_TWEAK_MODULE_CONFIG): `sources`, a table of tables keyed by the
+source name (merges across profile.toml and machine.toml) or a list of tables with a `name`. Per source: `uris`,
+`suites`, `components`, `architectures`, `types`, `key_url`, `key_urls` (mirrors), `key_cached` (armored key kept
+in the profile), `key_format` (asc | gpg), `fingerprint` (REQUIRED while enabled), `pin`, `enabled`.
+
+A key is installed only when the primary-key fingerprints of the file equal the pinned ones; keys are tried in the
+order key_url, key_urls, key_cached; one failing source never blocks the others; network causes only make the
+installer exit 75. `check`, `plan` and `install` all read one `inspect()`. `APT_SOURCES_ROOT=DIR` stages every path
+below DIR (tests; needs no root). Spec: docs/specs/apt-sources.md.
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import re
+import shutil
+import sys
+import tempfile
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    TempFail,
+    main,
+    module_config,
+    read_text_or_none,
+    unified_diff_lines,
+    write_file,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+ROOT_ENV = "APT_SOURCES_ROOT"
+SOURCES_DIR = "etc/apt/sources.list.d"
+MAIN_LIST = "etc/apt/sources.list"
+KEYS_DIR = "etc/apt/keyrings"
+PREFS_DIR = "etc/apt/preferences.d"
+BACKUP_DIR = "var/backups/ubuntu-tweaks/apt-sources"
+PENDING_FILE = "var/lib/ubuntu-tweaks/apt-sources/pending-update"
+MARKER = "# Managed by ubuntu-tweaks (apt-sources)"
+HEADER = f"{MARKER}: change [modules.apt-sources] in the profile instead.\n"
+MAX_KEY_BYTES = 262144
+CURL_TRANSIENT = {5, 6, 7, 28, 35, 52, 55, 56, 124}  # proxy/host unresolved, connect, timeout, TLS/send/recv errors
+TRANSIENT_TEXT = re.compile(
+    r"could not resolve|temporary failure|timed out|connection (?:reset|refused|timed)|could not get lock|"
+    r"try again|network is unreachable|failed to connect|http/?\s?(?:429|50[234])|error: (?:429|50[234])",
+    re.IGNORECASE,
+)
+NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
+FINGERPRINT = re.compile(r"(?:[0-9A-F]{40}|[0-9A-F]{64})")
+OPTIONS = {
+    "name",
+    "enabled",
+    "uris",
+    "suites",
+    "components",
+    "architectures",
+    "types",
+    "key_url",
+    "key_urls",
+    "key_cached",
+    "key_format",
+    "fingerprint",
+    "pin",
+}
+KEY_FORMATS = ("asc", "gpg")
+FPR_FIELD = 9  # `gpg --with-colons`: the fingerprint is the tenth field of an `fpr` record
+ARCH_NAMES = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "armhf"}
+
+
+class SourceFailure(Exception):
+    """One source could not be converged; ``transient`` says every cause was a network/lock one."""
+
+    def __init__(self, message: str, transient: bool) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
+class KeyRejected(Exception):
+    """A key candidate that must not be installed (mismatch, unreadable, wrong format): permanent."""
+
+
+@dataclass(frozen=True)
+class Failure:
+    name: str
+    cause: str
+    transient: bool
+
+
+@dataclass(frozen=True)
+class Source:
+    name: str
+    enabled: bool
+    uris: tuple[str, ...]
+    suites: tuple[str, ...]
+    components: tuple[str, ...]
+    architectures: tuple[str, ...]
+    types: tuple[str, ...]
+    key_url: str | None
+    key_urls: tuple[str, ...]
+    key_cached: str | None
+    key_format: str
+    fingerprints: frozenset[str]
+    pin: str | None
+
+    @property
+    def sources_name(self) -> str:
+        return f"{self.name}.sources"
+
+    @property
+    def key_name(self) -> str:
+        return f"{self.name}.{self.key_format}"
+
+    @property
+    def other_key_name(self) -> str:
+        return f"{self.name}.{'gpg' if self.key_format == 'asc' else 'asc'}"
+
+    def repos(self) -> set[tuple[str, str]]:
+        return {(normalize_uri(uri), suite) for uri in self.uris for suite in self.suites}
+
+    def candidates(self) -> list[tuple[str, str | None]]:
+        """``(label, url)`` in trial order; ``(label, None)`` is the cached copy."""
+        found: list[tuple[str, str | None]] = []
+        if self.key_url:
+            found.append(("key_url", self.key_url))
+        found += [(f"key_urls[{index}]", url) for index, url in enumerate(self.key_urls) if url != self.key_url]
+        if self.key_cached:
+            found.append(("key_cached", None))
+        return found
+
+
+# -- options -------------------------------------------------------------------------------------------------
+
+
+def _fail(name: str, message: str) -> ModuleError:
+    return ModuleError(f"[modules.apt-sources] source {name!r}: {message}")
+
+
+def _strings(name: str, key: str, value: object, *, required: bool) -> tuple[str, ...]:
+    if value is None:
+        if required:
+            raise _fail(name, f"{key} is required")
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise _fail(name, f"{key} must be a list of non-empty strings")
+    if required and not value:
+        raise _fail(name, f"{key} must not be empty")
+    return tuple(item.strip() for item in value)
+
+
+def _parse_fingerprints(name: str, raw: object) -> frozenset[str]:
+    if raw in (None, "", []):
+        return frozenset()
+    items = [raw] if isinstance(raw, str) else raw
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise _fail(name, "fingerprint must be a string or a list of strings")
+    cleaned = {re.sub(r"\s", "", item).upper() for item in items}
+    for item in sorted(cleaned):
+        if not FINGERPRINT.fullmatch(item):
+            raise _fail(name, f"fingerprint {item!r} is not a 40- or 64-hex primary key fingerprint")
+    return frozenset(cleaned)
+
+
+def _parse_key_location(name: str, table: Mapping[str, object]) -> tuple[str | None, tuple[str, ...], str | None]:
+    key_url = table.get("key_url")
+    if key_url is not None and not isinstance(key_url, str):
+        raise _fail(name, "key_url must be a string")
+    key_urls = _strings(name, "key_urls", table.get("key_urls"), required=False)
+    for url in (key_url, *key_urls):
+        if url is not None and not url.startswith("https://"):
+            raise _fail(name, f"key URL {url!r} must be https://")
+    key_cached = table.get("key_cached")
+    if key_cached is not None and (not isinstance(key_cached, str) or "BEGIN PGP" not in key_cached):
+        raise _fail(name, "key_cached must be an armored key (-----BEGIN PGP PUBLIC KEY BLOCK-----)")
+    return key_url, key_urls, key_cached
+
+
+def parse_source(name: str, table: Mapping[str, object]) -> Source:
+    unknown = sorted(set(table) - OPTIONS)
+    if unknown:
+        raise _fail(name, f"unknown option(s): {', '.join(unknown)}")
+    if not NAME.fullmatch(name):
+        raise _fail(name, f"the name must match {NAME.pattern}")
+    enabled = table.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise _fail(name, "enabled must be true or false")
+    uris = _strings(name, "uris", table.get("uris"), required=True)
+    for uri in uris:
+        if not re.match(r"https?://\S+$", uri):
+            raise _fail(name, f"uri {uri!r} must be an http(s) URL")
+    suites = _strings(name, "suites", table.get("suites"), required=True)
+    flat = all(suite.endswith("/") for suite in suites)
+    components = _strings(name, "components", table.get("components"), required=not flat)
+    architectures = _strings(name, "architectures", table.get("architectures"), required=False)
+    types = _strings(name, "types", table.get("types"), required=False) or ("deb",)
+    if not set(types) <= {"deb", "deb-src"}:
+        raise _fail(name, "types must be deb and/or deb-src")
+    key_url, key_urls, key_cached = _parse_key_location(name, table)
+    key_format = table.get("key_format", "asc")
+    if key_format not in KEY_FORMATS:
+        raise _fail(name, f"key_format must be one of {', '.join(KEY_FORMATS)}")
+    fingerprints = _parse_fingerprints(name, table.get("fingerprint"))
+    if enabled and not fingerprints:
+        raise _fail(name, "fingerprint is required (the pinned primary key fingerprint)")
+    if enabled and not (key_url or key_urls or key_cached):
+        raise _fail(name, "needs a key_url, key_urls or key_cached")
+    pin = table.get("pin")
+    if pin is not None and (not isinstance(pin, str) or not pin.strip()):
+        raise _fail(name, "pin must be a non-empty string")
+    return Source(
+        name,
+        enabled,
+        uris,
+        suites,
+        components,
+        architectures,
+        types,
+        key_url,
+        key_urls,
+        key_cached,
+        str(key_format),
+        fingerprints,
+        None if pin is None else pin.rstrip("\n") + "\n",
+    )
+
+
+def parse_options(options: Mapping[str, object]) -> list[Source]:
+    unknown = sorted(set(options) - {"sources"})
+    if unknown:
+        raise ModuleError(f"[modules.apt-sources] unknown option(s): {', '.join(unknown)}")
+    raw = options.get("sources", [])
+    sources: list[Source] = []
+    if isinstance(raw, dict):
+        for name, table in raw.items():
+            if not isinstance(table, dict):
+                raise ModuleError(f"[modules.apt-sources.sources.{name}] must be a table")
+            sources.append(parse_source(name, table))
+    elif isinstance(raw, list):
+        for table in raw:
+            if not isinstance(table, dict) or not isinstance(table.get("name"), str):
+                raise ModuleError("[modules.apt-sources] every entry of sources needs a name")
+            sources.append(parse_source(table["name"], table))
+    else:
+        raise ModuleError("[modules.apt-sources] sources must be a table of tables or a list of tables")
+    names = [source.name for source in sources]
+    duplicated = sorted({name for name in names if names.count(name) > 1})
+    if duplicated:
+        raise ModuleError(f"[modules.apt-sources] source {duplicated[0]!r} is declared twice")
+    return sources
+
+
+# -- rendering and parsing of apt files ----------------------------------------------------------------------
+
+
+def normalize_uri(uri: str) -> str:
+    return uri.replace("$(ARCH)", ARCH_NAMES.get(platform.machine(), platform.machine())).rstrip("/")
+
+
+def render_sources(source: Source) -> str:
+    lines = [
+        f"Types: {' '.join(source.types)}",
+        f"URIs: {' '.join(source.uris)}",
+        f"Suites: {' '.join(source.suites)}",
+    ]
+    if source.components:
+        lines.append(f"Components: {' '.join(source.components)}")
+    if source.architectures:
+        lines.append(f"Architectures: {' '.join(source.architectures)}")
+    lines.append(f"Signed-By: /{KEYS_DIR}/{source.key_name}")
+    return HEADER + "\n".join(lines) + "\n"
+
+
+def render_pin(source: Source) -> str:
+    return HEADER + (source.pin or "")
+
+
+def declared_repos(path: Path, text: str) -> set[tuple[str, str]]:
+    """The ``(uri, suite)`` pairs a ``.list`` (one-line) or ``.sources`` (deb822) file declares; comments ignored."""
+    return _deb822_repos(text) if path.suffix == ".sources" else _list_repos(text)
+
+
+def _list_repos(text: str) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        words = line.split("#", 1)[0].split()
+        if len(words) < 3 or words[0] not in ("deb", "deb-src"):
+            continue
+        index = 1
+        if words[index].startswith("["):
+            while index < len(words) and not words[index].endswith("]"):
+                index += 1
+            index += 1
+        if index + 1 < len(words):
+            found.add((normalize_uri(words[index]), words[index + 1]))
+    return found
+
+
+def _deb822_repos(text: str) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for stanza in re.split(r"\n\s*\n", text):
+        fields: dict[str, str] = {}
+        last = ""
+        for line in stanza.splitlines():
+            if line.lstrip().startswith("#") or not line.strip():
+                continue
+            if line[0] in " \t" and last:
+                fields[last] += " " + line.strip()
+            elif ":" in line:
+                last, _, value = line.partition(":")
+                last = last.strip().lower()
+                fields[last] = value.strip()
+        for uri in fields.get("uris", "").split():
+            for suite in fields.get("suites", "").split():
+                found.add((normalize_uri(uri), suite))
+    return found
+
+
+def mismatch(wanted: frozenset[str], found: frozenset[str]) -> str:
+    return f"fingerprint mismatch: wanted {', '.join(sorted(wanted))}, got {', '.join(sorted(found)) or 'none'}"
+
+
+def is_armored(data: bytes) -> bool:
+    return data.lstrip().startswith(b"-----BEGIN PGP")
+
+
+# -- what install will do ------------------------------------------------------------------------------------
+
+
+@dataclass
+class Change:
+    """One thing ``install`` will do to one path. ``needs`` names every source that must have converged before a
+    removal of a file several sources share is allowed (the file is their only declaration meanwhile)."""
+
+    source: str
+    action: str  # write | replace | remove
+    path: Path
+    text: str | None = None  # new content of a text file
+    backup: bool = False  # the old file is copied to the backup directory first
+    note: str = ""
+    key: bool = False  # the content comes from the key candidates, not from `text`
+    needs: tuple[str, ...] = ()
+
+    @property
+    def shared(self) -> bool:
+        """A removal of a file several sources declare: it waits until all of them converged."""
+        return len(self.needs) > 1
+
+
+def apply_order(change: Change) -> int:
+    """Key first (a source never appears without its key), files next, removals (legacy, disabled) last."""
+    return 0 if change.key else 2 if change.action == "remove" else 1
+
+
+@dataclass(frozen=True)
+class Duplicate:
+    """A hand-written file that declares only repositories some enabled sources declare."""
+
+    path: Path
+    owners: tuple[str, ...]
+
+
+@dataclass
+class Inspection:
+    facts: list[Finding] = field(default_factory=list)
+    changes: list[Change] = field(default_factory=list)
+    manual: list[Finding] = field(default_factory=list)
+    unmanaged: list[Finding] = field(default_factory=list)
+    refresh: list[str] = field(default_factory=list)  # names whose index refresh is pending
+
+    @property
+    def clean(self) -> bool:
+        return not self.changes and not self.manual and not self.refresh
+
+    def by_source(self) -> dict[str, list[Change]]:
+        grouped: dict[str, list[Change]] = {}
+        for change in self.changes:
+            grouped.setdefault(change.source, []).append(change)
+        return grouped
+
+
+class Gpg:
+    """The only place that reads OpenPGP keys: ``gpg --show-keys`` in a throwaway home directory."""
+
+    def __init__(self, process: Process) -> None:
+        self._process = process
+
+    def _run(self, work: Path, *args: str) -> str:
+        result = self._process.query(["gpg", "--homedir", str(work), "--batch", "--no-tty", *args], timeout=30)
+        if result.returncode == 127:
+            raise ModuleError("gpg is required to verify keys (apt install gnupg)")
+        if result.returncode != 0:
+            lines = (result.stderr or result.stdout).strip().splitlines()
+            raise KeyRejected(f"not a readable OpenPGP key: {lines[-1] if lines else 'gpg failed'}")
+        return result.stdout
+
+    def primaries(self, data: bytes) -> frozenset[str]:
+        with tempfile.TemporaryDirectory(prefix="apt-sources-gpg-") as directory:
+            work = Path(directory)
+            key = work / "key"
+            key.write_bytes(data)
+            colons = self._run(work, "--show-keys", "--with-colons", "--fingerprint", str(key))
+        found: set[str] = set()
+        expect = False
+        for line in colons.splitlines():
+            kind = line.split(":", 1)[0]
+            if kind == "pub":
+                expect = True
+            elif kind == "sub":
+                expect = False
+            elif kind == "fpr" and expect:
+                found.add(line.split(":")[FPR_FIELD].upper())
+                expect = False
+        return frozenset(found)
+
+    def dearmor(self, data: bytes) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="apt-sources-gpg-") as directory:
+            work = Path(directory)
+            (work / "in").write_bytes(data)
+            self._run(work, "--yes", "--dearmor", "--output", str(work / "out"), str(work / "in"))
+            return (work / "out").read_bytes()
+
+
+class AptSources(Module):
+    name = "apt-sources"
+
+    def __init__(
+        self,
+        root: Path,
+        sources: Sequence[Source],
+        process: Process,
+        *,
+        is_root: bool,
+        clock: datetime | None = None,
+    ) -> None:
+        self._root = root
+        self._sources = list(sources)
+        self._process = process
+        self._gpg = Gpg(process)
+        self._is_root = is_root
+        self._stamp = (clock or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+
+    # -- paths ---------------------------------------------------------------------------------------------
+
+    def _p(self, relative: str) -> Path:
+        return self._root / relative
+
+    def _shown(self, path: Path) -> str:
+        try:
+            return "/" + str(path.relative_to(self._root))
+        except ValueError:
+            return str(path)
+
+    def _list_files(self) -> list[Path]:
+        try:
+            names = sorted(os.listdir(self._p(SOURCES_DIR)))
+        except FileNotFoundError:
+            return []
+        return [self._p(SOURCES_DIR) / name for name in names if name.endswith((".list", ".sources"))]
+
+    def _pending(self) -> list[str]:
+        text = read_text_or_none(self._p(PENDING_FILE)) or ""
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    # -- the one inspection (read-only) --------------------------------------------------------------------
+
+    def inspect(self) -> Inspection:
+        result = Inspection()
+        managed_names = {source.sources_name for source in self._sources}
+        enabled = [source for source in self._sources if source.enabled]
+        files = self._list_files()
+        duplicates = self._duplicates(files, managed_names, enabled, result)
+        for source in self._sources:
+            if source.enabled:
+                self._inspect_enabled(source, duplicates, result)
+            else:
+                self._inspect_disabled(source, result)
+        claimed = {duplicate.path for duplicate in duplicates}
+        for path in files:
+            if path.name in managed_names or path in claimed:
+                continue
+            if (read_text_or_none(path) or "").startswith(MARKER):
+                result.manual.append(
+                    Finding(
+                        False,
+                        f"{self._shown(path)} was written by this module but is no longer declared",
+                        "declare the source again, or declare it with enabled = false to have it removed",
+                        manual=True,
+                    )
+                )
+                continue
+            detail = "left alone (not declared in [modules.apt-sources])"
+            result.unmanaged.append(Finding(True, f"unmanaged {self._shown(path)}", detail))
+        enabled_names = {source.name for source in enabled}
+        result.refresh = [name for name in self._pending() if name in enabled_names]
+        if result.refresh:
+            result.facts.append(Finding(False, "apt index refreshed", f"pending for {', '.join(result.refresh)}"))
+        return result
+
+    def _duplicates(
+        self, files: list[Path], managed_names: set[str], enabled: list[Source], result: Inspection
+    ) -> list[Duplicate]:
+        """Hand-written files declaring a repository an enabled source declares. A file with other repositories too
+        (or ``sources.list`` itself) is never edited: it becomes a manual finding."""
+        found: list[Duplicate] = []
+        main_list = self._p(MAIN_LIST)
+        candidates = [path for path in files if path.name not in managed_names]
+        if main_list.is_file():
+            candidates.append(main_list)
+        union = {repo for source in enabled for repo in source.repos()}
+        for path in candidates:
+            text = read_text_or_none(path) or ""
+            if text.startswith(MARKER):
+                continue
+            repos = declared_repos(path, text)
+            owners = tuple(source.name for source in enabled if repos & source.repos())
+            if not owners:
+                continue
+            if path == main_list or not repos <= union:
+                detail = "it also declares other repositories (or is sources.list): remove the duplicate lines by hand"
+                result.manual.append(Finding(False, f"{self._shown(path)} duplicates {owners[0]}", detail, manual=True))
+                continue
+            found.append(Duplicate(path, owners))
+        return found
+
+    def _inspect_disabled(self, source: Source, result: Inspection) -> None:
+        sources_path = self._p(f"{SOURCES_DIR}/{source.sources_name}")
+        pin_path = self._p(f"{PREFS_DIR}/{source.name}")
+        ours = (read_text_or_none(sources_path) or "").startswith(MARKER)
+        result.facts.append(Finding(not ours, f"{source.name} disabled: {self._shown(sources_path)} absent"))
+        if not ours:
+            return
+        result.changes.append(Change(source.name, "remove", sources_path, backup=True, note="source is disabled"))
+        for key in (source.key_name, source.other_key_name):
+            path = self._p(f"{KEYS_DIR}/{key}")
+            if path.exists():
+                result.changes.append(Change(source.name, "remove", path, backup=True, note="key of a disabled source"))
+        if (read_text_or_none(pin_path) or "").startswith(MARKER):
+            result.changes.append(Change(source.name, "remove", pin_path, backup=True, note="pin of a disabled source"))
+
+    def _inspect_enabled(self, source: Source, duplicates: list[Duplicate], result: Inspection) -> None:
+        self._inspect_text(
+            source,
+            result,
+            self._p(f"{SOURCES_DIR}/{source.sources_name}"),
+            render_sources(source),
+            "declared source",
+        )
+        self._inspect_key(source, result)
+        pin_path = self._p(f"{PREFS_DIR}/{source.name}")
+        if source.pin is not None:
+            self._inspect_text(source, result, pin_path, render_pin(source), "declared pin")
+        elif (read_text_or_none(pin_path) or "").startswith(MARKER):
+            result.facts.append(Finding(False, self._shown(pin_path), "pin no longer declared"))
+            result.changes.append(Change(source.name, "remove", pin_path, backup=True, note="pin no longer declared"))
+        for duplicate in duplicates:
+            if duplicate.owners[0] != source.name:
+                continue
+            result.facts.append(
+                Finding(
+                    False, self._shown(duplicate.path), f"hand-written file of the same repository as {source.name}"
+                )
+            )
+            result.changes.append(
+                Change(
+                    source.name,
+                    "remove",
+                    duplicate.path,
+                    backup=True,
+                    note=f"migrated to {source.sources_name}",
+                    needs=duplicate.owners,
+                )
+            )
+
+    def _inspect_text(self, source: Source, result: Inspection, path: Path, want: str, label: str) -> None:
+        current = read_text_or_none(path)
+        shown = self._shown(path)
+        if current == want:
+            result.facts.append(Finding(True, f"{shown} equals the {label}"))
+            return
+        foreign = current is not None and not current.startswith(MARKER)
+        if foreign:
+            detail = "foreign file with the managed name: replaced (backed up)"
+        else:
+            detail = "differs" if current is not None else "missing"
+        result.facts.append(Finding(False, shown, detail))
+        result.changes.append(
+            Change(source.name, "write" if current is None else "replace", path, want, backup=foreign)
+        )
+
+    def _inspect_key(self, source: Source, result: Inspection) -> None:
+        key_path = self._p(f"{KEYS_DIR}/{source.key_name}")
+        ok, detail = self._key_matches(source, key_path)
+        wanted = ", ".join(sorted(source.fingerprints))
+        result.facts.append(Finding(ok, f"{self._shown(key_path)} key {wanted}", "" if ok else detail))
+        if not ok:
+            result.changes.append(
+                Change(source.name, "write" if not key_path.exists() else "replace", key_path, key=True)
+            )
+        other = self._p(f"{KEYS_DIR}/{source.other_key_name}")
+        if other.exists():
+            result.facts.append(Finding(False, self._shown(other), "stale key of the other key_format"))
+            result.changes.append(
+                Change(source.name, "remove", other, backup=True, note="stale key of the other key_format")
+            )
+
+    def _key_matches(self, source: Source, path: Path) -> tuple[bool, str]:
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return False, "missing"
+        try:
+            found = self._gpg.primaries(data)
+        except KeyRejected as error:
+            return False, str(error)
+        if found != source.fingerprints:
+            return False, mismatch(source.fingerprints, found)
+        if is_armored(data) != (source.key_format == "asc"):
+            return False, f"stored as the wrong format (key_format = {source.key_format})"
+        return True, ", ".join(sorted(found))
+
+    def findings(self) -> list[Finding]:
+        result = self.inspect()
+        return [*result.facts, *result.manual, *result.unmanaged]
+
+    # -- plan ----------------------------------------------------------------------------------------------
+
+    def plan(self) -> list[str]:
+        result = self.inspect()
+        by_source = result.by_source()
+        by_name = {source.name: source for source in self._sources}
+        backup = f"/{BACKUP_DIR}/<UTC timestamp>"
+        lines: list[str] = []
+        for name, changes in by_source.items():
+            source = by_name[name]
+            lines.append(f"{name}{'' if source.enabled else ' (disabled)'}:")
+            for change in sorted(changes, key=apply_order):
+                lines += self._plan_change(source, change, backup)
+        for finding in result.manual:
+            lines.append(f"needs manual: {finding.subject}: {finding.detail}")
+        refresh = self._refresh_names(result, by_source)
+        if refresh:
+            lines.append(f"apt-get update for the changed sources: {', '.join(refresh)}")
+        if result.clean:
+            lines.append("nothing to change")
+        return lines
+
+    def _refresh_names(self, result: Inspection, by_source: Mapping[str, Sequence[Change]]) -> list[str]:
+        enabled = {source.name for source in self._sources if source.enabled}
+        names = [name for name in by_source if name in enabled and any(c.action != "remove" for c in by_source[name])]
+        return sorted({*names, *result.refresh})
+
+    def _plan_change(self, source: Source, change: Change, backup: str) -> list[str]:
+        shown = self._shown(change.path)
+        if change.key:
+            fingerprints = ", ".join(sorted(source.fingerprints))
+            order = ", ".join(label if url is None else f"{label} {url}" for label, url in source.candidates())
+            return [f"  key {shown}: fingerprint {fingerprints} verified before install; candidates in order: {order}"]
+        lines = [f"  back up {shown} to {backup}/{change.path.name}"] if change.backup and change.path.exists() else []
+        if change.action == "remove":
+            note = f" ({change.note})" if change.note else ""
+            if change.shared:
+                note += f", only after {', '.join(change.needs)} converged"
+            return [*lines, f"  remove {shown}{note}"]
+        old = read_text_or_none(change.path)
+        lines.append(f"  {'replace' if change.action == 'replace' else 'write'} {shown}")
+        return lines + unified_diff_lines(shown, old, change.text or "")
+
+    # -- install -------------------------------------------------------------------------------------------
+
+    def _fetch(self, url: str) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="apt-sources-key-") as directory:
+            target = Path(directory) / "key"
+            result = self._process.query(
+                [
+                    "curl", "--fail", "--silent", "--show-error", "--location", "--proto", "=https",
+                    "--proto-redir", "=https", "--max-redirs", "5", "--max-time", "30",
+                    "--max-filesize", str(MAX_KEY_BYTES), "--output", str(target), url,
+                ],
+                timeout=60,
+            )  # fmt: skip
+            if result.returncode == 127:
+                raise ModuleError("curl is required to download keys (apt install curl)")
+            if result.returncode != 0:
+                message = (result.stderr or result.stdout).strip().splitlines()
+                cause = message[-1] if message else f"curl exited {result.returncode}"
+                transient = result.returncode in CURL_TRANSIENT or bool(TRANSIENT_TEXT.search(cause))
+                raise SourceFailure(cause, transient)
+            return target.read_bytes()
+
+    def _verified(self, source: Source, data: bytes) -> bytes:
+        found = self._gpg.primaries(data)
+        if found != source.fingerprints:
+            raise KeyRejected(mismatch(source.fingerprints, found))
+        if source.key_format == "asc":
+            if not is_armored(data):
+                raise KeyRejected('key_format "asc" needs an armored key but got a binary one: use key_format = "gpg"')
+            final = data
+        else:
+            final = self._gpg.dearmor(data) if is_armored(data) else data
+        if self._gpg.primaries(final) != source.fingerprints:
+            raise KeyRejected("fingerprint mismatch after conversion to key_format")
+        return final
+
+    def _acquire_key(self, source: Source) -> tuple[bytes, str]:
+        failures: list[Failure] = []
+        for label, url in source.candidates():
+            try:
+                data = self._fetch(url) if url is not None else (source.key_cached or "").encode()
+                return self._verified(source, data), label
+            except KeyRejected as error:
+                failures.append(Failure(label, str(error), False))
+            except SourceFailure as error:
+                failures.append(Failure(label, str(error), error.transient))
+        raise SourceFailure("; ".join(f"{f.name}: {f.cause}" for f in failures), all(f.transient for f in failures))
+
+    def _backup(self, path: Path) -> None:
+        if not path.exists():
+            return
+        target = self._p(f"{BACKUP_DIR}/{self._stamp}")
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target / path.name)
+
+    def _remove(self, change: Change) -> str:
+        if change.backup:
+            self._backup(change.path)
+        change.path.unlink(missing_ok=True)
+        return f"removed {change.path.name}" + (f" ({change.note})" if change.note else "")
+
+    def _converge(self, source: Source, changes: list[Change]) -> tuple[list[str], bool]:
+        """Apply one source's changes in ``apply_order``; ``wrote`` says whether the index needs a refresh."""
+        done: list[str] = []
+        wrote = False
+        for change in sorted(changes, key=apply_order):
+            if change.key:
+                data, origin = self._acquire_key(source)
+                write_file(change.path, data, 0o644)
+                done.append(f"key from {origin}")
+                wrote = True
+            elif change.action == "remove":
+                done.append(self._remove(change))
+            else:
+                if change.backup:
+                    self._backup(change.path)
+                write_file(change.path, change.text or "", 0o644)
+                done.append(f"wrote {change.path.name}")
+                wrote = True
+        return done, wrote
+
+    def _refresh(self, names: Sequence[str]) -> tuple[list[str], list[Failure]]:
+        refreshed: list[str] = []
+        failed: list[Failure] = []
+        for name in names:
+            result = self._process.query(
+                [
+                    "apt-get", "update",
+                    "-o", f"Dir::Etc::sourcelist=sources.list.d/{name}.sources",
+                    "-o", "Dir::Etc::sourceparts=-",
+                    "-o", "APT::Get::List-Cleanup=0",
+                ],
+                timeout=300,
+            )  # fmt: skip
+            if result.returncode == 0:
+                refreshed.append(name)
+                continue
+            text = (result.stderr or result.stdout).strip()
+            lines = text.splitlines()
+            cause = next(
+                (line for line in lines if line.startswith(("E:", "W:"))),
+                lines[-1] if lines else f"exit {result.returncode}",
+            )
+            failed.append(Failure(name, cause, bool(TRANSIENT_TEXT.search(text))))
+        return refreshed, failed
+
+    def _write_pending(self, names: Sequence[str]) -> None:
+        path = self._p(PENDING_FILE)
+        if names:
+            write_file(path, "".join(f"{name}\n" for name in names), 0o644)
+        else:
+            path.unlink(missing_ok=True)
+
+    def apply(self) -> None:
+        if not self._is_root:
+            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+        result = self.inspect()
+        if result.clean:
+            sys.stdout.write("nothing to change\n")
+            return
+        by_source = result.by_source()
+        failures: list[Failure] = []
+        written: set[str] = set()
+        deferred: list[Change] = []
+        for source in self._sources:
+            changes = by_source.get(source.name, [])
+            shared = [change for change in changes if change.shared]
+            deferred += shared
+            changes = [change for change in changes if not change.shared]
+            if not changes:
+                if not shared:
+                    sys.stdout.write(f"ok      {source.name}: unchanged\n")
+                continue
+            try:
+                done, wrote = self._converge(source, changes)
+            except SourceFailure as error:
+                failures.append(Failure(source.name, str(error), error.transient))
+                sys.stdout.write(f"FAILED  {source.name}: {error}\n")
+                continue
+            if wrote and source.enabled:
+                written.add(source.name)
+            sys.stdout.write(f"ok      {source.name}: {'; '.join(done)}\n")
+        self._remove_shared(deferred, {failure.name for failure in failures})
+        enabled = {source.name for source in self._sources if source.enabled}
+        to_refresh = sorted((written | set(result.refresh)) & enabled)
+        if to_refresh:
+            self._write_pending(to_refresh)  # on disk before the network call: a crash leaves it as drift
+            refreshed, failed = self._refresh(to_refresh)
+            self._write_pending([failure.name for failure in failed])
+            for name in refreshed:
+                sys.stdout.write(f"ok      {name}: apt index refreshed\n")
+            for failure in failed:
+                sys.stdout.write(f"FAILED  {failure.name}: apt-get update: {failure.cause}\n")
+                failures.append(Failure(failure.name, f"apt-get update: {failure.cause}", failure.transient))
+        if failures:
+            summary = f"{len(failures)} failure(s): " + "; ".join(f"{f.name}: {f.cause}" for f in failures)
+            if all(failure.transient for failure in failures):
+                raise TempFail(summary)
+            raise ModuleError(summary)
+        if result.manual:
+            raise NeedsManual("; ".join(f"{item.subject}: {item.detail}" for item in result.manual))
+
+    def _remove_shared(self, deferred: Sequence[Change], failed: set[str]) -> None:
+        """A hand-written file that several sources share goes only once every one of them converged: until then it is
+        still the only declaration of the repository whose key could not be fetched."""
+        for change in deferred:
+            waiting = sorted(failed & set(change.needs))
+            if waiting:
+                sys.stdout.write(f"kept    {change.path.name}: waits for {', '.join(waiting)} to converge\n")
+            else:
+                sys.stdout.write(f"ok      {'+'.join(change.needs)}: {self._remove(change)}\n")
+
+
+def build(env: Mapping[str, str]) -> AptSources:
+    staged = env.get(ROOT_ENV)
+    sources = parse_options(module_config(env))
+    return AptSources(
+        Path(staged) if staged else Path("/"), sources, Process(), is_root=bool(staged) or os.geteuid() == 0
+    )
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"apt-sources: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

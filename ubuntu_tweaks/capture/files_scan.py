@@ -15,7 +15,8 @@ name, credential store directory, or a secret pattern inside), ``cache-state`` (
 log/db/lock/history, cache directories), ``mixed`` (credential-looking key names without a secret
 value, or a large application data directory).
 
-Public API: ``scan_files(home, profile, rules) -> FilesResult``; ``classify_file(name, size, data,
+Public API: ``scan_files(home, profile, rules) -> FilesResult``; ``scan_entry(home, path, rules) -> FilesResult``
+(the same classified walk of one entry, which the coverage ``files`` adapter uses); ``classify_file(name, size, data,
 rules)``; the dataclasses ``AdoptedFile``, ``SkippedFile``, ``Candidate``, ``FilesResult``.
 """
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 import difflib
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -273,20 +275,35 @@ def _list_dir(home: Path, path: Path, depth: int, rules: FileRules, skip: frozen
 
 
 def _list_file(home: Path, path: Path, rules: FileRules, result: FilesResult) -> None:
+    rel = path.relative_to(home).as_posix()
     try:
-        size = path.stat().st_size
+        info = path.stat()
+        size = info.st_size
+        if not stat.S_ISREG(info.st_mode):  # a socket, pipe or device: never opened (a pipe would block)
+            result.candidates.append(Candidate(rel, "file", "cache-state", "socket, pipe or device", size, None))
+            return
         data = (
             path.read_bytes()
             if 0 < size <= rules.max_text_bytes and not rules.secret_names.matches(path.name)
             else None
         )
     except OSError:
-        result.candidates.append(
-            Candidate(path.relative_to(home).as_posix(), "file", "cache-state", "unreadable", None, None)
-        )
+        result.candidates.append(Candidate(rel, "file", "cache-state", "unreadable", None, None))
         return
     cls, reason = classify_file(path.name, size, data, rules)
-    result.candidates.append(Candidate(path.relative_to(home).as_posix(), "file", cls, reason, size, None))
+    result.candidates.append(Candidate(rel, "file", cls, reason, size, None))
+
+
+def scan_entry(home: Path, path: Path, rules: FileRules) -> FilesResult:
+    """The classified candidates of ONE entry (a file, or a directory walked like ``scan_files`` walks it): what the
+    coverage ``files`` adapter asks about a top-level item. A secret-named file is never opened, a non-regular file
+    is never opened, and nothing is written."""
+    result = FilesResult()
+    if path.is_dir():
+        _list_dir(home, path, 1, rules, frozenset(), result)
+    else:
+        _list_file(home, path, rules, result)
+    return result
 
 
 def scan_files(home: Path, profile: Profile, rules: Rules) -> FilesResult:

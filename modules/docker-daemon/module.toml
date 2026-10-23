@@ -1,0 +1,18 @@
+description = "docker daemon.json merged from the profile's options, plus a memory-capped systemd slice for all containers (root)"
+# Off until a machine says it has docker and what it wants: a machine without docker would only get `needs manual`.
+enabled = false
+# After the packages phase (docker.io / docker-ce come from packages.toml); no `requires = ["apt-sources"]`: a broken
+# unrelated repository must not block the memory cap, and the module reads the live state (the nvidia runtime binary).
+order = 55
+manual = "install docker (docker.io in packages.toml, or docker-ce through the apt-sources docker repository), and nvidia-container-toolkit when nvidia_runtime = true, and fix /etc/docker/daemon.json by hand if it is not a JSON object, then run apply again"
+
+[source]
+kind = "system"
+install = "docker-daemon install"
+check = "docker-daemon check"
+preview = "docker-daemon plan"
+
+# The slice's name is the `slice` option: a profile declares etc:/etc/systemd/system/<slice>.slice in its coverage.toml.
+[[coverage]]
+match = ["etc:/etc/docker/daemon.json"]
+class = "tracked"

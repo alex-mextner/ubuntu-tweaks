@@ -248,10 +248,25 @@ class DuplicateTests(CheckCase):
         self.assertEqual(self.problems(), [])
 
     def test_the_profile_restating_an_engine_rule_of_the_same_class_is_redundant(self) -> None:
-        self.profile_rules('[[coverage]]\nmatch = ["file:~/.cache"]\nclass = "excluded"\nreason = "my own words"\n')
+        self.profile_rules(
+            '[[coverage]]\nmatch = ["file:~/.cache"]\nclass = "excluded"\n'
+            'reason = "cache: rebuilt by the tool that owns it"\n'
+        )
         (problem,) = self.problems()
         self.assertIn("redundant", problem)
         self.assertIn("engine", problem)
+
+    def test_the_same_class_with_the_real_reason_is_an_override_not_a_repeat(self) -> None:
+        self.profile_rules(
+            '[[coverage]]\nmatch = ["file:~/.ssh"]\nclass = "secret"\n'
+            'reason = "SSH keys; restore: from the keychain, then ssh-add"\n'
+        )
+        self.assertEqual(self.problems(), [])
+
+    def test_a_ticketed_rule_with_its_own_ticket_overrides_a_lower_one(self) -> None:
+        self.module("m", UNTRACKED.format(ticket="octo/mod#3"))
+        self.profile_rules(UNTRACKED.format(ticket="#42"))
+        self.assertEqual(self.problems(), [])
 
 
 class OnlineTests(CheckCase):
