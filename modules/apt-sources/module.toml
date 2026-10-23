@@ -1,0 +1,20 @@
+description = "extra apt repositories from the profile: deb822 files, fingerprint-pinned keys, optional pins (root)"
+# Off until a profile declares [modules.apt-sources.sources.<name>] tables and enables it: without sources it would have nothing to do.
+enabled = false
+# Repositories must exist before the apt batch of the packages phase (order 100 by default) installs from them.
+phase = "packages"
+order = 5
+manual = "a file named above needs your hand: remove the duplicate lines of a hand-written file that also holds other repositories, or declare the dropped source again (enabled = false removes it), then run apply again"
+
+[source]
+kind = "system"
+install = "apt-sources install"
+check = "apt-sources check"
+preview = "apt-sources plan"
+
+# The names of the managed .sources files come from the profile, which declares each of them in its own coverage.toml
+# (a blanket glob here would also bless a hand-written source nobody declared). The keyring directory is not scanned
+# and holds only keys: the ones this module writes and the ones apt packages ship.
+[[coverage]]
+match = ["etc:/etc/apt/keyrings/*"]
+class = "tracked"

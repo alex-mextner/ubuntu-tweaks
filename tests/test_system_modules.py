@@ -8,7 +8,7 @@ from unittest import mock
 
 from tests.util import TempDirCase, write
 from ubuntu_tweaks import process
-from ubuntu_tweaks.actions import ActionFailed, Phase, Plan
+from ubuntu_tweaks.actions import ActionFailed, Phase, Plan, RetryPolicy
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.planners import system_modules
 from ubuntu_tweaks.profile import Profile
@@ -276,6 +276,19 @@ class SystemModulePlannerTests(TempDirCase):
         self.assertEqual(action.scope, "browser-tool")
         self.assertIn("browser-tool: the installer needs a manual step (exit 10", message)
         self.assertFalse(action.check())
+
+    def test_installer_exit_75_is_transient_and_retried(self) -> None:
+        self.module("browser-tool")
+        runner = Recorder(check_exit=3, install_exit=75)
+        plan = Plan.build(self.candidates(runner))
+        slept: list[float] = []
+
+        result = plan.execute(policy=RetryPolicy(attempts=3, sleep=slept.append, jitter=lambda low, high: high))
+
+        (failure,) = result.failed
+        self.assertEqual((failure.attempts, failure.transient), (3, True))
+        self.assertEqual(len(slept), 2)
+        self.assertEqual(sum(1 for call in runner.calls if not call[3]), 3)
 
     def test_preview_command_output_is_shown_under_the_action_and_never_fails_the_plan(self) -> None:
         write(
