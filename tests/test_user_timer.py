@@ -15,22 +15,30 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 class Systemd(FakeProcess):
-    """``systemctl --user`` double: ``enable`` makes ``is-enabled`` answer ``enabled``."""
+    """``systemctl --user`` double.
+
+    ``enable`` makes ``is-enabled`` answer ``enabled``; ``start`` and ``restart`` make ``is-active`` answer ``active``.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.enabled: set[str] = set()
+        self.active: set[str] = set()
 
     def query(self, argv: Sequence[str], **kwargs: object) -> CommandResult:  # type: ignore[override]
         self.queries.append(tuple(argv))
         if tuple(argv[:3]) == ("systemctl", "--user", "is-enabled"):
             return CommandResult(0, "enabled\n", "") if argv[3] in self.enabled else CommandResult(1, "disabled\n", "")
+        if tuple(argv[:3]) == ("systemctl", "--user", "is-active"):
+            return CommandResult(0, "active\n", "") if argv[3] in self.active else CommandResult(3, "inactive\n", "")
         return CommandResult(127, "", "")
 
     def execute(self, argv: Sequence[str], **kwargs: object) -> None:  # type: ignore[override]
         self.executed.append((tuple(argv), None))
         if tuple(argv[:3]) == ("systemctl", "--user", "enable"):
             self.enabled.update(argv[3:])
+        if tuple(argv[:3]) in (("systemctl", "--user", "start"), ("systemctl", "--user", "restart")):
+            self.active.update(argv[3:])
 
 
 class UserTimerTests(TempDirCase):
@@ -59,6 +67,25 @@ class UserTimerTests(TempDirCase):
         self.assertIn(
             (("systemctl", "--user", "enable", "autoheal.service", "autoheal.timer"), None), self.process.executed
         )
+
+    def test_the_timer_is_restarted_but_the_service_is_not_started(self) -> None:
+        action = self.action()
+        action.run()
+        argvs = [call[0] for call in self.process.executed]
+        # starting the service would run `apply --commit` inside the apply that is installing it
+        self.assertIn(("systemctl", "--user", "restart", "autoheal.timer"), argvs)
+        self.assertNotIn(("systemctl", "--user", "start", "autoheal.service"), argvs)
+        self.assertNotIn(("systemctl", "--user", "restart", "autoheal.service"), argvs)
+
+    def test_a_timer_that_is_enabled_but_not_running_is_drift_and_run_starts_it(self) -> None:
+        action = self.action()
+        action.run()
+        self.process.active.clear()  # enabled at boot, never started in this session
+        self.assertFalse(action.check())
+        self.process.executed.clear()
+        action.run()
+        self.assertIn((("systemctl", "--user", "restart", "autoheal.timer"), None), self.process.executed)
+        self.assertTrue(action.check())
 
     def test_a_changed_unit_file_is_drift(self) -> None:
         action = self.action()

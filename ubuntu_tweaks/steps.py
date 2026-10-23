@@ -494,12 +494,14 @@ def _brew_install(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> l
 
 
 UNIT_ENABLED = "enabled"
+UNIT_ACTIVE = "active"
 
 
 class UserTimerAction(Action):
     """A user systemd service plus timer that runs a command at login and on a calendar (the ``autoheal`` module):
-    unattended, user level, never root. The check compares the unit files byte for byte and asks
-    ``systemctl --user is-enabled`` for both units."""
+    unattended, user level, never root. The check compares the unit files byte for byte, asks
+    ``systemctl --user is-enabled`` for both units and ``is-active`` for the timer (enabled only means "from the
+    next login on"; the daily run needs the timer running now)."""
 
     phase = Phase.BASE
     kind = "user-timer"
@@ -535,23 +537,35 @@ class UserTimerAction(Action):
         except OSError:
             return False
 
-    def _enabled(self, unit: str) -> bool:
-        result = self._env.process.query(["systemctl", "--user", "is-enabled", unit])
-        return result.ok and result.stdout.strip() == UNIT_ENABLED
+    @property
+    def _service_unit(self) -> str:
+        return f"{self._name}.service"
+
+    @property
+    def _timer_unit(self) -> str:
+        return f"{self._name}.timer"
+
+    def _unit_is(self, verb: str, unit: str, expected: str) -> bool:
+        result = self._env.process.query(["systemctl", "--user", verb, unit])
+        return result.ok and result.stdout.strip() == expected
 
     def check(self) -> bool:
-        return self._files_match() and self._enabled(f"{self._name}.service") and self._enabled(f"{self._name}.timer")
+        return (
+            self._files_match()
+            and self._unit_is("is-enabled", self._service_unit, UNIT_ENABLED)
+            and self._unit_is("is-enabled", self._timer_unit, UNIT_ENABLED)
+            and self._unit_is("is-active", self._timer_unit, UNIT_ACTIVE)
+        )
 
     def run(self) -> None:
         directory = self._unit_dir()
-        atomic_write(directory / f"{self._name}.service", self._service.encode("utf-8"))
-        atomic_write(directory / f"{self._name}.timer", self._timer.encode("utf-8"))
+        atomic_write(directory / self._service_unit, self._service.encode("utf-8"))
+        atomic_write(directory / self._timer_unit, self._timer.encode("utf-8"))
         _execute(self._env, ["systemctl", "--user", "daemon-reload"], "user-timer")
-        _execute(
-            self._env,
-            ["systemctl", "--user", "enable", f"{self._name}.service", f"{self._name}.timer"],
-            "user-timer",
-        )
+        _execute(self._env, ["systemctl", "--user", "enable", self._service_unit, self._timer_unit], "user-timer")
+        # the timer only: the service runs `apply --commit`, which must not start inside the apply installing it.
+        # restart, not start: a timer that already runs keeps its old calendar until it is restarted.
+        _execute(self._env, ["systemctl", "--user", "restart", self._timer_unit], "user-timer")
 
 
 def _user_timer(env: StepEnv, module: str, args: Mapping[str, TomlValue]) -> list[Action]:
