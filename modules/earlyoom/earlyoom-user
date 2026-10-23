@@ -1,0 +1,38 @@
+#!/usr/bin/python3 -B
+"""earlyoom-user: the rootless copy of earlyoom, the failover of the `earlyoom` module when root is unavailable.
+
+    earlyoom-user check|status|plan|install     as the desktop user, never root
+
+`apt-get download earlyoom` needs no root; the binary is extracted under ~/.local/opt/earlyoom and runs as the
+`earlyoom.service` USER unit with the same rendered options (plus --ignore-root-user: a user-level earlyoom cannot
+signal root's processes, so it must not pick one). It acts only on this user's processes, which is what a desktop
+needs; it does not raise its own priority. The unit does not start once /usr/bin/earlyoom exists, and the install
+refuses while that package is present (the root install is the one to repair then).
+Spec: docs/specs/earlyoom.md, *Failover*.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from earlyoom_lib import UserEarlyoom, options_from, run  # noqa: E402
+
+from ubuntu_tweaks.module_script import Module, ModuleError, invoking_account  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+
+def build(env: Mapping[str, str]) -> Module:
+    if os.geteuid() == 0:
+        raise ModuleError("earlyoom-user is the rootless copy: run it as the desktop user, not as root")
+    return UserEarlyoom(Process(), invoking_account(env).home, options_from(env))
+
+
+if __name__ == "__main__":
+    sys.exit(run("earlyoom-user", build, sys.argv[1:]))
