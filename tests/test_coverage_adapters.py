@@ -19,7 +19,7 @@ from ubuntu_tweaks.adapters import discover_adapters
 from ubuntu_tweaks.adapters import dconf, etc, extensions, files, packages, units
 from ubuntu_tweaks.adapters._system import System, system, use
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.coverage import Item
+from ubuntu_tweaks.coverage import ITEM_PREFIXES, Coverage, Finding, Item, Rules
 from ubuntu_tweaks.process import CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import FakeBackend, FakeKey, FakeSchema, SettingsError, UserKey
@@ -241,6 +241,354 @@ class FilesTests(AdapterCase):
         self.assertTrue(proposal.text.startswith("[capture]\ninclude_files = [\n"))
 
 
+JWT = "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghijk"
+TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0" + "k1L2m3N4o5P6"
+
+
+class FilesClassifyTests(AdapterCase):
+    """The files adapter asks capture's file classifier what an entry holds (never reading a secret's value)."""
+
+    def verdict(self, rel: str) -> Finding | None:
+        self.machine()
+        (item,) = [i for i in files.discover(self.ctx) if i.id == f"file:~/{rel}"]
+        return files.classify(self.ctx, item, Rules())
+
+    def test_a_directory_of_credential_named_files_is_secret_by_name(self) -> None:
+        write(self.home / ".config/foo/credentials.json", TOKEN)
+        write(self.home / ".config/foo/api_token", "x")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual((finding.coverage, finding.reason), (Coverage.SECRET, "credential store by name"))
+
+    def test_a_secret_named_file_is_never_opened(self) -> None:
+        path = write(self.home / ".config/foo/credentials", TOKEN)
+        path.chmod(0o000)
+        self.addCleanup(path.chmod, 0o600)
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.SECRET)
+
+    def test_a_secret_pattern_inside_a_plainly_named_file_is_secret_and_the_match_is_never_shown(self) -> None:
+        write(self.home / ".config/foo/session.conf", f"jwt = {JWT}\n")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual((finding.coverage, finding.reason), (Coverage.SECRET, "content matches: jwt"))
+        self.assertNotIn("eyJ", repr(finding))
+
+    def test_a_github_token_in_a_file_is_secret_without_the_token_in_the_finding(self) -> None:
+        write(self.home / ".config/foo/notes", f"{TOKEN}\n")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.SECRET)
+        self.assertNotIn("ghp_", repr(finding))
+
+    def test_only_caches_state_logs_and_bytecode_is_excluded_as_cache_state(self) -> None:
+        write(self.home / ".config/foo/app.log", "x")
+        write(self.home / ".config/foo/state.sqlite", "x")
+        write(self.home / ".config/foo/mod.pyc", "x")
+        write(self.home / ".config/foo/lock", "")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.EXCLUDED)
+        self.assertTrue(finding.reason.startswith("cache-state: "), finding.reason)
+
+    def test_a_named_pipe_is_state_and_is_never_opened(self) -> None:
+        (self.home / ".config/foo").mkdir(parents=True)
+        os.mkfifo(self.home / ".config/foo/ipc")  # opening it for reading would block the test forever
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.EXCLUDED)
+
+    def test_an_empty_directory_is_excluded(self) -> None:
+        (self.home / ".config/foo").mkdir(parents=True)
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual((finding.coverage, finding.reason), (Coverage.EXCLUDED, "empty directory: nothing to track"))
+
+    def test_portable_config_only_stays_untracked_and_says_capture_can_adopt_it(self) -> None:
+        write(self.home / ".config/foo/app.conf", "theme = dark\n")
+        write(self.home / ".config/foo/keys.toml", "a = 1\n")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.UNTRACKED)
+        self.assertEqual(finding.item.detail, "directory, 2 entries; portable config: capture can adopt")
+
+    def test_a_portable_file_at_the_top_level_is_portable_config(self) -> None:
+        write(self.home / ".config/mimeapps.list", "[Default Applications]\n")
+        finding = self.verdict(".config/mimeapps.list")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.UNTRACKED)
+        self.assertTrue(finding.item.detail.endswith("portable config: capture can adopt"), finding.item.detail)
+
+    def test_portable_config_next_to_a_secret_is_mixed_and_needs_a_rule(self) -> None:
+        write(self.home / ".config/foo/app.conf", "theme = dark\n")
+        write(self.home / ".config/foo/credentials", "x")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.UNTRACKED)
+        self.assertEqual(finding.item.detail, "directory, 2 entries; mixed: needs a rule")
+
+    def test_portable_config_next_to_state_is_mixed_and_needs_a_rule(self) -> None:
+        write(self.home / ".config/foo/app.conf", "theme = dark\n")
+        write(self.home / ".config/foo/app.log", "x")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertTrue(finding.item.detail.endswith("mixed: needs a rule"), finding.item.detail)
+
+    def test_a_large_application_data_directory_is_mixed(self) -> None:
+        for number in range(70):
+            write(self.home / f".local/share/bigapp/f{number}.conf", "x")
+        finding = self.verdict(".local/share/bigapp")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.UNTRACKED)
+        self.assertTrue(finding.item.detail.endswith("mixed: needs a rule"), finding.item.detail)
+
+    def test_a_file_the_classifier_cannot_read_is_mixed_not_hidden_as_cache(self) -> None:
+        path = write(self.home / ".config/foo/app.conf", "theme = dark\n")
+        path.chmod(0o000)
+        self.addCleanup(path.chmod, 0o600)
+        if os.access(path, os.R_OK):
+            self.skipTest("this user reads files regardless of their mode")
+        finding = self.verdict(".config/foo")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.UNTRACKED)
+        self.assertTrue(finding.item.detail.endswith("mixed: needs a rule"), finding.item.detail)
+
+    def test_a_link_into_a_package_manager_tree_is_excluded_naming_the_installer(self) -> None:
+        (self.home / ".local/bin").mkdir(parents=True)
+        for name, target, installer in (
+            ("httpie", self.home / ".local/share/uv/tools/httpie/bin/http", "uv"),
+            ("tsc", self.home / ".local/lib/node_modules/typescript/bin/tsc", "npm"),
+            ("tool", self.home / ".local/opt/tool/bin/tool", "a manual install under ~/.local/opt"),
+            ("app", self.home / "Applications/App.AppImage", "an AppImage installer"),
+        ):
+            os.symlink(target, self.home / ".local/bin" / name)
+            finding = self.verdict(f".local/bin/{name}")
+            assert finding is not None
+            self.assertEqual(finding.coverage, Coverage.EXCLUDED, name)
+            self.assertEqual(finding.reason, f"link created by {installer}; the package is declared elsewhere", name)
+
+    def test_a_relative_link_into_a_package_manager_tree_is_recognised(self) -> None:
+        (self.home / ".local/bin").mkdir(parents=True)
+        os.symlink("../share/uv/tools/ruff/bin/ruff", self.home / ".local/bin/ruff")
+        finding = self.verdict(".local/bin/ruff")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.EXCLUDED)
+
+    def test_a_link_elsewhere_gives_no_opinion(self) -> None:
+        os.symlink("/usr/bin/env", self.home / ".elsewhere")
+        self.assertIsNone(self.verdict(".elsewhere"))
+
+    def test_a_link_that_only_looks_like_a_tree_name_is_not_excluded(self) -> None:
+        os.symlink(self.home / ".local/share/uv/tools-backup/x", self.home / ".lookalike")
+        self.assertIsNone(self.verdict(".lookalike"))
+
+    def test_classifying_changes_nothing_on_disk(self) -> None:
+        write(self.home / ".config/foo/app.conf", "theme = dark\n")
+        write(self.home / ".config/foo/credentials", "x")
+        before = sorted(str(p) for p in self.tmp.rglob("*"))
+        self.verdict(".config/foo")
+        self.assertEqual(sorted(str(p) for p in self.tmp.rglob("*")), before)
+        self.assertEqual(self.process.executed, [])
+
+
+class DconfClassifyTests(AdapterCase):
+    """The dconf adapter classifies a key the way ``capture`` would treat it."""
+
+    PTYXIS = FakeSchema(
+        "org.gnome.Ptyxis",
+        {"window-size": FakeKey("(ii)", "(0, 0)"), "default-profile-uuid": FakeKey("s", "''")},
+        path="/org/gnome/Ptyxis/",
+    )
+    POWER = FakeSchema(
+        "org.gnome.settings-daemon.plugins.power",
+        {"sleep-inactive-ac-timeout": FakeKey("i", "1200")},
+        path="/org/gnome/settings-daemon/plugins/power/",
+    )
+    APP = FakeSchema(
+        "org.example.App",
+        {"email": FakeKey("s", "''"), "blob": FakeKey("s", "''")},
+        path="/org/example/app/",
+    )
+    BLUETOOTH = FakeSchema("org.gnome.bluetooth", {"powered": FakeKey("b", "false")}, path="/org/gnome/bluetooth/")
+    EXTENSION = FakeSchema(
+        "org.gnome.shell.extensions.foo", {"opt": FakeKey("b", "false")}, path="/org/gnome/shell/extensions/foo/"
+    )
+    NIGHT = FakeSchema(
+        "org.gnome.settings-daemon.plugins.color",
+        {"night-light-last-coordinates": FakeKey("(dd)", "(91.0, 181.0)")},
+        path="/org/gnome/settings-daemon/plugins/color/",
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.backend = FakeBackend(
+            [INTERFACE, PASSWORDS, self.PTYXIS, self.POWER, self.APP, self.BLUETOOTH, self.EXTENSION, self.NIGHT]
+        )
+        for schema, key, value in (
+            (INTERFACE, "gtk-theme", "'Yaru'"),
+            (PASSWORDS, "master-password", "'hunter2'"),
+            (self.PTYXIS, "window-size", "(100, 200)"),
+            (self.PTYXIS, "default-profile-uuid", "'abc'"),
+            (self.POWER, "sleep-inactive-ac-timeout", "3600"),
+            (self.APP, "email", "'me@example.com'"),
+            (self.APP, "blob", f"'{TOKEN}'"),
+            (self.BLUETOOTH, "powered", "true"),
+            (self.EXTENSION, "opt", "true"),
+            (self.NIGHT, "night-light-last-coordinates", "(10.5, 20.25)"),
+        ):
+            self.backend.set_user(schema.id, None, key, value)
+
+    def verdict(self, full: str) -> Finding | None:
+        self.machine(backend=self.backend)
+        (item,) = [i for i in dconf.discover(self.ctx) if i.id == f"dconf:{full}"]
+        return dconf.classify(self.ctx, item, Rules())
+
+    def test_a_key_capture_would_capture_stays_untracked(self) -> None:
+        self.assertIsNone(self.verdict("/org/gnome/desktop/interface/gtk-theme"))
+
+    def test_a_machine_bound_key_stays_untracked_because_capture_puts_it_in_the_overlay(self) -> None:
+        self.assertIsNone(self.verdict("/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout"))
+
+    def test_a_state_key_is_excluded_with_capture_reason(self) -> None:
+        finding = self.verdict("/org/gnome/Ptyxis/window-size")
+        assert finding is not None
+        self.assertEqual((finding.coverage, finding.reason), (Coverage.EXCLUDED, "window geometry and UI position"))
+
+    def test_night_light_coordinates_are_excluded_as_state(self) -> None:
+        finding = self.verdict("/org/gnome/settings-daemon/plugins/color/night-light-last-coordinates")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.EXCLUDED)
+        self.assertNotIn("10.5", repr(finding))
+
+    def test_an_auto_key_is_excluded_with_capture_reason(self) -> None:
+        finding = self.verdict("/org/gnome/Ptyxis/default-profile-uuid")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.EXCLUDED)
+        self.assertIn("uuids Ptyxis generates", finding.reason)
+
+    def test_a_panel_skip_rule_of_class_excluded_by_rule_is_excluded(self) -> None:
+        finding = self.verdict("/org/gnome/shell/extensions/foo/opt")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.EXCLUDED)
+        self.assertIn("belong to modules", finding.reason)
+
+    def test_a_profile_capture_exclude_is_excluded(self) -> None:
+        write(self.profile_root / "profile.toml", '[capture]\nexclude = ["/org/gnome/desktop/interface/**"]\n')
+        finding = self.verdict("/org/gnome/desktop/interface/gtk-theme")
+        assert finding is not None
+        self.assertEqual((finding.coverage, finding.reason), (Coverage.EXCLUDED, "profile [capture] exclude"))
+
+    def test_a_profile_include_lifts_a_state_key_back_to_untracked(self) -> None:
+        write(self.profile_root / "profile.toml", '[capture]\ninclude = ["/org/gnome/Ptyxis/window-size"]\n')
+        self.assertIsNone(self.verdict("/org/gnome/Ptyxis/window-size"))
+
+    def test_a_credential_named_key_is_secret_and_its_value_is_never_in_the_finding(self) -> None:
+        finding = self.verdict("/org/example/vault/master-password")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.SECRET)
+        self.assertNotIn("hunter2", repr(finding))
+
+    def test_an_identity_key_is_secret(self) -> None:
+        finding = self.verdict("/org/example/app/email")
+        assert finding is not None
+        self.assertEqual((finding.coverage, finding.reason), (Coverage.SECRET, "key name says personal identity"))
+        self.assertNotIn("example.com", repr(finding))
+
+    def test_a_hardware_key_is_secret(self) -> None:
+        finding = self.verdict("/org/gnome/bluetooth/powered")
+        assert finding is not None
+        self.assertEqual(
+            (finding.coverage, finding.reason), (Coverage.SECRET, "Bluetooth pairings are machine hardware")
+        )
+
+    def test_a_value_that_looks_like_a_credential_is_secret_and_masked(self) -> None:
+        finding = self.verdict("/org/example/app/blob")
+        assert finding is not None
+        self.assertEqual(finding.coverage, Coverage.SECRET)
+        self.assertIn("value matches: api-token", finding.reason)
+        self.assertNotIn("ghp_", repr(finding))
+
+    def test_a_key_no_installed_schema_describes_is_excluded_as_capture_skips_it(self) -> None:
+        class WithOrphan(FakeBackend):
+            def list_user_keys(self) -> tuple[UserKey, ...]:
+                return (*super().list_user_keys(), UserKey("/apps/orphan/", "level"))
+
+        self.backend = WithOrphan([INTERFACE])
+        finding = self.verdict("/apps/orphan/level")
+        assert finding is not None
+        self.assertEqual(
+            (finding.coverage, finding.reason), (Coverage.EXCLUDED, "no installed schema describes this key")
+        )
+
+    def test_an_unreadable_database_gives_no_opinion(self) -> None:
+        self.machine(backend=self.backend)
+        self.assertIsNone(dconf.classify(self.ctx, Item("dconf", "dconf:/", "database", "cannot read"), Rules()))
+
+
+class ClassifyRobustnessTests(AdapterCase):
+    def test_an_invalid_capture_table_gives_no_opinion_instead_of_aborting_the_scan(self) -> None:
+        write(self.profile_root / "profile.toml", '[capture]\nexclude = "x"\n')
+        backend = FakeBackend([INTERFACE])
+        backend.set_user(INTERFACE.id, None, "gtk-theme", "'Yaru'")
+        self.machine(backend=backend)
+        (item,) = dconf.discover(self.ctx)
+        self.assertIsNone(dconf.classify(self.ctx, item, Rules()))
+
+    def test_an_invalid_capture_table_gives_the_files_adapter_no_opinion_either(self) -> None:
+        write(self.profile_root / "profile.toml", '[capture]\nexclude = "x"\n')
+        write(self.home / ".config/foo/app.conf", "x")
+        self.machine()
+        (item,) = files.discover(self.ctx)
+        self.assertIsNone(files.classify(self.ctx, item, Rules()))
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list every directory")
+    def test_a_directory_this_user_cannot_list_stays_a_finding_not_an_empty_directory(self) -> None:
+        (self.home / ".config/locked").mkdir(parents=True)
+        (self.home / ".config/locked").chmod(0o000)
+        self.addCleanup((self.home / ".config/locked").chmod, 0o700)
+        self.machine()
+        (item,) = [i for i in files.discover(self.ctx) if i.id.endswith("locked")]
+        self.assertIsNone(files.classify(self.ctx, item, Rules()))
+
+
+class ScanOpinionTests(AdapterCase):
+    """``adapters.scan``: an adapter's opinion applies only to what no rule and no declaration claims."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        write(self.home / ".config/foo/app.conf", "x")
+        write(self.home / ".cache/x", "x")
+        write(self.home / ".config/bar/credentials", "x")
+
+    def scan(self) -> dict[str, Finding]:
+        from ubuntu_tweaks.adapters import scan
+        from ubuntu_tweaks.coverage_rules import load_rules
+
+        self.machine(backend=FakeBackend([INTERFACE]))
+        return {f.item.id: f for f in scan(self.ctx, load_rules(self.ctx)) if f.item.adapter == "files"}
+
+    def test_an_unclaimed_item_gets_the_adapter_opinion(self) -> None:
+        found = self.scan()
+        self.assertEqual(found["file:~/.config/bar"].coverage, Coverage.SECRET)
+        self.assertIn("portable config", found["file:~/.config/foo"].item.detail)
+
+    def test_an_engine_rule_wins_over_the_opinion(self) -> None:
+        self.assertEqual(self.scan()["file:~/.cache"].reason, "cache: rebuilt by the tool that owns it")
+
+    def test_a_profile_rule_wins_over_the_opinion(self) -> None:
+        write(
+            self.profile_root / "coverage.toml",
+            '[[coverage]]\nmatch = ["file:~/.config/bar"]\nclass = "untracked"\nreason = "later"\nticket = "#9"\n',
+        )
+        finding = self.scan()["file:~/.config/bar"]
+        self.assertEqual((finding.coverage, finding.ticket), (Coverage.UNTRACKED, "#9"))
+
+    def test_a_declaration_wins_over_the_opinion(self) -> None:
+        write(self.profile_root / "files/.config/bar/settings.conf", "x")
+        self.assertEqual(self.scan()["file:~/.config/bar"].coverage, Coverage.TRACKED)
+
+
 class PackagesTests(AdapterCase):
     RESPONSES = {
         ("apt-mark", "showmanual"): ok("curl\ngit\n"),
@@ -451,7 +799,7 @@ class EtcTests(AdapterCase):
         locked.chmod(0o000)
         self.addCleanup(locked.chmod, 0o700)
         found = {item.id: item.detail for item in etc.discover(self.ctx)}
-        self.assertEqual(found["etc:/etc/sudoers.d"], "needs root to read")
+        self.assertEqual(found["etc:/etc/sudoers.d"], "needs root to read: sudo ls -l /etc/sudoers.d")
         self.assertNotIn("etc:/etc/sudoers.d/90-secret", found)
 
     def test_an_unreadable_conffile_is_counted_in_one_item(self) -> None:
@@ -463,7 +811,10 @@ class EtcTests(AdapterCase):
         if os.access(unreadable, os.R_OK):
             self.skipTest("this user reads files regardless of their mode")
         found = {item.id: item.detail for item in etc.discover(self.ctx)}
-        self.assertEqual(found["etc:/etc/<conffiles>"], "1 conffile(s): needs root to read")
+        self.assertEqual(
+            found["etc:/etc/<conffiles>"],
+            "1 conffile(s): needs root to read: sudo dpkg --verify",
+        )
 
     def test_without_dpkg_every_local_entry_is_listed_and_nothing_fails(self) -> None:
         self.lay_out()
@@ -501,6 +852,23 @@ class EveryDiscoverIsReadOnlyTests(AdapterCase):
         self.assertIsNotNone(self.backend_in_use)
         if self.backend_in_use is not None:
             self.assertEqual(self.backend_in_use.writes, [])
+
+
+class SchemeTests(AdapterCase):
+    def test_every_item_id_an_adapter_produces_starts_with_a_known_scheme_prefix(self) -> None:
+        write(self.home / ".config/foo/app.conf", "x")
+        write(self.home / ".config/systemd/user/foo.service", "x")
+        write(self.rootfs / "etc/default/custom", "x")
+        backend = FakeBackend([INTERFACE, SHELL])
+        backend.set_user(INTERFACE.id, None, "gtk-theme", "'Yaru'")
+        backend.set_user(SHELL.id, None, "enabled-extensions", "['a@x']")
+        self.machine(PackagesTests.RESPONSES, backend)
+        seen: set[str] = set()
+        for module in discover_adapters():
+            for item in module.discover(self.ctx):
+                seen.add(item.id.split(":", 1)[0])
+                self.assertTrue(item.id.startswith(ITEM_PREFIXES), item.id)
+        self.assertGreaterEqual(seen, {"dconf", "file", "etc", "apt", "snap", "unit", "extension"})
 
 
 class ItemTests(unittest.TestCase):

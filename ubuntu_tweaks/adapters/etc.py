@@ -12,7 +12,9 @@ Assumptions:
   it is skipped (a modified one is listed as a conffile); so is a systemd unit that only symlinks into the
   distribution's unit directories.
 - A directory the user cannot list (``/etc/sudoers.d`` is root-only on Ubuntu) yields one item for the directory whose
-  ``detail`` is ``needs root to read``: the area is reported, not silently skipped. A missing directory or tool yields
+  ``detail`` is ``needs root to read: sudo ls -l <dir>`` (the command that would read it; for conffiles this user
+  cannot hash the note names ``sudo dpkg --verify``): the area is reported, not silently skipped. A missing directory
+  or tool yields
   nothing. Everything is read through ``Process.query`` (``dpkg-query``) and the filesystem under
   ``System.root``; nothing is written.
 - ``owned``: ``/etc/default/locale`` and ``/etc/default/keyboard`` when the profile's ``system.toml`` sets a locale or
@@ -36,6 +38,7 @@ from ubuntu_tweaks.coverage import Item
 NAME = "etc"
 _MD5 = re.compile(r"[0-9a-f]{32}")
 _UNREADABLE = "needs root to read"
+_CONFFILES_COMMAND = "sudo dpkg --verify"
 _DISTRIBUTION_UNITS = ("/usr/lib/systemd", "/lib/systemd")
 
 type Areas = tuple[tuple[str, tuple[str, ...]], ...]
@@ -85,7 +88,9 @@ def _modified_conffiles(sums: Mapping[str, str]) -> list[Item]:
         elif actual != expected:
             items.append(Item(NAME, f"etc:{path}", "conffile", "conffile modified: differs from the package"))
     if unreadable:
-        items.append(Item(NAME, "etc:/etc/<conffiles>", "dir", f"{unreadable} conffile(s): {_UNREADABLE}"))
+        items.append(
+            Item(NAME, "etc:/etc/<conffiles>", "dir", f"{unreadable} conffile(s): {_UNREADABLE}: {_CONFFILES_COMMAND}")
+        )
     return items
 
 
@@ -100,7 +105,7 @@ def _listed(directory: str, suffixes: tuple[str, ...], conffiles: Collection[str
     except FileNotFoundError:
         return
     except OSError:
-        yield Item(NAME, f"etc:{directory}", "dir", _UNREADABLE)
+        yield Item(NAME, f"etc:{directory}", "dir", f"{_UNREADABLE}: sudo ls -l {directory}")
         return
     for name in names:
         path = location / name

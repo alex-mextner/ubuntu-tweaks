@@ -14,7 +14,18 @@ Assumptions:
 - ``capture`` proposes a ``[capture] include_files`` list for the profile: the entries as ``$HOME``-relative globs
   (``<dir>/**`` for a directory); what ``capture --commit`` finds secret-bearing it refuses by itself.
 
-Public API: ``NAME``, ``discover(ctx)``, ``owned(ctx)``, ``capture(ctx, items)``, ``item_id(rel)`` (the id of a
+- ``classify`` (``discover`` itself still opens nothing): asks capture's file classifier what an unclaimed entry
+  holds, depth- and size-limited and reading only the small text files the classifier reads (never a secret-named
+  file, never a socket or pipe). Every file credential-bearing -> ``secret`` (``credential store by name`` /
+  ``content matches: <kinds>``, never the match); only caches, state, logs, sockets or bytecode -> ``excluded``
+  (``cache-state: ...``); an empty directory -> ``excluded``; a symlink into a package manager's tree
+  (``~/.local/share/uv/tools``, ``~/.local/lib/node_modules``, ``~/.local/opt``, ``~/Applications``) -> ``excluded``
+  (``link created by <installer>; the package is declared elsewhere``); portable config only -> ``untracked`` with
+  ``portable config: capture can adopt`` appended to the detail; portable config next to secrets or state, or a
+  large data directory or an unreadable file -> ``untracked`` with ``mixed: needs a rule``.
+
+Public API: ``NAME``, ``discover(ctx)``, ``owned(ctx)``, ``classify(ctx, item, rules)``, ``capture(ctx, items)``,
+``item_id(rel)`` (the id of a
 ``$HOME``-relative path) and ``entry_id(rel)`` (the id of the top-level entry a path belongs to, or ``None``).
 """
 
@@ -22,12 +33,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
+from ubuntu_tweaks.adapters._capture_view import capture_view
 from ubuntu_tweaks.adapters._links import link_owner
 from ubuntu_tweaks.adapters._system import system
+from ubuntu_tweaks.capture.files_scan import Candidate, scan_entry
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.coverage import Item, Proposal
+from ubuntu_tweaks.coverage import Coverage, Finding, Item, Proposal, Rules
+from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.dotfiles_rc import provided as dotfiles_provided
 from ubuntu_tweaks.manifest import SourceKind
 
@@ -35,6 +50,7 @@ NAME = "files"
 _PREFIX = "file:~/"
 _EXPANDED = (PurePosixPath(".config"), PurePosixPath(".local/share"), PurePosixPath(".local/bin"))
 _SKIPPED_HOME = frozenset({".config", ".local"})
+_NAME_REASONS = frozenset({"name matches a credential pattern", "credential store or browser profile by name"})
 
 
 def item_id(rel: PurePosixPath | str) -> str:
@@ -92,6 +108,85 @@ def discover(ctx: Context) -> Iterable[Item]:
     for rel, path in _scan(system().home):
         kind, detail = _describe(path)
         yield Item(NAME, item_id(rel), kind, detail)
+
+
+# Trees a package manager keeps its installs in, relative to $HOME, and who to name for a link into each.
+_INSTALLER_TREES = (
+    (PurePosixPath(".local/share/uv/tools"), "uv"),
+    (PurePosixPath(".local/lib/node_modules"), "npm"),
+    (PurePosixPath(".local/opt"), "a manual install under ~/.local/opt"),
+    (PurePosixPath("Applications"), "an AppImage installer"),
+)
+_EMPTY = "empty directory: nothing to track"
+
+
+def _listable(path: Path) -> bool:
+    """False for a directory this user cannot list (it is not empty, only unreadable)."""
+    try:
+        os.listdir(path)
+    except NotADirectoryError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _installer_of(path: Path, home: Path) -> str | None:
+    """Who created the symlink ``path`` when it points into one of the package-manager trees (never followed)."""
+    try:
+        target = os.path.normpath(os.path.join(path.parent, os.readlink(path)))
+    except OSError:
+        return None
+    for tree, installer in _INSTALLER_TREES:
+        root = str(home.joinpath(*tree.parts))
+        if target == root or target.startswith(root + os.sep):
+            return installer
+    return None
+
+
+def _secret_reason(candidates: Iterable[Candidate]) -> str:
+    """Why every credential-bearing file counts: by name, or the kinds of pattern found (never the match)."""
+    reasons = {
+        "credential store by name" if c.reason in _NAME_REASONS else c.reason
+        for c in candidates
+        if c.cls == "secret-bearing"
+    }
+    return "; ".join(sorted(reasons))
+
+
+def classify(ctx: Context, item: Item, rules: Rules) -> Finding | None:
+    """Apply capture's file classifier to the entry: credentials -> ``secret``, only caches and state -> ``excluded``,
+    a link a package manager made -> ``excluded``; portable config and mixed entries stay ``untracked`` with a detail
+    saying which. Reads only what the classifier reads (small text files, never a secret-named one)."""
+    home = system().home
+    path = home / item.id.removeprefix(_PREFIX)
+    if item.kind == "symlink":
+        installer = _installer_of(path, home)
+        if installer is None:
+            return None
+        return Finding(item, Coverage.EXCLUDED, f"link created by {installer}; the package is declared elsewhere")
+    try:
+        file_rules = capture_view(ctx).rules.files
+    except ConfigError:
+        return None  # an invalid [capture] table is capture's to report, not a reason to abort the scan
+    scanned = scan_entry(home, path, file_rules)
+    found = scanned.candidates
+    if not found:
+        if scanned.symlinks_ignored or not _listable(path):
+            return None  # something is there that was not looked at: it stays a finding
+        return Finding(item, Coverage.EXCLUDED, _EMPTY)
+    portable = any(c.cls == "portable-config" for c in found)
+    mixed = any(c.cls == "mixed" or c.reason == "unreadable" for c in found)
+    if portable or mixed:
+        pure = portable and all(c.cls == "portable-config" for c in found)
+        note = "portable config: capture can adopt" if pure else "mixed: needs a rule"
+        return Finding(replace(item, detail=f"{item.detail}; {note}" if item.detail else note), Coverage.UNTRACKED)
+    if any(c.cls == "secret-bearing" for c in found):
+        return Finding(item, Coverage.SECRET, _secret_reason(found))
+    reasons = sorted({c.reason for c in found})
+    return Finding(
+        item, Coverage.EXCLUDED, "cache-state: " + "; ".join(reasons[:3]) + ("; ..." if len(reasons) > 3 else "")
+    )
 
 
 def owned(ctx: Context) -> Mapping[str, str]:
