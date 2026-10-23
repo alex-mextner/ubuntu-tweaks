@@ -24,7 +24,7 @@ from ubuntu_tweaks.capture.report import build_document, render_markdown, render
 from ubuntu_tweaks.capture.rules import PANEL_IDS, PANELS_TOML, Rules, load_rules
 from ubuntu_tweaks.capture.secrets import key_names, scan_text, scan_value
 from ubuntu_tweaks.capture.system_scan import scan_packages
-from ubuntu_tweaks.capture.settings_scan import has_machine_path
+from ubuntu_tweaks.capture.settings_scan import SettingsResult, has_machine_path
 from ubuntu_tweaks.commands import capture as capture_command
 from ubuntu_tweaks.context import REPO_ROOT, Context
 from ubuntu_tweaks.errors import ConfigError, RefusedError
@@ -62,6 +62,35 @@ SCHEMAS = (
     FakeSchema("org.example.Weird", {"thing": FakeKey("i", "0")}, "/org/example/weird/"),
     FakeSchema("org.gnome.desktop.notifications.application", {"enable": FakeKey("b", "true")}, None),
 )
+
+
+# Volatile keys of a real laptop dump (`dconf dump /`): schema -> (dconf directory, {key: (type, default, user value)}).
+# The coordinates are made up; the key names, schemas and paths are the real ones.
+LAPTOP_VOLATILE = {
+    "org.gnome.settings-daemon.plugins.color": (
+        "/org/gnome/settings-daemon/plugins/color/",
+        {"night-light-last-coordinates": ("(dd)", "(91.0, 181.0)", "(10.5, 20.25)")},
+    ),
+    "org.gnome.deja-dup": (
+        "/org/gnome/deja-dup/",
+        {
+            "prompt-check": ("s", "''", "'disabled'"),
+            "window-height": ("i", "0", "460"),
+            "window-width": ("i", "0", "550"),
+        },
+    ),
+    "org.gnome.shell": (
+        "/org/gnome/shell/",
+        {
+            "last-selected-power-profile": ("s", "''", "'power-saver'"),
+            "welcome-dialog-last-shown-version": ("s", "''", "'50.1'"),
+        },
+    ),
+    "org.gnome.control-center": (
+        "/org/gnome/control-center/",
+        {"last-panel": ("s", "''", "'bluetooth'"), "window-state": ("(iib)", "(0, 0, false)", "(980, 874, true)")},
+    ),
+}
 
 
 class NoSchemaBackend(FakeBackend):
@@ -269,11 +298,49 @@ class RuleTableTests(unittest.TestCase):
         self.assertIsNotNone(hard)
         self.assertEqual(hard.cls if hard else None, "secret")
 
-    def test_machine_rule_protects_a_key_from_the_state_globs(self) -> None:
-        rules = load_rules()
+    def test_a_profile_machine_match_protects_a_key_from_the_state_globs(self) -> None:
         full = "/org/gnome/shell/last-selected-power-profile"
+        self.assertIsNotNone(load_rules().state_rule(full))
+        rules = load_rules({"machine": [full]})
         self.assertIsNotNone(rules.machine_rule(full))
-        self.assertIsNotNone(rules.state_rule(full))
+
+    def assert_state(self, full: str) -> None:
+        rules = load_rules()
+        self.assertIsNotNone(rules.state_rule(full), full)
+        self.assertIsNone(rules.machine_rule(full), f"{full} must not be a machine key: it would be captured")
+
+    def test_night_light_last_coordinates_is_state_not_a_machine_key(self) -> None:
+        self.assert_state("/org/gnome/settings-daemon/plugins/color/night-light-last-coordinates")
+
+    def test_last_selected_power_profile_is_state_not_a_machine_key(self) -> None:
+        self.assert_state("/org/gnome/shell/last-selected-power-profile")
+
+    def test_prompt_check_is_state(self) -> None:
+        self.assert_state("/org/gnome/DejaDup/prompt-check")
+
+    def test_last_star_is_state(self) -> None:
+        self.assert_state("/org/gnome/gnome-system-monitor/last-tab")
+
+    def test_star_last_star_is_state(self) -> None:
+        self.assert_state("/org/gnome/shell/welcome-dialog-last-shown-version")
+
+    def test_last_selected_star_is_state(self) -> None:
+        self.assert_state("/org/gnome/Characters/last-selected-category")
+
+    def test_window_geometry_is_state(self) -> None:
+        for name in (
+            "window-size",
+            "window-width",
+            "window-height",
+            "window-state",
+            "window-position",
+            "window-maximized",
+        ):
+            self.assert_state(f"/org/gnome/Ptyxis/{name}")
+
+    def test_a_profile_include_lifts_a_volatile_key_back(self) -> None:
+        rules = load_rules({"include": ["/org/gnome/shell/last-selected-power-profile"]})
+        self.assertIsNone(rules.state_rule("/org/gnome/shell/last-selected-power-profile"))
 
     def test_state_globs_do_not_swallow_keybindings_or_privacy_preferences(self) -> None:
         rules = load_rules()
@@ -441,25 +508,74 @@ class SettingsScanTests(TempDirCase):
         self.assertIsNone(plan.settings)
         self.assertIsNotNone(plan.files)
 
-    def test_machine_rule_wins_over_state_globs_in_a_real_scan(self) -> None:
-        schemas = (
-            *SCHEMAS,
-            FakeSchema("org.example.Shell", {"last-selected-power-profile": FakeKey("s", "''")}, "/org/gnome/shell/"),
-        )
-        backend = NoSchemaBackend(schemas)
-        backend.set_user("org.example.Shell", None, "last-selected-power-profile", "'balanced'")
+    def scan_settings_of(self, backend: FakeBackend, capture: dict[str, object] | None = None) -> SettingsResult:
         plan = build_plan(
             Profile(self.tmp / "profile", "testbox", "flag"),
-            load_rules(),
+            load_rules(capture),
             backend,
             home=self.tmp / "home",
-            only=frozenset({"power"}),
+            only=frozenset(),
             run=fake_runner,
             **sources(self),
         )
         assert plan.settings is not None
-        captured = {(e.panel, e.target, e.key) for e in plan.settings.entries}
-        self.assertIn(("power", "machine", "last-selected-power-profile"), captured)
+        return plan.settings
+
+    def test_an_explicit_profile_machine_rule_still_wins_over_state_globs(self) -> None:
+        schemas = (
+            *SCHEMAS,
+            FakeSchema(
+                "org.example.Wall", {"last-selected-image": FakeKey("s", "''")}, "/org/gnome/desktop/background/"
+            ),
+        )
+        backend = NoSchemaBackend(schemas)
+        backend.set_user("org.example.Wall", None, "last-selected-image", "'a.jpg'")
+        key = "/org/gnome/desktop/background/last-selected-image"
+        self.assertEqual(
+            {(s.cls, s.full) for s in self.scan_settings_of(backend).skipped if s.full == key}, {("state", key)}
+        )
+        result = self.scan_settings_of(backend, {"machine": [key]})
+        self.assertIn(
+            ("background", "machine", "last-selected-image"), {(e.panel, e.target, e.key) for e in result.entries}
+        )
+
+    def test_the_laptop_dump_volatile_keys_are_skipped_as_state_and_never_captured(self) -> None:
+        backend = FakeBackend(
+            [
+                FakeSchema(schema, {key: FakeKey(kind, default) for key, (kind, default, _value) in keys.items()}, path)
+                for schema, (path, keys) in LAPTOP_VOLATILE.items()
+            ]
+        )
+        for schema, (_path, keys) in LAPTOP_VOLATILE.items():
+            for key, (_kind, _default, value) in keys.items():
+                backend.set_user(schema, None, key, value)
+        result = self.scan_settings_of(backend)
+        full_names = {entry.key for entry in result.entries}
+        self.assertEqual(full_names, set(), "no volatile key may be proposed")
+        skipped = {s.full: s.cls for s in result.skipped}
+        self.assertEqual(
+            skipped,
+            {path + key: "state" for path, keys in LAPTOP_VOLATILE.values() for key in keys},
+        )
+
+    def test_a_profile_include_lifts_a_volatile_key_back_into_the_machine_overlay(self) -> None:
+        backend = FakeBackend(
+            [
+                FakeSchema(s, {k: FakeKey(t, d) for k, (t, d, _v) in keys.items()}, p)
+                for s, (p, keys) in LAPTOP_VOLATILE.items()
+            ]
+        )
+        for schema, (_path, keys) in LAPTOP_VOLATILE.items():
+            for key, (_kind, _default, value) in keys.items():
+                backend.set_user(schema, None, key, value)
+        include = [
+            "/org/gnome/settings-daemon/plugins/color/night-light-last-coordinates",
+            "/org/gnome/shell/last-selected-power-profile",
+        ]
+        result = self.scan_settings_of(backend, {"include": include})
+        routed = {(e.panel, e.target, e.key) for e in result.entries}
+        self.assertIn(("displays", "machine", "night-light-last-coordinates"), routed)
+        self.assertIn(("power", "machine", "last-selected-power-profile"), routed)
 
 
 class SystemScanTests(TempDirCase):

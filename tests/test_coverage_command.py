@@ -150,7 +150,7 @@ class JsonTests(CoverageScenario):
         self.assertEqual(sorted(document), ["counts", "exit_code", "findings", "machine", "profile"])
         self.assertEqual(document["machine"], "home")
         self.assertEqual(document["profile"], str(self.profile_root))
-        self.assertEqual(document["counts"], {"untracked": 2, "secret": 0, "excluded": 1, "tracked": 0})
+        self.assertEqual(document["counts"], {"untracked": 2, "secret": 0, "excluded": 1, "tracked": 0, "ticketed": 0})
         self.assertEqual(document["exit_code"], 3)
         self.assertNotIn("proposals", document)
         by_id = {f["id"]: f for f in document["findings"]}
@@ -164,6 +164,7 @@ class JsonTests(CoverageScenario):
                 "detail": "'Yaru' (default 'Adwaita')",
                 "reason": "",
                 "owner": "",
+                "ticket": "",
             },
         )
         self.assertEqual(by_id["file:~/.cache"]["class"], "excluded")
@@ -245,6 +246,102 @@ class LayoutTests(CoverageScenario):
             build_parser().parse_args(["coverage", "--class", "bogus"])
 
 
+class TicketedProposalAndBadgeTests(CoverageScenario):
+    RULE = '[[coverage]]\nmatch = ["file:~/.config/foo"]\nclass = "untracked"\nticket = "#12"\nreason = "later"\n'
+
+    def test_propose_leaves_a_ticketed_item_alone(self) -> None:
+        self.classify(self.RULE)
+        _, out = self.run_command(propose=True)
+        self.assertIn("Nothing to propose", out)
+
+    def test_an_adapter_with_only_ticketed_items_shows_the_ok_badge(self) -> None:
+        self.classify(self.RULE)
+        ui.configure(color="always")
+        _, out = self.run_command()
+        files_line = next(line for line in strip(out).splitlines() if "files (" in line)
+        self.assertNotIn("need", files_line)
+        self.assertNotIn("!", files_line)
+
+
+class TicketedUntrackedTests(CoverageScenario):
+    """``[[coverage]] class = "untracked"`` with a ``ticket``: still a finding, but one somebody owns."""
+
+    RULE = (
+        '[[coverage]]\nmatch = ["file:~/.config/foo"]\nclass = "untracked"\nticket = "#12"\n'
+        'reason = "needs a decision on tracking"\n'
+    )
+
+    def test_every_untracked_item_ticketed_exits_0_and_the_counts_line_says_so(self) -> None:
+        self.classify(self.RULE)
+        code, out = self.run_command()
+        self.assertEqual(code, ExitCode.OK)
+        self.assertIn("Coverage: 1 untracked (1 ticketed), 0 secret, 0 excluded, 0 tracked\n", out)
+        self.assertNotIn("run `ubuntu-tweak coverage`", out)
+        self.assertIn("files: 1 untracked (1 ticketed), 0 secret, 0 excluded, 0 tracked", out)
+
+    def test_one_untracked_item_without_a_ticket_still_exits_3(self) -> None:
+        self.classify(self.RULE)
+        write(self.home / ".config/bar/x", "x")
+        code, out = self.run_command()
+        self.assertEqual(code, ExitCode.DRIFT)
+        self.assertIn(
+            "Coverage: 2 untracked (1 ticketed), 0 secret, 0 excluded, 0 tracked (run `ubuntu-tweak coverage`)", out
+        )
+
+    def test_the_plain_table_has_a_ticket_column_and_the_reason(self) -> None:
+        self.classify(self.RULE)
+        write(self.home / ".config/bar/x", "x")
+        _, out = self.run_command()
+        self.assertRegex(out, r"untracked  file:~/\.config/foo  #12  needs a decision on tracking")
+        self.assertRegex(out, r"untracked  file:~/\.config/bar\s+directory, 1 entry")
+
+    def test_a_table_without_any_ticket_has_no_ticket_column(self) -> None:
+        _, out = self.run_command()
+        self.assertRegex(out, r"untracked  file:~/\.config/foo\s+directory, 1 entry")
+
+    def test_the_rich_table_has_a_ticket_column(self) -> None:
+        self.classify(self.RULE)
+        ui.configure(color="always")
+        _, out = self.run_command()
+        plain = strip(out)
+        self.assertIn("TICKET", plain)
+        self.assertRegex(plain, r"file:~/\.config/foo\s+#12\s+needs a decision on tracking")
+        self.assertIn("coverage: 1 untracked (1 ticketed)", plain)
+
+    def test_json_carries_the_ticket_per_finding_and_the_ticketed_count(self) -> None:
+        self.classify(self.RULE)
+        _, out = self.run_command(json=True)
+        document = json.loads(out)
+        self.assertEqual(document["counts"]["ticketed"], 1)
+        self.assertEqual(document["exit_code"], 0)
+        (finding,) = [f for f in document["findings"] if f["id"] == "file:~/.config/foo"]
+        self.assertEqual(
+            (finding["class"], finding["ticket"], finding["reason"]),
+            ("untracked", "#12", "needs a decision on tracking"),
+        )
+
+    def test_an_untracked_rule_without_a_ticket_is_invalid_config(self) -> None:
+        from ubuntu_tweaks.errors import ConfigError
+
+        self.classify('[[coverage]]\nmatch = ["file:~/.config/foo"]\nclass = "untracked"\nreason = "later"\n')
+        with self.assertRaisesRegex(ConfigError, "an untracked rule needs a 'ticket'"):
+            self.run_command()
+
+    def test_a_ticket_on_another_class_is_invalid_config(self) -> None:
+        from ubuntu_tweaks.errors import ConfigError
+
+        self.classify('[[coverage]]\nmatch = ["file:~/.config/foo"]\nclass = "excluded"\nreason = "r"\nticket = "#1"\n')
+        with self.assertRaisesRegex(ConfigError, "'ticket' is only for an untracked rule"):
+            self.run_command()
+
+    def test_a_declaration_makes_a_ticketed_item_tracked(self) -> None:
+        write(self.profile_root / "files/.config/foo/app.conf", "x")
+        self.classify(self.RULE)
+        code, out = self.run_command()
+        self.assertEqual(code, ExitCode.OK)
+        self.assertIn("0 untracked, 0 secret, 0 excluded, 1 tracked", out)
+
+
 class StatusSummaryTests(CommandScenario):
     """``status`` ends with the coverage summary and its exit code is the drift's alone."""
 
@@ -283,7 +380,9 @@ class StatusSummaryTests(CommandScenario):
         code, out = self.status(json=True)
         document = json.loads(out)
         self.assertEqual(code, ExitCode.OK)
-        self.assertEqual(document["coverage"], {"untracked": 1, "secret": 0, "excluded": 0, "tracked": 1})
+        self.assertEqual(
+            document["coverage"], {"untracked": 1, "secret": 0, "excluded": 0, "tracked": 1, "ticketed": 0}
+        )
         self.assertEqual(document["exit_code"], 0)
 
     def test_rich_status_shows_the_summary_before_the_legend(self) -> None:
@@ -312,6 +411,38 @@ class StatusSummaryTests(CommandScenario):
             code, out = self.status_with_stub()
         self.assertEqual(code, ExitCode.OK)
         self.assertEqual(out.rstrip("\n").splitlines()[-1], "Coverage: 0 untracked, 0 secret, 0 excluded, 1 tracked")
+
+    def test_ticketed_untracked_items_show_in_the_footer_without_the_hint(self) -> None:
+        ticketed = Finding(Item("x", "x:y", "k"), Coverage.UNTRACKED, "decide later", ticket="#7")
+        with mock.patch.object(coverage_command, "scan", return_value=[ticketed]):
+            code, out = self.status_with_stub()
+        self.assertEqual(code, ExitCode.OK)
+        self.assertEqual(
+            out.rstrip("\n").splitlines()[-1], "Coverage: 1 untracked (1 ticketed), 0 secret, 0 excluded, 0 tracked"
+        )
+
+    def test_an_open_untracked_item_keeps_the_hint_next_to_the_ticketed_count(self) -> None:
+        findings = [
+            Finding(Item("x", "x:y", "k"), Coverage.UNTRACKED, "decide later", ticket="#7"),
+            Finding(Item("x", "x:z", "k"), Coverage.UNTRACKED),
+        ]
+        with mock.patch.object(coverage_command, "scan", return_value=findings):
+            _, out = self.status_with_stub()
+        self.assertEqual(
+            out.rstrip("\n").splitlines()[-1],
+            "Coverage: 2 untracked (1 ticketed), 0 secret, 0 excluded, 0 tracked (run `ubuntu-tweak coverage`)",
+        )
+
+    def test_status_json_counts_the_ticketed_items(self) -> None:
+        findings = [Finding(Item("x", "x:y", "k"), Coverage.UNTRACKED, "decide later", ticket="#7")]
+        with mock.patch.object(coverage_command, "scan", return_value=findings):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(reconcile, "open_backend", return_value=self.fake):
+                status.run(self.context(), argparse.Namespace(explain=False, json=True))
+        self.assertEqual(
+            json.loads(out.getvalue())["coverage"],
+            {"untracked": 1, "secret": 0, "excluded": 0, "tracked": 0, "ticketed": 1},
+        )
 
     def status_with_stub(self) -> tuple[int, str]:
         out = io.StringIO()

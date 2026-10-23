@@ -337,6 +337,11 @@ paths = ["/org/gnome/desktop/sound/**", "/org/gnome/shell/ubuntu/**", "/com/ubun
 
 [[rule]]
 panel = "displays"
+to = "machine"
+paths = ["/org/gnome/settings-daemon/plugins/color/night-light-last-coordinates"]
+
+[[rule]]
+panel = "displays"
 to = "shared"
 paths = ["/org/gnome/settings-daemon/plugins/color/**"]
 

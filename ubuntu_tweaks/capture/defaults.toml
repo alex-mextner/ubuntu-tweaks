@@ -37,10 +37,6 @@ paths = [
 ]
 
 [[machine]]
-reason = "derived from the machine's location or last session"
-paths = ["/**/night-light-last-coordinates", "/**/last-selected-power-profile"]
-
-[[machine]]
 reason = "audio device choice"
 paths = ["/**/*-device", "/**/*-device-*", "/**/default-sink*", "/**/default-source*"]
 
@@ -65,6 +61,12 @@ paths = [
   "/**/is-maximized", "/**/maximized", "/**/initial-size*", "/**/sidebar-*", "/**/*-column-width",
   "/**/size", "/**/width", "/**/height",
 ]
+
+# Listed before the general bookkeeping rule so the report gives this reason, not "bookkeeping".
+[[exclude]]
+class = "state"
+reason = "derived from the machine's location and rewritten by the daemon: never captured, it would put a home position into the profile"
+paths = ["/**/night-light-last-coordinates"]
 
 [[exclude]]
 class = "state"

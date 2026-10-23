@@ -1285,8 +1285,8 @@ matching rule wins**, specific before general) and a unit test fails when this t
 | `online-accounts` | `/org/gnome/online-accounts/**`: tokens and identities | `X` |
 | `sharing` | `/org/gnome/desktop/remote-desktop/**`, file sharing; TLS keys, certificates and credentials are `secret` | `S` (credentials `X`) |
 | `sound` | `/org/gnome/desktop/sound/**`, the startup sound; keys named `*-device*`, `default-sink*`, `default-source*` go to the machine overlay | `S/M` |
-| `power` | `/org/gnome/settings-daemon/plugins/power/**`, `/org/gnome/desktop/session/**`, `last-selected-power-profile`, `show-battery-percentage` | `M` |
-| `displays` | night light and the colour plugin (`/org/gnome/settings-daemon/plugins/color/**`); `night-light-last-coordinates` goes to the machine overlay; `~/.config/monitors.xml` (file adapter, machine overlay) | `S/M/F` |
+| `power` | `/org/gnome/settings-daemon/plugins/power/**`, `/org/gnome/desktop/session/**`, `show-battery-percentage` (`last-selected-power-profile` is `state`, never captured) | `M` |
+| `displays` | night light and the colour plugin (`/org/gnome/settings-daemon/plugins/color/**`); `night-light-last-coordinates` is `state` (derived from the location, rewritten by the daemon, never captured); `~/.config/monitors.xml` (file adapter, machine overlay) | `S/M/F` |
 | `mouse-touchpad` | `/org/gnome/desktop/peripherals/{mouse,touchpad,trackball}/**` | `M` |
 | `keyboard` | input sources, `wm/keybindings`, media-keys (custom bindings), `mutter/keybindings`, `shell/keybindings`, global shortcuts, tiling-assistant `tile-*`/`restore-window`/`center-window`/… bindings, IBus, peripherals keyboard | `S` |
 | `printers` | `/org/gnome/cups/**`: queues are machine and network specific | `X` |
@@ -1313,7 +1313,7 @@ Scan, Logs) belong to `apps`, so `unmapped` only lists schemas no rule knows (ti
 - The machine key is the hostname; `machines/<machine>/` is the overlay described above.
 - Default `machine` rules ship with the engine (`ubuntu_tweaks/capture/defaults.toml`): power
   plugin keys including `battery-*`, `peripherals/touchpad`, `peripherals/mouse`,
-  `night-light-last-coordinates`, `last-selected-power-profile`, sound device keys, absolute
+  sound device keys, absolute
   filesystem paths outside `/usr/share` (a string leaf of the value that starts with a real
   filesystem root such as `/home` or `/opt`, or a `file:///` URI to one; a dconf object path
   like `/org/gnome/.../custom0/` is not a file),
@@ -1380,8 +1380,12 @@ schemas. Then, in this order:
    only when `$XDG_DATA_HOME/flatpak` exists, with flatpak's cache redirected to a temporary
    directory, because a plain `flatpak list` creates `~/.local/share/flatpak`) and **System** (a `system.toml` proposal:
    timezone into the machine overlay, locale and console keyboard shared).
-4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (window
-   geometry, recents, app-picker-layout, `last-*` timestamps), `auto` (keys the system or an app
+4. **Skipped**, with a reason class: `secret`, `identity`, `hardware`, `state` (volatile runtime keys an app or
+   the daemon rewrites by itself, never captured: window geometry `window-*`, recents, app-picker-layout,
+   `last-*` / `*-last-*` / `last-selected-*` markers, `prompt-check`, timestamps, and
+   `night-light-last-coordinates`, which is derived from the location and would put a home position into the
+   profile; the `[state_keep]` globs exempt real preferences, a profile `[capture] include` or an explicit
+   `machine` match lifts a key back), `auto` (keys the system or an app
    registered by itself: notification app ids and lists, Ptyxis profile uuids, Clocks UI state,
    the Clocks mirror in `world-clocks`, portal global shortcuts, the input-source MRU order, the
    Shell's seeded app-grid folders, an extension's version marker; the section lists each key with
@@ -1697,7 +1701,7 @@ adapter interface, and `ubuntu-tweak coverage` shows the table:
 | `tracked` | declared in the profile (bundles, files, packages, system, modules) and reconciled by `apply`, or owned by a module (`[[coverage]] class = "tracked"`) |
 | `excluded` | deliberately not tracked, with a written `reason` (cache, state, generated, machine-bound) |
 | `secret` | credentials: lives in the keychain / `passwords-app`, never in the profile; the scanner reports that it exists, never its value |
-| `untracked` | a finding: configuration nobody declared. `coverage` exits 3 while any remains |
+| `untracked` | a finding: configuration nobody declared. `coverage` exits 3 while any without a `ticket` remains (*Ticketed untracked*) |
 
 **Items.** An adapter *discovers* items: `Item(adapter, id, kind, detail)`, `id` is a stable string with a scheme:
 `dconf:/org/gnome/...` (a key whose user value differs from the schema default), `file:~/.config/<entry>` (a
@@ -1721,7 +1725,8 @@ def plan(ctx: Context, backend: SettingsBackend) -> Sequence[Action]
                                                  # reconcile: actions with check()/run(), failover alternatives
 ```
 Only `discover` is required; an adapter that is purely declarative needs none of the rest. `Finding(item, coverage,
-reason, owner)`; `owner` names the module or profile file that tracks it.
+reason, owner, ticket)`; `owner` names the module or profile file that tracks it, `ticket` the issue an `untracked`
+item waits on.
 
 **Declarative entries.** No Python is needed to cover an app: a module's `module.toml` or the profile's
 `coverage.toml` holds `[[coverage]]` tables:
@@ -1729,20 +1734,65 @@ reason, owner)`; `owner` names the module or profile file that tracks it.
 ```toml
 [[coverage]]
 match = ["file:~/.config/Code/Cache*", "file:~/.config/Code/logs"]   # globs against item ids
-class = "excluded"                    # tracked | excluded | secret
-reason = "Electron cache and logs"    # required for excluded and secret
+class = "excluded"                    # tracked | excluded | secret | untracked (with a ticket)
+reason = "Electron cache and logs"    # required for every class but tracked
 ```
 and `[[coverage.adapter]] adapter = "files" path = "~/.config/foo" format = "ini|json|toml|yaml|file|dir"` entries that
 make the generic `files` adapter reconcile the path (link or copy, key-level merge for the structured formats). Rules of
 the engine (`ubuntu_tweaks/coverage_defaults.toml`) < modules < profile < machine overlay; the first matching rule
-of the highest layer wins. Items the profile already declares are `tracked` without any rule: a bundle key, a
-linked file, a `packages.toml` name, a module's own files.
+of the highest layer wins. The profile layer is `coverage.toml` followed by every `coverage.d/*.toml` (sorted by
+name, other files ignored), and the machine overlay has the same two (`machines/<host>/coverage.toml`,
+`machines/<host>/coverage.d/*.toml`), all with the same `[[coverage]]` syntax: several authors add rules in
+separate files without merge conflicts, and inside a layer the first matching rule in load order wins (`coverage.toml`
+first, then `coverage.d` by name). `Finding.owner` names the file (`coverage.d/10-editors.toml`). Items the profile
+already declares are `tracked` without any rule: a bundle key, a linked file, a `packages.toml` name, a module's
+own files.
 
 **Commands.** `ubuntu-tweak coverage [--json] [--class untracked|tracked|excluded|secret] [--dry-run]` scans and
-prints the table with a count per class, exit 3 while `untracked` items remain (nothing else changes). `status` ends
-with the same summary line. `capture` proposes the untracked items grouped by purpose (it writes only with
-`--commit`, as always). `apply` / `init` reconcile everything tracked. The profile repository's CI runs
-`ubuntu-tweak coverage` and fails when the untracked count rises.
+prints the table with a count per class, exit 3 while an `untracked` item **without a ticket** remains (nothing else
+changes). The counts line reads `Coverage: 5 untracked (2 ticketed), 3 secret, 120 excluded, 90 tracked`: the
+`(M ticketed)` note appears only when some untracked items carry a ticket, and the `(run ...)` hint only while an open
+one remains. `status` ends with the same summary line (its JSON `coverage` object also has `ticketed`). `capture`
+proposes the untracked items grouped by purpose (it writes only with `--commit`, as always). `apply` / `init`
+reconcile everything tracked. The profile repository's CI runs `ubuntu-tweak coverage --check-profile` (static, below)
+and `ubuntu-tweak coverage`, and fails when an untracked item without a ticket appears.
+
+**Ticketed untracked.** A finding somebody has already taken on stays `untracked` (it is still not configuration the
+profile reconciles) but does not fail the gate. A `[[coverage]]` rule of class `untracked` takes a REQUIRED `ticket`
+and a REQUIRED `reason`:
+
+```toml
+[[coverage]]
+match = ["file:~/.config/Code", "dconf:/org/gnome/shell/extensions/dash-to-dock/*"]
+class = "untracked"
+ticket = "#42"                          # "#N" (this repository) or "owner/repo#N"
+reason = "VS Code settings: decide what goes into files/ and what is sync state"
+```
+
+It is accepted in a module's `module.toml`, the profile's `coverage.toml` and the machine overlay's `coverage.toml`,
+and follows the usual layering. The finding keeps `Finding.coverage = untracked` and carries `Finding.ticket`; the
+table has a `TICKET` column (plain and interactive; present when any shown finding has a ticket), the finding's
+`reason` comes first in the row with the detail after it in parentheses, `capture` and `coverage --propose` leave
+ticketed items alone (a human is deciding them), and `--json` has `"ticket": "#42"` (empty for every other finding) and
+`counts.ticketed`. A declaration still wins: an item the profile tracks is `tracked` whatever such a rule says. An
+`untracked` rule without a `ticket` or a `reason`, a ticket that is not `#N` / `owner/repo#N`, or a `ticket` on
+another class is invalid config (exit 2).
+
+**`coverage --check-profile [--online] [--json]`** is the profile CI's static gate: it scans nothing, writes nothing
+and needs no PyGObject. It reads the engine rules, every module's `[[coverage]]` (enabled or not), `coverage.toml`,
+`coverage.d/*.toml` and the machine overlays', reports every problem found (not just the first) and exits 0 clean, 2 invalid. It checks: each
+file and manifest parses; an `untracked` rule has a valid `ticket` and a `reason`; an `excluded` or `secret` rule has a
+`reason`; only `untracked` rules have a `ticket`; every `match` glob can match some item id (its literal head must lead
+into `dconf:/`, `file:~/`, `etc:/`, `apt:`, `snap:`, `flatpak:`, `brew:`, `pipx:`, `uv:`, `npm:`, `bun:`, `cargo:`,
+`unit:`, `autostart:`, `extension:`, `cron:`, `ssh:` or `git:`; `~/.config/x` and `file:/home/me/x` are flagged); no
+pattern is listed twice in one layer (the later one never applies) and no layer restates a lower layer's pattern with
+the same class as the nearest lower layer that lists it (redundant; another class is a real override). Only the rules
+that apply on this machine can duplicate or override each other: a disabled module's rules and the overlays of other
+machines (`machines/*/`) are still checked for syntax and patterns, so the CI runner's hostname does not matter. With
+`--online` each distinct ticket is asked of `gh issue
+view` (`#N` in the profile's checkout, `owner/repo#N` with `--repo`): a missing or closed ticket is a problem, a ticket
+gh cannot answer for another reason is a problem too, and without `gh` the check is skipped with a note. `--online`
+without `--check-profile` is invalid config (exit 2).
 
 ### Output
 

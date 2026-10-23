@@ -8,7 +8,8 @@ the planners' optional ``extras()`` and are printed only when ``--only`` is not 
 the planners' warnings (things only the user can decide, e.g. a missing git identity); it never
 changes the exit code. Exit 3 when anything is Missing or Modified; extras and manual alone exit 0.
 Read-only. The last line is the one-line coverage summary (``ubuntu-tweak coverage`` has the table; JSON key
-``coverage``, ``null`` with ``--only``): a count per class, and untracked items never change status's exit code.
+``coverage``, ``null`` with ``--only``): a count per class (``N untracked (M ticketed)`` when some have a ticket; the
+JSON object also has ``ticketed``), and untracked items never change status's exit code.
 
 Two layouts, same facts and same exit codes. The *plain* layout (pipes, ``--plain``) is the compact
 ``Missing (n):`` / ``Modified (n):`` / ``Extra (n):`` text with ``[kind]`` labels. The *interactive* layout
@@ -24,13 +25,12 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping
 
 from ubuntu_tweaks import journal, ui
 from ubuntu_tweaks.actions import Action, Plan
 from ubuntu_tweaks.commands import coverage as coverage_command
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.coverage import Coverage
+from ubuntu_tweaks.coverage import Totals
 from ubuntu_tweaks.errors import ExitCode
 
 MODIFIED_KINDS = frozenset({"set-key", "link-replace", "dotfiles-link-replace"})
@@ -111,7 +111,7 @@ def render_rich(
     warnings: list[str],
     *,
     explain: bool,
-    coverage: Mapping[Coverage, int] | None = None,
+    coverage: Totals | None = None,
 ) -> str:
     lines = [*header, ""]
     lines += verdict(len(missing), len(modified), len(extras), len(warnings))
@@ -149,7 +149,7 @@ def _json(
     modified: list[Action],
     extras: list[str],
     warnings: list[str],
-    coverage: Mapping[Coverage, int] | None = None,
+    coverage: Totals | None = None,
 ) -> str:
     def entry(action: Action) -> dict[str, object]:
         return {
@@ -169,7 +169,9 @@ def _json(
         "modified": [entry(action) for action in modified],
         "extra": None if ctx.only else extras,  # not checked with --only: null, not an empty list
         "manual": warnings,
-        "coverage": None if coverage is None else {kind.value: coverage[kind] for kind in coverage_command.ORDER},
+        "coverage": None
+        if coverage is None
+        else {**{kind.value: coverage[kind] for kind in coverage_command.ORDER}, "ticketed": coverage.ticketed},
         "exit_code": int(ExitCode.DRIFT if drift else ExitCode.OK),
     }
     return json.dumps(document, ensure_ascii=False, indent=2)

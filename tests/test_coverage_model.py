@@ -4,7 +4,7 @@ import unittest
 
 from tests.util import TempDirCase, write
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.coverage import Coverage, Finding, Item, Layer, Rule, Rules, classify, parse_rules, summary
+from ubuntu_tweaks.coverage import Coverage, Finding, Item, Layer, Rule, Rules, classify, parse_rules, summary, totals
 from ubuntu_tweaks.coverage_rules import load_rules
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.profile import Profile, TomlTable, TomlValue
@@ -12,8 +12,10 @@ from ubuntu_tweaks.profile import Profile, TomlTable, TomlValue
 CACHE = Item("files", "file:~/.config/Code/Cache", "dir")
 
 
-def rule(match: str, coverage: Coverage, layer: Layer, reason: str = "because", owner: str = "") -> Rule:
-    return Rule((match,), coverage, reason, layer, owner)
+def rule(
+    match: str, coverage: Coverage, layer: Layer, reason: str = "because", owner: str = "", ticket: str = ""
+) -> Rule:
+    return Rule((match,), coverage, reason, layer, owner, ticket)
 
 
 class ParseRulesTests(unittest.TestCase):
@@ -21,8 +23,8 @@ class ParseRulesTests(unittest.TestCase):
         return parse_rules(list(entries), Layer.PROFILE, "coverage.toml")
 
     def test_an_excluded_or_secret_rule_needs_a_reason(self) -> None:
-        for kind in ("excluded", "secret"):
-            with self.assertRaisesRegex(ConfigError, f"an {kind} rule needs a 'reason'"):
+        for kind, article in (("excluded", "an"), ("secret", "a")):
+            with self.assertRaisesRegex(ConfigError, f"{article} {kind} rule needs a 'reason'"):
                 self.parse({"match": ["file:~/x"], "class": kind})
 
     def test_a_tracked_rule_needs_no_reason(self) -> None:
@@ -33,9 +35,32 @@ class ParseRulesTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, r"coverage\.toml \[\[coverage\]\] #2: 'class' must be"):
             self.parse({"match": ["a"], "class": "tracked"}, {"match": ["b"], "class": "bogus"})
 
-    def test_untracked_is_not_a_class_a_rule_can_set(self) -> None:
-        with self.assertRaisesRegex(ConfigError, "'class' must be tracked, excluded or secret"):
+    def test_an_untracked_rule_carries_a_ticket_and_a_reason(self) -> None:
+        (parsed,) = self.parse(
+            {"match": ["file:~/.config/foo"], "class": "untracked", "reason": "needs a rule", "ticket": "#12"}
+        )
+        self.assertEqual((parsed.coverage, parsed.reason, parsed.ticket), (Coverage.UNTRACKED, "needs a rule", "#12"))
+
+    def test_an_untracked_rule_without_a_ticket_is_invalid_config(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "an untracked rule needs a 'ticket'"):
             self.parse({"match": ["a"], "class": "untracked", "reason": "r"})
+
+    def test_an_untracked_rule_without_a_reason_is_invalid_config(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "an untracked rule needs a 'reason'"):
+            self.parse({"match": ["a"], "class": "untracked", "ticket": "#1"})
+
+    def test_the_ticket_reference_format_is_validated(self) -> None:
+        for good in ("#1", "#4321", "octo/profile-repo#83", "a.b/c_d#7"):
+            (parsed,) = self.parse({"match": ["a"], "class": "untracked", "reason": "r", "ticket": good})
+            self.assertEqual(parsed.ticket, good)
+        for bad in ("83", "#", "#x", "#1 ", "owner#1", "a/b", "https://github.com/a/b/issues/1", "a/b/c#1", ""):
+            with self.assertRaisesRegex(ConfigError, "'ticket' must be"):
+                self.parse({"match": ["a"], "class": "untracked", "reason": "r", "ticket": bad})
+
+    def test_a_ticket_on_another_class_is_invalid_config(self) -> None:
+        for kind in ("tracked", "excluded", "secret"):
+            with self.assertRaisesRegex(ConfigError, "'ticket' is only for an untracked rule"):
+                self.parse({"match": ["a"], "class": kind, "reason": "r", "ticket": "#1"})
 
     def test_match_must_be_a_non_empty_list_of_globs(self) -> None:
         cases: tuple[TomlValue, ...] = ("file:~/x", [], [""], [1])
@@ -117,6 +142,29 @@ class ClassifyTests(unittest.TestCase):
             {Coverage.TRACKED: 0, Coverage.EXCLUDED: 2, Coverage.SECRET: 1, Coverage.UNTRACKED: 0},
         )
 
+    def test_a_ticketed_untracked_rule_keeps_the_item_untracked_and_carries_the_ticket(self) -> None:
+        rules = Rules((rule(CACHE.id, Coverage.UNTRACKED, Layer.PROFILE, "decide later", ticket="#7"),))
+        finding = classify(CACHE, rules, {})
+        self.assertEqual((finding.coverage, finding.reason, finding.ticket), (Coverage.UNTRACKED, "decide later", "#7"))
+
+    def test_a_declaration_beats_a_ticketed_untracked_rule(self) -> None:
+        rules = Rules((rule(CACHE.id, Coverage.UNTRACKED, Layer.PROFILE, "decide later", ticket="#7"),))
+        finding = classify(CACHE, rules, {CACHE.id: "files/x"})
+        self.assertEqual((finding.coverage, finding.ticket), (Coverage.TRACKED, ""))
+
+    def test_totals_separate_ticketed_untracked_items_from_open_ones(self) -> None:
+        findings = [
+            Finding(CACHE, Coverage.UNTRACKED, "later", ticket="#7"),
+            Finding(CACHE, Coverage.UNTRACKED, "later", ticket="#8"),
+            Finding(CACHE, Coverage.UNTRACKED),
+            Finding(CACHE, Coverage.EXCLUDED, "r"),
+        ]
+        counted = totals(findings)
+        self.assertEqual((counted[Coverage.UNTRACKED], counted.ticketed, counted.open), (3, 2, 1))
+
+    def test_no_open_untracked_item_when_every_one_has_a_ticket(self) -> None:
+        self.assertEqual(totals([Finding(CACHE, Coverage.UNTRACKED, "later", ticket="#7")]).open, 0)
+
 
 class EngineDefaultsTests(TempDirCase):
     def test_every_shipped_rule_is_valid_and_has_a_reason(self) -> None:
@@ -149,6 +197,50 @@ class EngineDefaultsTests(TempDirCase):
         self.assertEqual(
             classify(item, load_rules(ctx), {item.id: "files/.config/gh/config.yml"}).coverage, Coverage.TRACKED
         )
+
+
+class DropInTests(TempDirCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.profile = Profile(self.tmp / "profile", "box")
+        self.ctx = Context(self.tmp / "repo", self.profile)
+
+    def rule(self, name: str, directory: str, cls: str, reason: str) -> None:
+        write(
+            self.profile.root / directory / name,
+            f'[[coverage]]\nmatch = ["file:~/.config/Code"]\nclass = "{cls}"\nreason = "{reason}"\n',
+        )
+
+    def classify(self) -> Finding:
+        return classify(Item("files", "file:~/.config/Code", "dir"), load_rules(self.ctx), {})
+
+    def test_rules_in_coverage_d_files_are_loaded_and_name_their_file_as_owner(self) -> None:
+        write(
+            self.profile.root / "coverage.d/10-editors.toml",
+            '[[coverage]]\nmatch = ["file:~/.config/Code"]\nclass = "tracked"\n',
+        )
+        finding = self.classify()
+        self.assertEqual((finding.coverage, finding.owner), (Coverage.TRACKED, "coverage.d/10-editors.toml"))
+
+    def test_coverage_toml_comes_before_the_drop_ins_and_they_load_by_name(self) -> None:
+        self.rule("20-b.toml", "coverage.d", "excluded", "second")
+        self.rule("10-a.toml", "coverage.d", "excluded", "first")
+        self.assertEqual(self.classify().reason, "first")
+        self.rule("coverage.toml", ".", "secret", "main file")
+        self.assertEqual(self.classify().reason, "main file")
+
+    def test_the_machine_overlay_has_its_own_drop_ins_and_beats_the_profile(self) -> None:
+        self.rule("10-a.toml", "coverage.d", "excluded", "shared")
+        self.rule("10-m.toml", "machines/box/coverage.d", "secret", "this machine")
+        finding = self.classify()
+        self.assertEqual((finding.reason, finding.owner), ("this machine", "machines/box/coverage.d/10-m.toml"))
+
+    def test_a_file_that_is_not_toml_is_ignored_and_a_broken_one_is_invalid_config(self) -> None:
+        write(self.profile.root / "coverage.d/README.md", "notes")
+        self.assertEqual(self.classify().coverage, Coverage.UNTRACKED)
+        write(self.profile.root / "coverage.d/50-bad.toml", '[[coverage]]\nmatch = ["a"]\nclass = "excluded"\n')
+        with self.assertRaisesRegex(ConfigError, "50-bad.toml"):
+            self.classify()
 
 
 class LayerLoadingTests(TempDirCase):

@@ -15,9 +15,13 @@ writes nothing (``capture --commit`` writes).
 The *plain* layout (pipes, ``--plain``) is compact aligned text; the *interactive* layout (a terminal,
 ``--color always``) explains the four classes and colors them. ``--json`` prints the same facts machine-readably.
 
-Exit codes: 3 (``ExitCode.DRIFT``) while any ``untracked`` item remains (whatever ``--class`` shows), else 0.
+Exit codes: 3 (``ExitCode.DRIFT``) while any ``untracked`` item WITHOUT a ticket remains (whatever ``--class``
+shows), else 0: a ``[[coverage]] class = "untracked"`` rule with a ``ticket`` keeps the item untracked (counted as
+``N untracked (M ticketed)``, listed with its ticket) but is somebody's job already, so it does not fail the gate.
+``--check-profile [--online]`` is the profile CI's static gate (``profile_check.py``): it parses the coverage rules,
+scans nothing, writes nothing and needs no PyGObject; exit 0 clean, 2 invalid.
 
-Public API: ``register(subparsers)``, ``run(ctx, args)``, ``scan(ctx)``, ``counts(findings)``,
+Public API: ``register(subparsers)``, ``run(ctx, args)``, ``scan(ctx)``, ``counts(findings) -> Totals``,
 ``summary_text(counts)``, ``summary_plain(counts)``, ``summary_rich(counts)``.
 """
 
@@ -26,12 +30,12 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 from ubuntu_tweaks import ui
 from ubuntu_tweaks.context import Context
-from ubuntu_tweaks.coverage import Coverage, Finding, Proposal, summary
-from ubuntu_tweaks.errors import ExitCode
+from ubuntu_tweaks.coverage import Coverage, Finding, Proposal, Totals, totals
+from ubuntu_tweaks.errors import ConfigError, ExitCode
 
 ORDER = (Coverage.UNTRACKED, Coverage.SECRET, Coverage.EXCLUDED, Coverage.TRACKED)
 _BADGE = {
@@ -54,7 +58,8 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         help="classify every configuration location: tracked, excluded, secret or untracked (exit 3 while untracked)",
         description=(
             "Scan the machine (dconf, files, packages, systemd units, GNOME extensions, /etc) and put every item in one "
-            "class. Read-only. Exit 3 while untracked items remain."
+            "class. Read-only. Exit 3 while untracked items WITHOUT a ticket remain; --check-profile validates the "
+            "profile's coverage rules without scanning."
         ),
     )
     parser.add_argument("--json", action="store_true", help="print the findings as JSON (same exit codes)")
@@ -68,6 +73,20 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "--propose",
         action="store_true",
         help="print what `capture` would add to the profile for the untracked items, grouped by purpose",
+    )
+    parser.add_argument(
+        "--check-profile",
+        action="store_true",
+        help=(
+            "static gate for the profile's CI: parse every coverage rule (an untracked rule needs a ticket, excluded and "
+            "secret need a reason), flag patterns that can never match and duplicate or redundant ones; scans nothing, "
+            "writes nothing, needs no PyGObject; exit 2 when invalid"
+        ),
+    )
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="with --check-profile: also verify through `gh issue view` that every ticket exists and is open",
     )
     parser.set_defaults(handler=run)
 
@@ -84,22 +103,25 @@ def scan(ctx: Context) -> list[Finding]:
         return scan_adapters(ctx, rules)
 
 
-def counts(findings: Sequence[Finding]) -> dict[Coverage, int]:
-    return summary(findings)
+def counts(findings: Sequence[Finding]) -> Totals:
+    return totals(findings)
 
 
-def summary_text(totals: Mapping[Coverage, int]) -> str:
-    return ", ".join(f"{totals[kind]} {kind.value}" for kind in ORDER)
+def summary_text(counted: Totals) -> str:
+    """``N untracked (M ticketed), S secret, E excluded, T tracked``; the ticketed note only when one exists."""
+    parts: list[str] = []
+    for kind in ORDER:
+        note = f" ({counted.ticketed} ticketed)" if kind is Coverage.UNTRACKED and counted.ticketed else ""
+        parts.append(f"{counted[kind]} {kind.value}{note}")
+    return ", ".join(parts)
 
 
-def summary_plain(totals: Mapping[Coverage, int]) -> str:
-    untracked = totals[Coverage.UNTRACKED]
-    return f"Coverage: {summary_text(totals)}" + (" (run `ubuntu-tweak coverage`)" if untracked else "")
+def summary_plain(counted: Totals) -> str:
+    return f"Coverage: {summary_text(counted)}" + (" (run `ubuntu-tweak coverage`)" if counted.open else "")
 
 
-def summary_rich(totals: Mapping[Coverage, int]) -> list[str]:
-    untracked = totals[Coverage.UNTRACKED]
-    if untracked:
+def summary_rich(totals: Totals) -> list[str]:
+    if totals.open:
         head = ui.wrap(f"coverage: {summary_text(totals)}", first=f"{ui.symbol('need')} ", names=("yellow", "bold"))
         return [
             *head,
@@ -112,7 +134,9 @@ def _what(finding: Finding) -> str:
     if finding.coverage is Coverage.TRACKED:
         return finding.owner
     if finding.coverage is Coverage.UNTRACKED:
-        return finding.item.detail
+        if not finding.ticket:
+            return finding.item.detail
+        return f"{finding.reason} ({finding.item.detail})" if finding.item.detail else finding.reason
     reason = finding.reason
     return f"{reason} ({finding.owner})" if finding.owner else reason  # a secret's value is never shown
 
@@ -129,12 +153,15 @@ def _plain(ctx: Context, findings: Sequence[Finding], shown: Sequence[Finding]) 
 
     lines = [*reconcile.profile_lines(ctx), summary_plain(counts(findings))]
     every = _by_adapter(findings)
+    with_tickets = any(finding.ticket for finding in shown)
     for adapter, members in _by_adapter(shown).items():
         totals = counts(every[adapter])
         lines += ["", f"{adapter}: {summary_text(totals)}"]
         width = max(len(finding.item.id) for finding in members)
+        ticket_width = max(len(finding.ticket) for finding in members)
         lines += [
-            f"  {finding.coverage.value:<9}  {finding.item.id:<{width}}  {_what(finding)}".rstrip()
+            f"  {finding.coverage.value:<9}  {finding.item.id:<{width}}  "
+            f"{f'{finding.ticket:<{ticket_width}}  ' if with_tickets else ''}{_what(finding)}".rstrip()
             for finding in members
         ]
     return "\n".join(lines)
@@ -149,9 +176,10 @@ def _rich(ctx: Context, findings: Sequence[Finding], shown: Sequence[Finding], c
     for kind in ORDER:
         lines += ui.wrap(f"{kind.value}: {_MEANING[kind]}", indent=2)
     every = _by_adapter(findings)
+    with_tickets = any(finding.ticket for finding in shown)
     for adapter, members in _by_adapter(shown).items():
         adapter_totals = counts(every[adapter])
-        badge = "need" if adapter_totals[Coverage.UNTRACKED] else "ok"
+        badge = "need" if adapter_totals.open else "ok"
         lines += [
             "",
             ui.section(adapter, len(every[adapter]), badge),
@@ -161,11 +189,12 @@ def _rich(ctx: Context, findings: Sequence[Finding], shown: Sequence[Finding], c
             (
                 ui.badge(_BADGE[finding.coverage], word=False) + " " + finding.coverage.value,
                 finding.item.id,
+                *((finding.ticket,) if with_tickets else ()),
                 _what(finding),
             )
             for finding in members
         ]
-        lines += ui.table(("CLASS", "ITEM", "WHAT"), rows)
+        lines += ui.table(("CLASS", "ITEM", *(("TICKET",) if with_tickets else ()), "WHAT"), rows)
     if not shown:
         lines += ["", "  " + ui.style(f"no {chosen.value} items" if chosen else "nothing found", "dim")]
     return "\n".join(lines)
@@ -175,7 +204,7 @@ def _proposals(ctx: Context, findings: Sequence[Finding]) -> list[tuple[str, Pro
     from ubuntu_tweaks.adapters import discover_adapters
     from ubuntu_tweaks.adapters._system import system, use
 
-    untracked = [f.item for f in findings if f.coverage is Coverage.UNTRACKED]
+    untracked = [f.item for f in findings if f.coverage is Coverage.UNTRACKED and not f.ticket]
     found: list[tuple[str, Proposal]] = []
     with use(system()):
         for module in discover_adapters():
@@ -206,7 +235,7 @@ def _json(
     document: dict[str, object] = {
         "machine": ctx.profile.machine,
         "profile": str(ctx.profile.root),
-        "counts": {kind.value: totals[kind] for kind in ORDER},
+        "counts": {**{kind.value: totals[kind] for kind in ORDER}, "ticketed": totals.ticketed},
         "findings": [
             {
                 "adapter": finding.item.adapter,
@@ -216,6 +245,7 @@ def _json(
                 "detail": "" if finding.coverage is Coverage.SECRET else finding.item.detail,
                 "reason": finding.reason,
                 "owner": finding.owner,
+                "ticket": finding.ticket,
             }
             for finding in shown
         ],
@@ -230,11 +260,18 @@ def _json(
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    online = getattr(args, "online", False)
+    if getattr(args, "check_profile", False):
+        from ubuntu_tweaks.profile_check import run_check
+
+        return run_check(ctx, online=online, as_json=getattr(args, "json", False))
+    if online:
+        raise ConfigError("--online needs --check-profile")
     from ubuntu_tweaks.commands._support import require_gi
 
     require_gi()
     findings = scan(ctx)
-    code = int(ExitCode.DRIFT if counts(findings)[Coverage.UNTRACKED] else ExitCode.OK)
+    code = int(ExitCode.DRIFT if counts(findings).open else ExitCode.OK)
     chosen = Coverage(args.coverage_class) if getattr(args, "coverage_class", None) else None
     shown = [f for f in findings if chosen is None or f.coverage is chosen]
     proposals = _proposals(ctx, findings) if getattr(args, "propose", False) else None
