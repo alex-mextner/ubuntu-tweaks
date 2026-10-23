@@ -105,6 +105,9 @@ as any behavior change.
     общем виде. там тоже может быть что-то важное и полезное» — a generic `disks` module: any disk the profile
     declares (USB or internal, apfs, ntfs, exfat, ext4, ...) gets its driver, a marked `/etc/fstab` block, a mount point
     and a systemd automount; `capture` proposes the declaration for disks nobody declared (*Disks*).
+24. «Если тебе нужны какие-то мои действия — всё подготовь, чтобы я очень легко смог это сделать» — one command,
+    `ubuntu-tweak finish` (the profile installs it as `finish-setup`, with a desktop launcher), that lists only the
+    human-only steps still left and runs the machine part of each one itself (*Finish*).
 
 ## Requirements
 
@@ -196,6 +199,7 @@ Covered by `tests/test_launcher.py`.
 | `bundle-move <bundle> <key-or-glob>... [--commit]` | Moves matching keys, with their comments, from whichever bundle holds them into `<bundle>`. Preview by default. |
 | `note <target> "reason" [--origin shared\|overlay] [--commit]` | Adds, changes or removes the reason (comment) of a bundle key, a package or a system value. Preview by default. |
 | `show [--changed\|--all] [--panel ID] [--format text\|md\|html] [--output FILE] [--ssh [USER@]HOST]` | Read-only Russian overview of all settings of this machine (or, with `--ssh`, another one) grouped by Settings panel, with explanations, readable values, defaults and a status (see *show*). |
+| `finish [--step ID] [--yes]` | The human-only steps that are still left, in the order they can be done: the built-in `apply` step (root, with an optional go/wait gate) and the `[[finish]]` steps of the enabled modules. Each is shown with why, the exact action and its automatic check; the machine part runs by itself. `--dry-run` only lists (read-only checks, no sudo); exit 3 while a required step is not done (see *Finish*). |
 
 Global flags, accepted before or after the command: `--profile DIR`, `--machine NAME`,
 `--only <name,…>` (modules for `apply`/`status`, panels for `capture`), and the output flags
@@ -716,6 +720,7 @@ a working `brew` counts as done.
 What `init` / `apply` can end with as `needs manual` (the closing `Manual steps` block prints these, see
 *Init pipeline*). Each is Missing in `status` until done; `apply` never prompts and never stores a secret.
 After doing one, run `ubuntu-tweak apply --commit` again.
+`ubuntu-tweak finish` (*Finish*) lists the ones still open on this machine and runs their machine parts.
 
 | Step | Module | Why only you | How you complete it |
 |---|---|---|---|
@@ -734,6 +739,81 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | gh login or clone | `dotfiles` | the repository is found through your gh login | `gh auth login`; set `[modules.dotfiles] repo` or pass `--dotfiles-repo OWNER/NAME`; move a directory that is in the way; resolve a diverged checkout |
 | rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
+
+### Finish (`finish`): the human-only steps in one command
+
+Request 24 (23 Oct 2026, Telegram, verbatim): «Если тебе нужны какие-то мои действия — всё подготовь, чтобы я очень
+легко смог это сделать». Everything in *Manual steps* is spread over several modules, the closing block of `apply`
+and the profile's own notes. `ubuntu-tweak finish` is the one list of what is **still** left on this machine, in
+the order it can be done, and it runs the machine parts of each step itself.
+
+`ubuntu-tweak finish [--step ID] [--yes] [--dry-run]` (the profile installs it as `finish-setup`, with a desktop
+launcher, see the profile's `files/`). Steps come from two places:
+
+- the built-in **`apply`** step: the root work (`ubuntu-tweak apply --commit`, which asks for the sudo password once
+  itself; `finish` never reads a password), always first;
+- `[[finish]]` tables of the enabled modules, the engine's and the profile's (a disabled module contributes none),
+  ordered by the module's `order`, then its name, then file order. `--only` keeps the steps of the named modules
+  (and drops `apply`).
+
+```toml
+[[finish]]                       # in modules/<name>/module.toml or <profile>/modules/<name>/module.toml
+id = "icloud-signin"             # required, unique over all modules
+title = "Sign in to iCloud"      # required; title_ru / why_ru / action_ru are used with --lang ru
+why = "Apple ID, password and the 2FA code are yours to type; nothing here stores them"       # required
+action = "Type the Apple ID password, then the code from your other Apple device"             # required: what you do
+check = ["./finish", "icloud-signin", "check"]   # required: exit 0 = done; read-only, no prompt, fast
+prepare = ["./finish", "icloud-signin", "prepare"]   # optional machine part before the human one; non-zero = blocked
+run = ["passwords-app", "signin"]    # optional: the interactive command, it owns the terminal
+gate = ["./finish", "icloud-signin", "gate"]   # optional: empty stdout = go; any output = wait (shown as the reason)
+requires = ["apply"]             # optional: step ids that must be done first
+optional = false                 # an optional step never keeps the exit code at 3
+```
+
+An argv whose first element starts with `./` runs from the module's directory (`finish` itself runs a script of
+the module next to `module.toml`; the profile's own modules work the same), any other first element is looked up
+on `PATH`. Every command gets `UBUNTU_TWEAK_MODULE_CONFIG` (the module's `[modules.<name>]` options as JSON, as for
+system modules), `UBUNTU_TWEAK_LANG` (`ru` or `en`) and `UBUNTU_TWEAK_FINISH_DRY_RUN=1` under `--dry-run`. The step texts
+are written by the module author in `title` / `title_ru` and so on; the missing `_ru` falls back to English. A
+command never prints a secret (the session log masks the usual ones anyway).
+
+State of a step, decided by the commands alone: **done** (`check` exits 0), **pending** (it does not), **wait** (a
+`gate` printed something: it says plainly `WAIT` and why, and the step is not run), **blocked** (a `requires` step
+is not done) and, after a run, **failed** (the `prepare` or `run` command failed, or `check` still fails). The
+built-in `apply` step is **done** when the plan holds no root action and the last finished journal run has no failed,
+blocked or deferred item (*Reconcile and failover*); its `gate` comes from `[finish.apply]` in `profile.toml` /
+`machine.toml`:
+
+```toml
+[finish.apply]
+gate = ["gh", "pr", "list", "--repo", "alex-mextner/hyperdock", "--state", "open", "--json", "number,title", "--jq", ".[] | \"#\\(.number) \\(.title)\""]
+gate_why = "the dock code the apply links must be released first"      # and gate_why_ru
+```
+
+A gate that cannot run (non-zero exit, command not found) is **wait** with the error line: never a silent go.
+
+The profile's own steps (what belongs to no module, such as a chore on another host) are `[[finish.steps]]` in
+`profile.toml` and `machine.toml`, with the same keys; their `./` commands run from the profile directory and they
+come after every module's steps. The profile installs the launcher `finish-setup` and its desktop entry through
+`files/`, like any other file.
+
+`--dry-run` prints the checklist (state of every step, why, the exact action, the gate verdict) and runs only the
+read-only `check` and `gate` commands: no `prepare`, no `run`, no sudo; it exits 3 while a required step is not
+done. Without it `finish` walks the pending steps in order: shows the step (why, what you do), waits for Enter
+(`--yes`: no pause), runs `prepare`, then `run`, then `check` again and prints `✓` or `✗`; after every step all
+states are recomputed (a later step may have become possible, a finished one may need running again: the AMO key
+makes `apply` pending once more). A step is tried at most twice per run, and a `wait` or `blocked` step is only
+listed. Without a terminal on stdin nothing is run: the checklist is printed with a note that a terminal is needed
+(exit 3). The end prints what is done, what waits and the one command to run next. Exit 0: every required step is
+done; 3: a required step is pending, waiting, blocked or failed; usage errors are the usual 2. Re-running is always
+safe: done steps are only listed.
+
+| Step | Module | Why only you | What `finish` does itself |
+|---|---|---|---|
+| `apply` | built-in | the sudo password | the gate, then `ubuntu-tweak apply --commit` |
+| `icloud-signin` | `passwords-app` | Apple ID password, 2FA code, device passcode | probes that the installed venv has the Apple client-identity fix (an init-only request with a fake id must answer `ec=-20970`, not `-80045`; if it answers `-80045` it reinstalls the venv from the checkout), then runs `passwords-app signin --apple-id <apple_id option>` |
+| `amo-key` | `firefox` | the AMO API key belongs to the owner's Mozilla account | opens the AMO key page, asks for both halves with hidden input, stores them in the Secret Service, then the next `apply` signs the extension |
+| `firefox-backend-prompt` | `firefox-autologin` | the WebExtension-backend prompt only the owner can answer | starts Firefox through the module and waits until the extension is active |
 
 ### One command on a fresh machine
 
@@ -2233,7 +2313,8 @@ and `busctl --user introspect` answers (the owner check, `busctl list --acquired
 Install: clone when missing, run the repository's own `scripts/install.sh` (which also enables and
 restarts the unit; the module enables and starts it again when that did not happen), record the commit,
 verify the bus. Signing in needs the owner's Apple ID, password and 2FA code, so it is the one `manual`
-fact: the install ends with `needs manual: ... run passwords-app signin`.
+fact: the install ends with `needs manual: ... run passwords-app signin`. The optional `[modules.passwords-app] apple_id` (an email address or phone number, not a secret) only prefills
+`passwords-app signin` in the `finish` step *icloud-signin* (*Finish*).
 
 `passwords-app-polkit` (root) copies the checkout's `data/polkit/*.policy` to
 `/usr/share/polkit-1/actions/` when it differs (mode 644); this is the `pkexec install ...` line the app's
