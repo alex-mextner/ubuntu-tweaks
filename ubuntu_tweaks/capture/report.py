@@ -240,6 +240,19 @@ def _packages_section(doc: Document, plan: CapturePlan, verbose: bool) -> None:
             )
 
 
+def _units_section(doc: Document, plan: CapturePlan) -> None:
+    items = plan.units or []
+    doc.heading(2, "3b. Units")
+    doc.heading(3, "units.toml proposal")
+    new = [i for i in items if i.mark == "+"]
+    doc.lines(
+        f"+ enable ({len(new)} new, {len(items) - len(new)} already in the profile): "
+        + (", ".join(i.name for i in new) or "-")
+    )
+    if new:
+        doc.table(("", "unit", "reason"), [(i.mark, Code(i.name), i.reason) for i in new])
+
+
 def _skipped_section(doc: Document, plan: CapturePlan) -> None:
     result = plan.settings
     if result is None:
@@ -374,6 +387,8 @@ def _summary_section(doc: Document, plan: CapturePlan, machine: str) -> None:
     if plan.system is not None:
         todo_keys = [i.key for i in plan.system if i.mark != "="]
         doc.lines(f"system: {len(todo_keys)} to write" + (f" ({', '.join(todo_keys)})" if todo_keys else ""))
+    if plan.units or (plan.units is not None and "units" in plan.only):
+        doc.lines(f"units: {sum(1 for i in plan.units if i.mark == '+')} new to enable")
     doc.lines(f"secret findings in adopted items: {len(refusals(plan))}")
     if result is not None:
         doc.lines(
@@ -418,6 +433,8 @@ def build_document(
             _files_section(doc, plan, machine, verbose)
         if plan.packages is not None or plan.system is not None:
             _packages_section(doc, plan, verbose)
+        if plan.units or (plan.units is not None and "units" in plan.only):
+            _units_section(doc, plan)
         _skipped_section(doc, plan)
     doc.heading(2, "5. Totals")
     doc.lines(totals_line(plan))

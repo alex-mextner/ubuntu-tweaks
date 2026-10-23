@@ -33,7 +33,7 @@ from typing import Literal
 from ubuntu_tweaks.capture.rules import FileRules, Rules
 from ubuntu_tweaks.capture.secrets import Finding, key_names, scan_text
 from ubuntu_tweaks.errors import RefusedError
-from ubuntu_tweaks.profile import Profile
+from ubuntu_tweaks.profile import USER_UNIT_DIR, Profile
 
 type FileStatus = Literal["new", "identical", "differs", "linked"]
 type FileClass = Literal["portable-config", "secret-bearing", "cache-state", "mixed"]
@@ -135,6 +135,11 @@ def _line_delta(old: str, new: str) -> tuple[int, int]:
     return added, removed
 
 
+def _is_unit_file(rel: str) -> bool:
+    """A systemd user unit or drop-in: unlike other allow-listed files, one secret in it skips just that file."""
+    return rel.startswith(f"{USER_UNIT_DIR.as_posix()}/")
+
+
 def _adopt(home: Path, profile: Profile, rules: FileRules, rel: str, result: FilesResult) -> None:
     source = home / rel
     machine = rules.machine.matches(rel)
@@ -178,6 +183,13 @@ def _adopt(home: Path, profile: Profile, rules: FileRules, rel: str, result: Fil
         result.skipped.append(SkippedFile(rel, "not UTF-8 text"))
         return
     findings = scan_text(text, exempt_email_keys=rules.email_exempt)
+    if findings and _is_unit_file(rel):
+        # an `Environment=` line with a token: the unit stays where it is, the rest of the capture goes on
+        kinds = ", ".join(sorted({f.kind for f in findings}))
+        result.skipped.append(
+            SkippedFile(rel, f"secret finding ({kinds}): not adopted; keep the secret in the keychain")
+        )
+        return
     status: FileStatus = "new"
     added = removed = 0
     if dest.is_file():

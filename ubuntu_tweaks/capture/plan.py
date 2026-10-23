@@ -4,7 +4,7 @@ Accessed via: ``commands/capture.py`` (preview and ``--commit`` share this one o
 the user saw is what is written), ``report.py`` and ``commit.py``.
 
 ``build_plan`` is read-only. ``--only`` takes panel ids plus the section names ``files``,
-``packages`` and ``system``; with ``--only`` set, a section not named is not computed.
+``packages``, ``system`` and ``units``; with ``--only`` set, a section not named is not computed.
 
 Public API: ``CapturePlan``, ``build_plan(...)``, ``SECTION_NAMES``, ``refusals(plan)`` (the secret
 findings that make ``--commit`` exit 5, as ``(where, kind, class, line)``).
@@ -28,13 +28,14 @@ from ubuntu_tweaks.capture.system_scan import (
     scan_packages,
     scan_system,
 )
+from ubuntu_tweaks.capture.units_scan import UnitItem, scan_units
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.profile import Profile, read_toml
 from ubuntu_tweaks.setkey import SchemaIndex
 from ubuntu_tweaks.bundles import ModuleGate, load_bundles
 from ubuntu_tweaks.settings import SettingsBackend
 
-SECTION_NAMES = ("files", "packages", "system")
+SECTION_NAMES = ("files", "packages", "system", "units")
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class CapturePlan:
     packages: list[PackageItem] | None
     packages_note: str
     system: list[SystemItem] | None
+    units: list[UnitItem] | None = None
 
 
 def validate_only(only: frozenset[str]) -> None:
@@ -89,7 +91,10 @@ def build_plan(
     if not only or "system" in only:
         profile.load_system()  # validates both layers (ConfigError) before the raw tables are compared
         system = scan_system(run, read_toml(profile.system_toml), read_toml(profile.overlay_system_toml), keyboard_file)
-    return CapturePlan(profile, only, settings, files, packages, note, system)
+    units = None
+    if not only or "units" in only:
+        units = scan_units(home, profile, {skip.rel for skip in files.skipped} if files else ())
+    return CapturePlan(profile, only, settings, files, packages, note, system, units)
 
 
 def refusals(plan: CapturePlan) -> list[tuple[str, str, str, int]]:

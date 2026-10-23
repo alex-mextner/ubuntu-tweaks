@@ -8,7 +8,7 @@ writes the same plan into the profile working tree (settings bundles edited in p
 with backup + symlink, packages.toml and system.toml edited in place) and never runs ``git commit``.
 ``--report FILE.md`` writes the report as markdown (full values; the terminal clips long cells); ``-v``
 also lists entries already equal to the profile and every cache-state candidate; ``--only`` (global flag)
-takes panel ids and the section names ``files``, ``packages``, ``system``. Exit 0; 2 invalid config
+takes panel ids and the section names ``files``, ``packages``, ``system``, ``units``. Exit 0; 2 invalid config
 (``--dry-run`` with ``--report``); 5 refused (secret finding or unsafe path, nothing written).
 
 Heavy imports (``gi`` through the settings backend) happen inside the functions so ``--help``
