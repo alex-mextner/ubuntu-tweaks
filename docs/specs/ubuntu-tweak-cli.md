@@ -101,6 +101,10 @@ as any behavior change.
     системы и приложений» — one configuration-coverage system instead of one-off fixes: every configuration
     location is tracked, excluded with a reason, secret or reported as untracked, through one adapter interface
     (*Coverage*).
+23. «ещё есть диск на 1тб с мака, он должен сам монтироваться и работать. это тоже должен ubuntu-tweaks притягивать в
+    общем виде. там тоже может быть что-то важное и полезное» — a generic `disks` module: any disk the profile
+    declares (USB or internal, apfs, ntfs, exfat, ext4, ...) gets its driver, a marked `/etc/fstab` block, a mount point
+    and a systemd automount; `capture` proposes the declaration for disks nobody declared (*Disks*).
 
 ## Requirements
 
@@ -720,6 +724,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
 | `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) every user-level action still runs, the root actions are listed as the root remainder with the command to run from a normal terminal, and the exit code is 6; or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
+| FileVault volume, or the kernel module under Secure Boot | `disks` | an encrypted APFS volume needs a password no unit can type and the module never stores; a DKMS module needs a signing key enrolled with a reboot | mount it by hand (`apfs-fuse -r <password> <device> <dir>`); or `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`, reboot, confirm; or keep the default `driver = "fuse"` (*Disks*) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
 | polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
 | AMO signing key | `firefox` | the key belongs to the owner's AMO account | `secret-tool store` the items `purpose=amo-jwt-issuer` and `purpose=amo-jwt-secret` (the install output prints the commands) |
@@ -758,6 +763,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it). The desktop user is detected from `SUDO_USER` (else `PKEXEC_UID`), never a default name, and the installer writes it into the installed `/etc/memguard/memguard.toml`; the heavy-run options `heavy_gate`, `heavy_hook` and `heavy_locks` default to empty (off) |
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
+| `disks` | `system` (root) | the disks the profile declares: driver, `/etc/fstab` block, mount point, systemd automount; plans nothing without `[modules.disks.mounts.*]`, so it is on by default and belongs to no init step (*Disks*) |
 | `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
 | `passwords-app-polkit` | `system` (root) | the one root step `install.sh` only prints: the polkit action for unlocking with the login password |
 | `firefox` | `system`, user | build the passwords-app extension and have it signed on AMO (key from the Secret Service) (*Firefox*) |
@@ -2034,6 +2040,90 @@ marked):
   its name.
 - As the desktop user, `systemctl start --no-ask-password ssh.service` is still refused
   (memguard's rule is intact).
+
+#### Disks (`disks`, root)
+
+Request 23. A disk belongs to a machine, so it is declared in `machines/<host>/machine.toml` (the shared `profile.toml` works
+too); one table per disk, named by you:
+
+```toml
+[modules.disks.mounts.mac-backups]
+uuid = "fcbf521d-af6b-463d-9959-d25f686b3379"   # exactly one of uuid | label | partuuid (blkid / lsblk -f)
+fstype = "apfs"                                  # ext2/3/4 xfs btrfs f2fs exfat vfat ntfs hfsplus udf iso9660 apfs
+description = "MacBook backups (USB, APFS)"      # the comment above the fstab line
+# optional, with their defaults:
+mountpoint = "/mnt/mac-backups"   # /mnt/<name>; "~/x" is the desktop user's home; system directories are refused
+read_only = true                  # true for ntfs, apfs, hfsplus, udf, iso9660 (a foreign OS owns the disk); false for the rest
+driver = "auto"                   # apfs: auto | fuse | kernel; ntfs: ntfs3 | ntfs-3g
+owner = "alex"                    # uid/gid for filesystems without POSIX owners (ntfs exfat vfat hfsplus udf iso9660 apfs); default the desktop user
+automount = true                  # x-systemd.automount: mounted on first access; false mounts at boot (still nofail)
+device_timeout = "10s"            # x-systemd.device-timeout: how long a missing disk delays anything
+idle_timeout = "5min"             # x-systemd.idle-timeout (unmount when idle); default unset
+volume = 0                        # apfs container volume number
+options = ["noatime"]             # extra fstab options (not ro/rw/uid/gid/nofail/x-systemd.*)
+```
+
+Nothing declared, nothing planned: the module is on by default and belongs to no init step. The declaration is parsed by
+`ubuntu_tweaks/disks.py` (pure; every error names its key and exits 2), the module is `modules/disks/disks` (the *Service
+modules* contract: `check`, `status`, `plan`, `install`; options through `UBUNTU_TWEAK_MODULE_CONFIG`).
+
+Facts, in the order `status` prints them (per disk unless noted):
+
+1. the driver: `apfs-fuse` built and installed (`/usr/local/bin/apfs-fuse`, stamped with the pinned commit) and `fuse3`;
+   or `apfs-dkms` (the `apfs` kernel module loadable); or `ntfs-3g`. Other filesystems need nothing;
+2. the device `/dev/disk/by-uuid/<uuid>` (by-label, by-partuuid): informational, **never drift**: an unplugged disk is not a
+   failure (the entry is `nofail`, so the machine boots without it);
+3. the entry in the managed block of `/etc/fstab`: `# BEGIN ubuntu-tweaks disks` ... `# END ubuntu-tweaks disks`, text-equal
+   to the generated line, e.g. `/dev/disk/by-uuid/fcbf521d-... /mnt/mac-backups fuse.apfs-fuse
+   ro,allow_other,uid=1000,gid=1000,nofail,x-systemd.automount,x-systemd.device-timeout=10s 0 0`; the block lists no disk the
+   profile does not declare (a removed declaration removes its line, and the block when it was the last); no other line of the
+   file uses the same device or mount point (a `manual` fact naming the line numbers);
+4. the mount point exists (`/mnt/...` stays root's; directories created inside the user's home belong to the user);
+5. systemd knows the generated mount unit (`LoadState=loaded`) and its automount unit is active (`mount` unit when
+   `automount = false` and the disk is attached);
+6. when something is mounted there: it is read-only exactly when declared (a `manual` fact: the module never remounts or
+   unmounts a busy filesystem).
+
+`install`, as root, in this order: build or install the driver; create the mount points; verify the candidate `/etc/fstab`
+with `findmnt --verify` (refused, nothing written, when it has **more** errors than the current file: errors the file already
+had are not the module's to block on) and write it atomically after saving the original once as `/etc/fstab.pre-ubuntu-tweaks`;
+`systemctl daemon-reload`; `systemctl start <automount>` and, when the disk is attached, `systemctl start <mount>`, so the
+mount works at once and the next `check` is green. It never formats, repairs, unmounts, remounts or writes to a disk, and never
+touches a line of `/etc/fstab` outside its block.
+
+**Drivers and the APFS decision.** Nothing in Ubuntu 26.04 mounts APFS out of the box:
+
+| | `apfs-fuse` (default) | `apfs-dkms` (`driver = "kernel"`) |
+|---|---|---|
+| what | userspace, `sgan81/apfs-fuse`, last commit 2023-03-12, **read-only**, no packages: the module builds the pinned commit with `cmake` as the desktop user (`runuser`) and installs `apfs-fuse` and `apfsutil` into `/usr/local/bin` as root; GCC 15 needs `-include cstdint -include vector -include cstring` and cmake 4 needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` | Ubuntu's `apfs-dkms` 0.3.18 (universe; `linux-apfs-rw`), kernel module, **experimental write support** |
+| builds on this machine | yes: container `ubuntu:26.04`, GCC 15.2, mounts and reads the real disk | yes: `make -C /lib/modules/7.0.0-38-generic/build M=...` produced `apfs.ko`, vermagic `7.0.0-38-generic` (also upstream v0.3.22) |
+| Secure Boot | no kernel module, nothing to sign | SecureBoot is **enabled** here and only Canonical's CA is enrolled: an unsigned DKMS module is refused by the kernel; the module reports the MOK enrollment (`mokutil --import`, reboot) as a manual step |
+| failure mode | a crash ends one process | a bug is a kernel oops; the write support "may corrupt your data" (upstream README) |
+
+`driver = "auto"` (the default) takes the kernel module only when the running kernel can already load one or when the
+declaration says `read_only = false`; otherwise FUSE. **Read-only is the default for APFS** because the disks are
+Apple's volumes: nothing here needs to change them, and a write bug would destroy the only copy of a backup. Read-write needs
+`read_only = false`, which selects the kernel module (`mount ... rw,readwrite`); declaring it with `driver = "fuse"` is
+invalid config (`apfs-fuse cannot write`). A FileVault-encrypted volume is detected with `apfsutil` (`FileVault: Yes`) and
+ends as `needs manual` (exit 10) after the entry is written: the module never stores or asks for a password.
+
+`apfs-fuse` shows the volume root as the directory `root` (and a `private-dir`): the `backups` volume of `ubuntu-pc` is
+`/mnt/mac-backups/root/...`; the kernel module shows the volume root itself.
+
+**Capture.** The `disk` adapter of the coverage scanner (`ubuntu_tweaks/adapters/disks.py`) lists the block devices that
+carry a filesystem (`lsblk`), the mounts and the `/etc/fstab` lines; the system's own (`/`, `/boot`, `/boot/efi`, swap, snap
+loops) are excluded with that reason, the ones declared in `[modules.disks.mounts.*]` are tracked, the rest are untracked and
+`capture` proposes a declaration for the machine overlay: the filesystem and driver defaults of the table above, read-only for
+every foreign filesystem, the label as `description`. A Windows partition (`ntfs`, `Windows 11`) is proposed read-only and
+never mounted by force.
+
+**Real-root verification.** `modules/disks/tests` (a stateful fake machine and a scratch `/etc`) and `tests/test_disks_lib.py`
+exercise everything above. A real build, `findmnt --verify` and a `mount` through the generated fstab line were run as root in a
+container with the disk attached read-only, and the real `systemd-fstab-generator` turned the block into
+`mnt-mac\x2dbackups.mount` and `.automount` (run on the workstation). A container cannot show what needs the machine's own
+systemd and udev; these are checked after the user's `apply --commit`: the first access to `/mnt/mac-backups` mounting it,
+the mount coming back after a reboot and after re-plugging the disk (`systemctl status mnt-mac\x2dbackups.automount`,
+`ls /mnt/mac-backups/root`, `findmnt /mnt/mac-backups`).
 
 #### Passwords (`passwords-app`, `passwords-app-polkit`)
 
