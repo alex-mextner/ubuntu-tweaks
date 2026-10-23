@@ -1,0 +1,9 @@
+description = "Disks the profile declares (USB or internal: apfs, ntfs, exfat, ext4, ...): driver, /etc/fstab block, systemd automount"
+enabled = true
+manual = "a FileVault-encrypted APFS volume needs its password typed by hand (apfs-fuse -r); apfs with driver = \"kernel\" under Secure Boot needs the DKMS signing key enrolled (mokutil --import, reboot)"
+
+[source]
+kind = "system"
+install = "disks install"
+check = "disks check"
+preview = "disks plan"
