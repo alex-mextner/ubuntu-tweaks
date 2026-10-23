@@ -142,7 +142,8 @@ lists the last run's failed/blocked/deferred items). Opt-in unattended self-heal
 
 What you configure in GNOME Settings (and the config files you keep under `~/.config`) lives in the
 private profile, `<your dotfiles repo>/ubuntu` (`settings/**/*.ini` bundles, `files/`, `packages.toml`,
-`system.toml`, and `machines/<hostname>/` for what differs per machine). The engine here holds no
+`system.toml`, `units.toml` for the systemd user units that must be enabled, and `machines/<hostname>/` for what
+differs per machine). The engine here holds no
 personal data.
 
 ```sh

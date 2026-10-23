@@ -62,7 +62,16 @@ from ubuntu_tweaks.process import Process
 
 DOTFILES_NAMES = (".files", "dotfiles", ".dotfiles", "dot-files")
 PROFILE_SUBDIRS = ("ubuntu", "ubuntu-tweaks")
-PROFILE_ENTRIES = ("profile.toml", "settings", "files", "packages.toml", "system.toml", "machines", "modules")
+PROFILE_ENTRIES = (
+    "profile.toml",
+    "settings",
+    "files",
+    "packages.toml",
+    "system.toml",
+    "units.toml",
+    "machines",
+    "modules",
+)
 REPO_ENV = "UBUNTU_TWEAK_DOTFILES_REPO"
 MODULE_CONFIG_ENV = "UBUNTU_TWEAK_MODULE_CONFIG"
 GH_LOGIN_COMMAND = "gh auth login"
