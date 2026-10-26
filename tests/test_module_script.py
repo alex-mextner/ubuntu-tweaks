@@ -192,6 +192,23 @@ class ReadOwnedFile(unittest.TestCase):
             with self.assertRaises(kit.ModuleError):
                 kit.read_owned_file(root, os.getuid(), 10)  # a directory
 
+    def test_a_file_that_grows_after_the_size_check_is_refused(self):
+        import os
+        from unittest import mock
+
+        real_fstat = os.fstat
+
+        def small(descriptor):  # what fstat said before the owner appended to the file
+            info = real_fstat(descriptor)
+            return os.stat_result(
+                (info.st_mode, info.st_ino, info.st_dev, info.st_nlink, info.st_uid, info.st_gid, 2, 0, 0, 0)
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            (Path(raw) / "f").write_bytes(b"abcdef")
+            with mock.patch("os.fstat", small), self.assertRaisesRegex(kit.ModuleError, "more than 4 bytes"):
+                kit.read_owned_file(Path(raw) / "f", os.getuid(), 4)
+
 
 class WriteFile(unittest.TestCase):
     def test_atomic_with_final_mode(self):

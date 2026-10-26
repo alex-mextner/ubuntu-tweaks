@@ -218,7 +218,10 @@ def read_owned_file(path: Path, uid: int, limit: int) -> bytes:
         os.close(descriptor)
         raise ModuleError(f"refusing {path}: not a regular file owned by uid {uid} of at most {limit} bytes")
     with os.fdopen(descriptor, "rb") as stream:
-        return stream.read(limit + 1)
+        data = stream.read(limit + 1)
+    if len(data) > limit:  # the file grew after fstat: the size check above is not the last word
+        raise ModuleError(f"refusing {path}: more than {limit} bytes")
+    return data
 
 
 def keyring_secret(process: Process, purpose: str) -> str | None:
