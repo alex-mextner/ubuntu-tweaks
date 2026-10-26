@@ -2537,6 +2537,23 @@ fact: the install ends with `needs manual: ... run passwords-app signin`. The op
 installer prints, run through the module's `sudo` so the preview shows it. No checkout is a `needs manual`
 (`enable the passwords-app module first`). Orders: `passwords-app` (manifest `order = 60`) → `passwords-app-polkit` (61) → `firefox` (70).
 
+The checkout is the desktop user's working copy and the script runs as root, so each policy is vetted before it is
+copied: the file name is `io.github.alex_mextner.Passwords*.policy`, a regular file owned by the user (no
+symlink), at most 1 MiB; valid XML; every `<action id>` starts with `io.github.alex_mextner.Passwords.`; no
+`org.freedesktop.policykit.*` annotation. The markup check runs first, on the raw bytes, with the standard
+library's expat (no entity expansion, parameter entities never parsed, external DTDs never fetched) and allows
+exactly: no DOCTYPE, or polkit's own header (`<!DOCTYPE policyconfig PUBLIC
+"-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+"http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">`, which the app's policy carries) with no
+internal subset `[ ... ]`. Refused with "a DOCTYPE or entity could hide actions from this check" plus the
+specific reason: any other DOCTYPE name or ids, an internal subset, any `<!ENTITY>` declaration, a reference to
+an undeclared entity in element content, an external entity, and any element in an XML namespace (XInclude, or an
+`xmlns` that makes this script's parser see `{ns}action` where polkitd's namespace-blind parser sees `action`). An
+undeclared entity inside an attribute value is dropped by every expat-based parser alike, so the action-name checks
+below see exactly what polkitd sees. (A reference to an undeclared entity in a file with no DOCTYPE is refused by
+expat itself as `not valid XML`.)
+Tests: `modules/passwords-app-polkit/tests/test_passwords_app_polkit.py`.
+
 Recorded on this machine (2026-10-22): the unit is enabled and active and the bus name is owned, so the
 module reports the checkout-commit stamp missing and the polkit action not installed.
 
