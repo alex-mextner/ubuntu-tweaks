@@ -20,14 +20,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
-from ubuntu_tweaks import finish, ui
-from ubuntu_tweaks.commands._support import apply_command, has_gi
+from ubuntu_tweaks import apply_exit, finish, sessionlog, ui
+from ubuntu_tweaks.commands._support import apply_command, has_gi, rerun_command
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
-from ubuntu_tweaks.finish import Probe, Shell, Step
+from ubuntu_tweaks.finish import ExitReport, Probe, Shell, Step
 from ubuntu_tweaks.manifest import FinishStep, module_defaults, parse_finish_tables
 from ubuntu_tweaks.process import run_streamed
 from ubuntu_tweaks.identity import MODULE_CONFIG_ENV
@@ -61,9 +62,11 @@ def collect_steps(
     dry_run: bool,
     probe: Callable[[Context], Probe],
     apply_run: Callable[[], int],
+    explain: Callable[[int], ExitReport | None] | None = None,
 ) -> list[Step]:
     """The built-in ``apply`` step, the ``[[finish]]`` steps of the enabled modules (ordered by the module's ``order``
-    and name, then file order) and the profile's own ``[[finish.steps]]``. ``apply_run`` starts ``apply --commit``."""
+    and name, then file order) and the profile's own ``[[finish.steps]]``. ``apply_run`` starts ``apply --commit``;
+    ``explain`` says what its non-zero exits mean."""
     manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
     # what the caller inherited about modules and dry runs must not leak into a command that is told nothing
@@ -90,6 +93,7 @@ def collect_steps(
             env=base,
             probe=lambda: probe(ctx),
             run=apply_run,
+            explain=explain,
         ),
         "the built-in apply step",
     )
@@ -139,9 +143,34 @@ def _run_apply(ctx: Context) -> int:
         return 127 if isinstance(error, FileNotFoundError) else 126
 
 
+def _started_apply(ctx: Context, applied: list[float]) -> int:
+    applied.append(time.time())
+    return _run_apply(ctx)
+
+
+def _explain_apply_exit(args: argparse.Namespace, code: int, since: float) -> ExitReport | None:
+    """What ``apply --commit`` ending with ``code`` means, read from the run journal it has just written (only a
+    journal started after ``since``: a run that died before writing its own is not blamed for an older one's items)."""
+    from ubuntu_tweaks import journal
+
+    try:
+        return apply_exit.explain(
+            code,
+            journal.previous(journal.journal_path()),
+            rerun=lambda subcommand: rerun_command(args, subcommand),
+            command=os.environ.get(COMMAND_ENV, finish.DEFAULT_COMMAND),
+            log=os.environ.get(sessionlog.SESSION_ENV, ""),
+            since=since,
+        )
+    except (AttributeError, TypeError):  # a journal whose fields have the wrong types: the generic text stays
+        return None
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     if ctx.only:
         raise ConfigError("finish takes no --only: use --step ID for one step (and the steps it requires)")
+
+    applied: list[float] = []  # when each `apply` of this walk was started: a journal older than that is another run's
 
     def current_steps() -> list[Step]:
         """Collected again after every attempt: `apply` may have cloned the profile, which holds more steps."""
@@ -151,7 +180,8 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             environ=os.environ,
             dry_run=args.dry_run,
             probe=_apply_probe,
-            apply_run=lambda: _run_apply(ctx),
+            apply_run=lambda: _started_apply(ctx, applied),
+            explain=lambda code: _explain_apply_exit(args, code, applied[-1] if applied else 0.0),
         )
         if args.step:
             steps = finish.closure(steps, args.step)

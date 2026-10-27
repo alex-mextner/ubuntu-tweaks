@@ -12,8 +12,12 @@ a prompt, so a password typed there by mistake is not written to disk.
 Public API:
 
 - ``State`` (``DONE``, ``PENDING``, ``WAIT``, ``BLOCKED``, ``FAILED``), ``Text(en, ru)`` (``.get(lang)`` falls back to
-  English), ``Probe(ok, detail)``, ``Step`` (id, texts, ``check``, optional ``gate`` / ``prepare`` / ``run``,
-  ``requires``, ``optional``, ``reapply``, ``gate_why``), ``Gate(reason)`` (``.go``), ``Status(state, detail, gate)``.
+  English), ``Probe(ok, detail, settled)``, ``Step`` (id, texts, ``check``, optional ``gate`` / ``prepare`` / ``run`` /
+  ``explain_exit``, ``requires``, ``optional``, ``reapply``, ``gate_why``), ``Gate(reason)`` (``.go``), ``Status(state,
+  detail, gate)``. A step's ``requires`` are satisfied by a probe that is ``ok`` or ``settled`` (ran to its end,
+  nothing left that only another run could do): a failed module does not block the steps that are independent of it.
+  ``ExitReport(text, problem)`` is what ``explain_exit(code)`` returns for a non-zero exit of ``run`` (``None``: the
+  generic text): ``text`` is printed right after the run, ``problem`` is why the step is shown as not done.
 - ``evaluate(steps, failed=None, reopened=None) -> dict[str, Status]``: the state of every step. ``Status.gate`` is
   ``None`` without a gate, else a ``Gate``. ``failed`` maps a step id to why its last attempt did not take; ``reopened``
   maps the id of a done step to why it has to run again.
@@ -97,6 +101,16 @@ class Text:
 class Probe:
     ok: bool
     detail: str = ""
+    settled: bool = False  # not done, but it ran to its end: nothing is left that only another run could do
+
+
+@dataclass(frozen=True)
+class ExitReport:
+    """What a step says about a non-zero exit of its ``run``: ``text`` is printed right after the run (``""``: nothing
+    to add), ``problem`` is why the step is shown as not done."""
+
+    text: str
+    problem: str
 
 
 @dataclass(frozen=True)
@@ -113,6 +127,7 @@ class Step:
     optional: bool = False
     reapply: bool = False
     gate_why: Text = Text("")
+    explain_exit: Callable[[int], ExitReport | None] | None = None  # None from it: the generic text
 
 
 @dataclass(frozen=True)
@@ -294,18 +309,29 @@ def apply_probe(actions: Sequence[Action], last: Run | None) -> Probe:
     """Done when no root action is left that apply could still do and the last finished run did not fail or defer
     anything. A root action the last run reported as ``manual`` waits for a person (another finish step says what to
     do), so it does not keep ``apply`` pending: otherwise a root module that waits for the AMO key would keep the step
-    that has to come first pending for ever. A step that unblocks root work says ``reapply``."""
+    that has to come first pending for ever. A step that unblocks root work says ``reapply``.
+
+    Not done can still be *settled*: the last run finished and every root action left in the plan is one it reported
+    (failed, blocked or manual), so no run has anything more to try and the steps that ``require`` apply may go on.
+    A ``deferred`` action (root was not obtained) is work a run with root still has to do, so it never settles: an
+    interrupted run, deferred root work, or root work no run reported is not settled."""
     from ubuntu_tweaks.journal import action_key
 
     if last is not None and not last.finished:
         return Probe(False, ui.t("finish.apply.interrupted"))
     entries = last.entries if last is not None else []
     waiting = {entry.key for entry in entries if entry.status == WAITING_FOR_A_PERSON}
-    root_left = sum(1 for action in actions if action.needs_root and action_key(action) not in waiting)
+    reported = {entry.key for entry in entries if entry.status in ("failed", "blocked", WAITING_FOR_A_PERSON)}
+    root_keys = [action_key(action) for action in actions if action.needs_root]
+    root_left = sum(1 for key in root_keys if key not in waiting)
     problems = sum(1 for entry in entries if entry.status in APPLY_PROBLEMS)
-    if root_left or problems:
-        return Probe(False, ui.t("finish.apply.left", root=root_left, problems=problems))
-    return Probe(True)
+    if not (root_left or problems):
+        return Probe(True)
+    deferred = any(entry.status == "deferred" for entry in entries)  # root work no run has done, whatever the plan says
+    if last is not None and not deferred and all(key in reported for key in root_keys):
+        shown = sum(1 for entry in entries if entry.status in ("failed", "blocked"))
+        return Probe(False, ui.t("finish.apply.reported", n=shown), settled=True)
+    return Probe(False, ui.t("finish.apply.left", root=root_left, problems=problems))
 
 
 def plan_probe(ctx: Context) -> Probe:
@@ -328,9 +354,11 @@ def apply_step(
     env: Mapping[str, str],
     probe: Callable[[], Probe],
     run: Callable[[], int],
+    explain: Callable[[int], ExitReport | None] | None = None,
 ) -> Step:
     """The built-in step. ``run`` starts ``ubuntu-tweak apply --commit`` (the command layer streams it through the
-    session log); ``directory`` is where its gate runs."""
+    session log); ``directory`` is where its gate runs; ``explain`` says in plain words what a non-zero exit of ``run``
+    means (``Step.explain_exit``)."""
     return Step(
         id=APPLY_ID,
         title=Text("Apply the setup (needs your sudo password)", "Применить настройки (нужен пароль sudo)"),
@@ -346,6 +374,7 @@ def apply_step(
         gate=(lambda: _run_gate(shell, directory, settings.gate, env)) if settings.gate else None,
         run=run,
         gate_why=settings.gate_why,
+        explain_exit=explain,
     )
 
 
@@ -361,17 +390,32 @@ def evaluate(
     probes = {step.id: Probe(False, reopened[step.id]) if step.id in reopened else step.check() for step in steps}
     known = {step.id: step for step in steps}
     statuses: dict[str, Status] = {}
+    gates: dict[str, str] = {}  # a gate runs at most once per evaluation
+
+    def gate_reason(step: Step) -> str:
+        if step.gate is None:
+            return ""
+        if step.id not in gates:
+            gates[step.id] = step.gate()
+        return gates[step.id]
+
+    def satisfied(need: Step) -> bool:
+        """Done, or settled and not held back by its own gate: a gated ``apply`` that waits for a release has not
+        finished its turn, whatever its last run left behind."""
+        probe = probes[need.id]
+        return probe.ok or (probe.settled and not gate_reason(need))
+
     for step in steps:
         probe = probes[step.id]
         if probe.ok:
             statuses[step.id] = Status(State.DONE)
             continue
-        unmet = [known[need] for need in step.requires if need in known and not probes[need].ok]
+        unmet = [known[need] for need in step.requires if need in known and not satisfied(known[need])]
         if unmet:
             titles = ", ".join(other.title.get(ui.lang()) for other in unmet)
             statuses[step.id] = Status(State.BLOCKED, ui.t("finish.blocked_by", titles=titles))
             continue
-        gate = Gate(step.gate()) if step.gate is not None else None
+        gate = Gate(gate_reason(step)) if step.gate is not None else None
         if gate is not None and not gate.go:
             statuses[step.id] = Status(State.WAIT, probe.detail, gate)
         elif step.id in failed:
@@ -542,7 +586,12 @@ def _attempt(step: Step, out: TextIO) -> str:
                 _say(out, [""])
                 return ui.t("finish.interrupted")
             if code != 0:
-                return ui.t("finish.run_failed", code=code)
+                report = step.explain_exit(code) if step.explain_exit is not None else None
+                if report is None:
+                    return ui.t("finish.run_failed", code=code)
+                if report.text:
+                    _say(out, ["", report.text])
+                return report.problem
     except KeyboardInterrupt:  # Ctrl-C inside the step's own command: the walk goes on to its summary
         _say(out, [""])
         return ui.t("finish.interrupted")
