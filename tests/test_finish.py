@@ -13,7 +13,7 @@ from unittest import mock
 from tests.util import TempDirCase
 from ubuntu_tweaks import finish, ui
 from ubuntu_tweaks.errors import ConfigError
-from ubuntu_tweaks.finish import Output, Probe, State, Step, SubprocessShell, Text, evaluate
+from ubuntu_tweaks.finish import ExitReport, Output, Probe, State, Step, SubprocessShell, Text, evaluate
 from ubuntu_tweaks.manifest import FinishStep
 from ubuntu_tweaks.profile import Config
 
@@ -27,12 +27,14 @@ def step(
     run: Callable[[], int] | None = None,
     requires: tuple[str, ...] = (),
     optional: bool = False,
+    settled: bool = False,
+    explain_exit: Callable[[int], ExitReport | None] | None = None,
 ) -> Step:
     check = done if callable(done) else (lambda: done)
 
     def probe() -> Probe:
         ok = check()
-        return Probe(ok, "" if ok else f"{step_id} not done")
+        return Probe(ok, "" if ok else f"{step_id} not done", settled)
 
     return Step(
         id=step_id,
@@ -45,6 +47,7 @@ def step(
         run=run,
         requires=requires,
         optional=optional,
+        explain_exit=explain_exit,
     )
 
 
@@ -78,6 +81,38 @@ class EvaluateTests(unittest.TestCase):
         self.assertIn("Title apply", got["key"].detail)
         ready = evaluate([step("apply", done=True), step("key", requires=("apply",))])
         self.assertEqual(ready["key"].state, State.PENDING)
+
+    def test_a_step_requiring_a_settled_but_not_done_step_is_pending_not_blocked(self) -> None:
+        # apply ran to its end and some module failed: that failure does not stop independent steps from starting
+        got = evaluate([step("apply", settled=True), step("key", requires=("apply",))])
+        self.assertEqual((got["apply"].state, got["key"].state), (State.PENDING, State.PENDING))
+
+    def test_a_step_requiring_an_unsettled_step_stays_blocked(self) -> None:
+        got = evaluate([step("apply", settled=False), step("key", requires=("apply",))])
+        self.assertEqual(got["key"].state, State.BLOCKED)
+
+    def test_a_settled_apply_that_waits_on_its_gate_keeps_the_steps_behind_it_blocked(self) -> None:
+        calls: list[str] = []
+
+        def gate() -> str:
+            calls.append("gate")
+            return "dock code not released"
+
+        got = evaluate(
+            [step("apply", settled=True, gate=gate), step("a", requires=("apply",)), step("b", requires=("apply",))]
+        )
+        self.assertEqual(
+            (got["apply"].state, got["a"].state, got["b"].state), (State.WAIT, State.BLOCKED, State.BLOCKED)
+        )
+        self.assertEqual(calls, ["gate"])  # one run of the gate per evaluation
+
+    def test_a_settled_apply_whose_gate_says_go_lets_the_steps_behind_it_run(self) -> None:
+        got = evaluate([step("apply", settled=True, gate=lambda: ""), step("a", requires=("apply",))])
+        self.assertEqual(got["a"].state, State.PENDING)
+
+    def test_a_reopened_step_is_unsettled_even_when_its_probe_was_settled(self) -> None:
+        got = evaluate([step("apply", settled=True), step("key", requires=("apply",))], reopened={"apply": "owed"})
+        self.assertEqual(got["key"].state, State.BLOCKED)
 
     def test_a_requirement_that_no_step_declares_is_ignored(self) -> None:
         # the module that owned it is disabled: nothing could ever satisfy it, so it must not block forever
@@ -441,6 +476,44 @@ class WalkTests(unittest.TestCase):
         self.assertIn("Interrupted", self.out.getvalue())
         self.assertNotIn("exited with 130", self.out.getvalue())
 
+    def test_a_reported_exit_prints_its_text_and_not_the_bare_exit_number(self) -> None:
+        report = ExitReport("PLAIN SUMMARY OF 7", "the command reported problems, listed above")
+        steps = [step("a", run=lambda: 7, explain_exit=lambda code: report if code == 7 else None)]
+        self.walk(steps, "", "s")
+        text = self.out.getvalue()
+        self.assertIn("PLAIN SUMMARY OF 7", text)
+        self.assertIn("Not done yet: Title a. the command reported problems, listed above", text)
+        self.assertNotIn("exited with 7", text)
+
+    def test_an_exit_the_step_does_not_explain_keeps_the_generic_line(self) -> None:
+        steps = [step("a", run=lambda: 9, explain_exit=lambda code: None)]
+        self.walk(steps, "", "s")
+        self.assertIn("The step's command exited with 9.", self.out.getvalue())
+
+    def test_an_explainer_is_not_asked_about_ctrl_c_or_success(self) -> None:
+        asked: list[int] = []
+
+        def explain(code: int) -> None:
+            asked.append(code)
+
+        state = {"b": False}
+        self.walk([step("a", run=lambda: 130, explain_exit=explain)], "", "")
+        self.walk([step("b", done=lambda: state["b"], run=self.doing("b", state), explain_exit=explain)], "")
+        self.assertEqual(asked, [])
+        self.assertIn("Interrupted", self.out.getvalue())
+
+    def test_a_failed_apply_that_is_settled_lets_the_steps_behind_it_run(self) -> None:
+        state = {"key": False}
+        report = ExitReport("APPLY SUMMARY", "reported above")
+        apply = step(
+            "apply", settled=True, run=lambda: self.events.append("run:apply") or 7, explain_exit=lambda code: report
+        )
+        key = step("key", done=lambda: state["key"], run=self.doing("key", state), requires=("apply",))
+        statuses = self.walk([apply, key], "", "s", "")  # apply, apply again (skipped), then key
+        self.assertEqual(self.events, ["run:apply", "run:key"])
+        self.assertEqual((statuses["apply"].state, statuses["key"].state), (State.FAILED, State.DONE))
+        self.assertEqual(finish.exit_code([apply, key], statuses), 3)  # apply is still not done
+
     def test_without_a_terminal_a_step_with_nothing_to_run_does_not_ask_for_one(self) -> None:
         steps = [Step("relogin", Text("Log out"), Text("Why"), Text("Log out and in"), check=lambda: Probe(False))]
         self.walk(steps, interactive=False)
@@ -683,6 +756,21 @@ class ApplyStepTests(TempDirCase):
         built.run()
         self.assertEqual(ran, ["apply"])
         self.assertIsNone(built.gate)
+
+    def test_the_exit_explainer_becomes_the_steps_hook(self) -> None:
+        def explain(code: int) -> ExitReport | None:
+            return ExitReport("", f"code {code}")
+
+        built = finish.apply_step(
+            finish.ApplySettings(),
+            directory=self.tmp,
+            shell=FakeShell(),
+            env={},
+            probe=lambda: Probe(False),
+            run=lambda: 0,
+            explain=explain,
+        )
+        self.assertIs(built.explain_exit, explain)
 
     def test_the_gate_runs_in_the_given_directory(self) -> None:
         shell = FakeShell({"gh": Output(0, out="#29 open")})

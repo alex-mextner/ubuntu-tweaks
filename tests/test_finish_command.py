@@ -3,9 +3,11 @@
 import argparse
 import contextlib
 import io
+import json
 import os
 import stat
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -53,12 +55,13 @@ if [ "${2:-}" = "run" ]; then echo "$1 run options=$UBUNTU_TWEAK_MODULE_CONFIG l
 class Plans:
     """The apply step's verdict, scripted."""
 
-    def __init__(self, *verdicts: bool) -> None:
+    def __init__(self, *verdicts: bool, settled: bool = False) -> None:
         self.verdicts = list(verdicts)
+        self.settled = settled
 
     def __call__(self, ctx: Context) -> Probe:
         done = self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0]
-        return Probe(done, "" if done else "2 root actions")
+        return Probe(done, "" if done else "2 root actions", self.settled and not done)
 
 
 class FinishCommandCase(TempDirCase):
@@ -311,6 +314,88 @@ class ApplyProbeTests(unittest.TestCase):
     def test_an_interrupted_last_run_is_not_done(self) -> None:
         self.assertFalse(finish.apply_probe([], self.run_of("done", finished=False)).ok)
 
+    def test_a_finished_run_that_reported_every_remaining_root_action_is_settled(self) -> None:
+        failing, waiting = self.Root(), self.Root()
+        failing.key, waiting.key = "f", "w"
+        last = Run(
+            "1",
+            "apply --commit",
+            0.0,
+            True,
+            7,
+            [
+                Entry(action_key(failing), "system", "x", "failed", "boom"),
+                Entry(action_key(waiting), "system", "x", "manual", "key"),
+            ],
+        )
+        probe = finish.apply_probe([failing, waiting], last)
+        self.assertFalse(probe.ok)
+        self.assertTrue(probe.settled)
+        self.assertEqual(probe.detail, ui.t("finish.apply.reported", n=1))
+
+    def test_a_failed_item_that_needs_no_root_settles_a_finished_run(self) -> None:
+        probe = finish.apply_probe([], self.run_of("done", "failed"))
+        self.assertFalse(probe.ok)
+        self.assertTrue(probe.settled)
+
+    def test_a_blocked_root_action_the_run_reported_is_settled(self) -> None:
+        root = self.Root()
+        last = Run("1", "apply --commit", 0.0, True, 7, [Entry(action_key(root), "system", "x", "blocked", "")])
+        probe = finish.apply_probe([root], last)
+        self.assertFalse(probe.ok)
+        self.assertTrue(probe.settled)
+
+    def test_deferred_root_work_never_settles_apply(self) -> None:
+        # exit 6: root was not obtained, so a run with root still has all of it to do; nothing behind apply may start
+        root = self.Root()
+        last = Run(
+            "1", "apply --commit", 0.0, True, 6, [Entry(action_key(root), "system", "x", "deferred", "needs root")]
+        )
+        probe = finish.apply_probe([root], last)
+        self.assertFalse(probe.ok)
+        self.assertFalse(probe.settled)
+
+    def test_deferred_entries_keep_apply_unsettled_even_when_the_plan_lists_no_root_action(self) -> None:
+        last = Run("1", "apply --commit", 0.0, True, 6, [Entry("system|x|d", "system", "x", "deferred", "needs root")])
+        probe = finish.apply_probe([], last)
+        self.assertFalse(probe.ok)
+        self.assertFalse(probe.settled)
+
+    def test_a_settled_run_counts_failed_and_blocked_items_only(self) -> None:
+        root = self.Root()
+        last = Run(
+            "1",
+            "apply --commit",
+            0.0,
+            True,
+            7,
+            [
+                Entry(action_key(root), "system", "x", "blocked", ""),
+                Entry("system|x|f", "system", "x", "failed", "boom"),
+                Entry("system|x|w", "system", "x", "manual", ""),
+            ],
+        )
+        probe = finish.apply_probe([root], last)
+        self.assertTrue(probe.settled)
+        self.assertEqual(probe.detail, ui.t("finish.apply.reported", n=2))
+
+    def test_apply_that_never_ran_with_root_work_left_is_not_settled(self) -> None:
+        probe = finish.apply_probe([self.Root()], None)
+        self.assertFalse(probe.ok)
+        self.assertFalse(probe.settled)
+
+    def test_an_interrupted_run_is_not_settled(self) -> None:
+        probe = finish.apply_probe([], self.run_of("done", "failed", finished=False))
+        self.assertFalse(probe.ok)
+        self.assertFalse(probe.settled)
+
+    def test_a_root_action_no_run_reported_keeps_the_step_unsettled_even_with_a_failure(self) -> None:
+        failed = Entry("system|x|other", "system", "x", "failed", "boom")
+        probe = finish.apply_probe([self.Root()], Run("1", "apply --commit", 0.0, True, 7, [failed]))
+        self.assertFalse(probe.ok)
+        self.assertFalse(probe.settled)
+        self.assertEqual(probe.detail, ui.t("finish.apply.left", root=1, problems=1))
+
     @unittest.skipUnless(has_gi(), "needs PyGObject")
     def test_a_plan_that_cannot_be_computed_keeps_the_step_pending_with_the_reason(self) -> None:
         from ubuntu_tweaks import reconcile
@@ -400,6 +485,44 @@ class CommandLineTests(FinishCommandCase):
         self.assertIn("apply", argv)
         self.assertIn("--commit", argv)
         self.assertIn("All done", out.getvalue())
+
+    def test_a_partial_apply_is_explained_and_the_steps_behind_it_still_run(self) -> None:
+        directory = self.module("a", "a-step", extra='requires = ["apply"]')
+        document = {
+            "id": "1",
+            "command": "apply --commit",
+            "started": time.time() + 60,  # after the apply this test starts
+            "finished": True,
+            "exit_code": 7,
+            "entries": [
+                {"key": "link||l", "kind": "link", "text": "link x", "status": "done", "detail": ""},
+                {
+                    "key": "system-module|passwords-app-polkit|system-module:passwords-app-polkit",
+                    "kind": "system-module",
+                    "text": "run passwords-app-polkit",
+                    "status": "failed",
+                    "detail": "sudo -- x install: exited with status 1: refusing the policy: a DOCTYPE could hide actions",
+                },
+            ],
+        }
+        write(self.tmp / "state" / "ubuntu-tweaks" / "run-journal.json", json.dumps(document))
+        out = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / "state")}),
+            mock.patch.object(finish_command, "_apply_probe", Plans(False, settled=True)),
+            mock.patch.object(finish_command, "run_streamed", return_value=7),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            mock.patch("builtins.input", return_value=""),
+            contextlib.redirect_stdout(out),
+        ):
+            code = finish_command.run(self.context(), argparse.Namespace(dry_run=False, step=None, yes=False))
+        text = out.getvalue()
+        self.assertEqual(code, 3)  # apply is still not done
+        self.assertIn("1 changed, 1 failed, 0 blocked", text)
+        self.assertIn("refusing the policy: a DOCTYPE could hide actions", text)
+        self.assertIn("ubuntu-tweak apply --commit --only passwords-app-polkit", text)
+        self.assertNotIn("exited with 7", text)
+        self.assertTrue((directory / "a-step.done").exists())  # the step behind apply was not held back by it
 
     def test_a_terminal_on_stdin_alone_is_enough_to_walk(self) -> None:
         # `finish-setup | tee log` still has a terminal to answer on

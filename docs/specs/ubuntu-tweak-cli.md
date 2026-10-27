@@ -770,7 +770,7 @@ check = ["./finish", "icloud-signin", "check"]   # required: exit 0 = done; read
 prepare = ["./finish", "icloud-signin", "prepare"]   # optional machine part before the human one; non-zero = failed
 run = ["passwords-app", "signin"]    # optional: the interactive command, it owns the terminal
 gate = ["./finish", "icloud-signin", "gate"]   # optional: empty stdout = go; any output = wait (shown as the reason)
-requires = ["apply"]             # optional: step ids that must be done first
+requires = ["apply"]             # optional: step ids that must have finished first (settled or done, see below)
 optional = false                 # an optional step never keeps the exit code at 3
 reapply = false                  # true: once this step is done `apply` has more root work and runs once more
 ```
@@ -785,14 +785,26 @@ and within 60 seconds; `prepare` and `run` own the terminal, have no time limit 
 
 State of a step, decided by the commands alone: **done** (`check` exits 0), **pending** (it does not), **wait** (a
 `gate` printed something: it says plainly `WAIT` and why, and the step is not run), **blocked** (a `requires` step
-is not done) and, after a run, **failed** (the `prepare` or `run` command failed, or `check` still fails). The
-built-in `apply` step is **done** when no root action is left that `apply` could still do and the last finished journal
-run has no failed or deferred item (*Reconcile and failover*); a root action that run reported as `manual`
-waits for a person (another finish step says what to do) and does not count, so a root module that waits for the AMO
-key cannot keep the step that has to come first pending for ever. The plan cannot see that the key has since made that
-action possible, so a step with `reapply = true` sends `apply` back to *pending* once it is done; that debt is kept
-in `finish-state.json` next to the run journal until `apply` has run without a problem, so quitting before it or a
-failing `apply` cannot lose it. The `gate` of `apply`
+has not finished, see below) and, after a run, **failed** (the `prepare` or `run` command failed, or `check` still
+fails). `requires` means *the other step has finished*, not *the other step is done*: a required step is satisfied when
+its check passes or when it is **settled**, i.e. it ran to its end and nothing is left that only another run could do.
+Only the built-in `apply` step can be settled without being done (below); every other step is settled exactly when it
+is done. The built-in `apply` step is **done** when no root action is left that `apply` could still do and the last
+finished journal run has no failed or deferred item (*Reconcile and failover*); a root action that run reported as
+`manual` waits for a person (another finish step says what to do) and does not count, so a root module that waits for
+the AMO key cannot keep the step that has to come first pending for ever. It is **settled** when the last journal run
+is finished (not interrupted) and every root action still in the live plan is one that run reported (`failed`,
+`blocked` or `manual`): nothing is left that no run attempted. A `deferred` action (root was not obtained, exit 6) is
+work a run with root still has to do, so it never settles. A settled `apply` whose own `gate` says wait does not satisfy
+`requires` either (the steps behind it stay blocked until the gate lets it run again). It stays unsettled when `apply`
+never ran, was
+interrupted, or root work remains that the last run did not report. So a failed module (a polkit action refused, an apt
+repository that does not update) keeps the `apply` step not done, with the step shown as failed and the problem list
+below, but does not keep the steps that require `apply` (the passwords-app sign-in, the Firefox steps, hyperdock) from
+starting: they are independent of that module and their own `check` says whether they can proceed. The plan cannot see
+that the key has since made that action possible, so a step with `reapply = true` sends `apply` back to *pending* (and
+unsettled) once it is done; that debt is kept in `finish-state.json` next to the run journal until `apply` has run
+without a problem, so quitting before it or a failing `apply` cannot lose it. The `gate` of `apply`
 comes from `[finish.apply]` in `profile.toml` / `machine.toml`:
 
 ```toml
@@ -802,6 +814,26 @@ gate_why = "the dock code the apply links must be released first"      # and gat
 ```
 
 A gate that cannot run (non-zero exit, command not found) is **wait** with the error line: never a silent go.
+
+`apply --commit` ends with a non-zero exit when it did not converge: 7 (*PARTIAL*: an action failed or was blocked), 6
+(*NO_ROOT*: root could not be obtained and root actions were left) or 3 (*DRIFT*: the settings did not converge). The
+`apply` step does not treat that as a crashed command: right after the run `finish` prints, in the user's language, a
+plain explanation read from the last run journal (`run-journal.json`): for 7 how many items changed, failed and were
+blocked, every failed or blocked item with its module (the middle part of the `system-module|<module>|...` key; a
+failure that is not a module run is named by its description) and the first line of its cause (the journal already
+masks secrets; for a command failure the text after its last `exited with status N:` is the cause, clipped to 200
+characters), the exact retry `ubuntu-tweak apply --commit --only <module>` (the global flags the user gave are
+repeated; a failure that is not a module run says to run `ubuntu-tweak apply --commit`), and that the remaining steps
+go on and are finished with the `finish` command the summary names. For 6 it says root was not obtained, the root
+remainder was not applied and the command to run from a normal terminal; for 3 that the settings did not converge, to
+run `apply` again and that `ubuntu-tweak status` shows what differs. Any other non-zero code keeps the generic line
+(`The step's command exited with N`) and, when the session log path is known (`UBUNTU_TWEAK_SESSION_LOG`), names it. Exit
+130 (Ctrl-C) is *interrupted*, unchanged. The step is still not done after such a run: its failed detail says `apply`
+reported problems and that they are listed above, instead of an opaque exit number. Only a journal started after this
+`apply` was launched is read (a run that died before writing its own is never blamed for an older run's items); a
+command that failed without saying anything reads `exited with status N, no output` (the module's argv, which carries
+its options, is never shown); control characters of the journal text are dropped before printing; the module name in
+the retry command is shell-quoted.
 
 The profile's own steps (what belongs to no module, such as a chore on another host) are `[[finish.steps]]` in
 `profile.toml` and `machine.toml`, with the same keys; their `./` commands run from the profile directory and they
