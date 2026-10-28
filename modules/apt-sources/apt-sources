@@ -14,13 +14,14 @@ in the profile), `key_format` (asc | gpg), `fingerprint` (REQUIRED while enabled
 A key is installed only when the primary-key fingerprints of the file equal the pinned ones; keys are tried in the
 order key_url, key_urls, key_cached; one failing source never blocks the others; network causes only make the
 installer exit 75. `check`, `plan` and `install` all read one `inspect()`. `APT_SOURCES_ROOT=DIR` stages every path
-below DIR (tests; needs no root). Spec: docs/specs/apt-sources.md.
+below DIR (tests; needs no root). A file declaring a managed repository with another Signed-By is a conflict apt
+rejects: it is migrated before the managed file is written, or blocks the source (needs manual); the last step of
+`install` (and a finding of `check`) asks apt itself via ubuntu_tweaks.apt_consistency. Spec: docs/specs/apt-sources.md.
 """
 
 from __future__ import annotations
 
 import os
-import platform
 import re
 import shutil
 import sys
@@ -33,6 +34,12 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from ubuntu_tweaks.apt_consistency import (  # noqa: E402
+    Declaration,
+    apt_sources_error,
+    declarations,
+    normalize_uri,
+)
 from ubuntu_tweaks.module_script import (  # noqa: E402
     Finding,
     Module,
@@ -64,6 +71,8 @@ TRANSIENT_TEXT = re.compile(
     re.IGNORECASE,
 )
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
+APT_REJECTED_SOURCE = re.compile(r"regarding source (\S+) (\S+?):")  # apt's "Conflicting values ..." error
+APT_UNREADABLE = "The list of sources could not be read"  # the line apt adds after any source-list error
 FINGERPRINT = re.compile(r"(?:[0-9A-F]{40}|[0-9A-F]{64})")
 OPTIONS = {
     "name",
@@ -82,7 +91,6 @@ OPTIONS = {
 }
 KEY_FORMATS = ("asc", "gpg")
 FPR_FIELD = 9  # `gpg --with-colons`: the fingerprint is the tenth field of an `fpr` record
-ARCH_NAMES = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "armhf"}
 
 
 class SourceFailure(Exception):
@@ -127,6 +135,11 @@ class Source:
     @property
     def key_name(self) -> str:
         return f"{self.name}.{self.key_format}"
+
+    @property
+    def signed_by(self) -> str:
+        """The ``Signed-By`` of the managed file: the key this module stores for the source."""
+        return f"/{KEYS_DIR}/{self.key_name}"
 
     @property
     def other_key_name(self) -> str:
@@ -269,10 +282,6 @@ def parse_options(options: Mapping[str, object]) -> list[Source]:
 # -- rendering and parsing of apt files ----------------------------------------------------------------------
 
 
-def normalize_uri(uri: str) -> str:
-    return uri.replace("$(ARCH)", ARCH_NAMES.get(platform.machine(), platform.machine())).rstrip("/")
-
-
 def render_sources(source: Source) -> str:
     lines = [
         f"Types: {' '.join(source.types)}",
@@ -283,7 +292,7 @@ def render_sources(source: Source) -> str:
         lines.append(f"Components: {' '.join(source.components)}")
     if source.architectures:
         lines.append(f"Architectures: {' '.join(source.architectures)}")
-    lines.append(f"Signed-By: /{KEYS_DIR}/{source.key_name}")
+    lines.append(f"Signed-By: {source.signed_by}")
     return HEADER + "\n".join(lines) + "\n"
 
 
@@ -293,43 +302,12 @@ def render_pin(source: Source) -> str:
 
 def declared_repos(path: Path, text: str) -> set[tuple[str, str]]:
     """The ``(uri, suite)`` pairs a ``.list`` (one-line) or ``.sources`` (deb822) file declares; comments ignored."""
-    return _deb822_repos(text) if path.suffix == ".sources" else _list_repos(text)
+    return {(declaration.uri, declaration.suite) for declaration in declarations(path, text)}
 
 
-def _list_repos(text: str) -> set[tuple[str, str]]:
-    found: set[tuple[str, str]] = set()
-    for line in text.splitlines():
-        words = line.split("#", 1)[0].split()
-        if len(words) < 3 or words[0] not in ("deb", "deb-src"):
-            continue
-        index = 1
-        if words[index].startswith("["):
-            while index < len(words) and not words[index].endswith("]"):
-                index += 1
-            index += 1
-        if index + 1 < len(words):
-            found.add((normalize_uri(words[index]), words[index + 1]))
-    return found
-
-
-def _deb822_repos(text: str) -> set[tuple[str, str]]:
-    found: set[tuple[str, str]] = set()
-    for stanza in re.split(r"\n\s*\n", text):
-        fields: dict[str, str] = {}
-        last = ""
-        for line in stanza.splitlines():
-            if line.lstrip().startswith("#") or not line.strip():
-                continue
-            if line[0] in " \t" and last:
-                fields[last] += " " + line.strip()
-            elif ":" in line:
-                last, _, value = line.partition(":")
-                last = last.strip().lower()
-                fields[last] = value.strip()
-        for uri in fields.get("uris", "").split():
-            for suite in fields.get("suites", "").split():
-                found.add((normalize_uri(uri), suite))
-    return found
+def clash_text(clashes: Sequence[tuple[Source, Declaration]]) -> str:
+    """``Signed-By <theirs> != <managed>`` for the clashing declarations; empty when nothing clashes."""
+    return "; ".join(sorted({f"Signed-By {item.signed_by} != {source.signed_by}" for source, item in clashes}))
 
 
 def mismatch(wanted: frozenset[str], found: frozenset[str]) -> str:
@@ -346,7 +324,9 @@ def is_armored(data: bytes) -> bool:
 @dataclass
 class Change:
     """One thing ``install`` will do to one path. ``needs`` names every source that must have converged before a
-    removal of a file several sources share is allowed (the file is their only declaration meanwhile)."""
+    removal of a file several sources share is allowed (the file is their only declaration meanwhile). ``conflict``
+    marks the removal of a file that declares the repository with another ``Signed-By``: it goes before any managed
+    file is written next to it."""
 
     source: str
     action: str  # write | replace | remove
@@ -356,6 +336,7 @@ class Change:
     note: str = ""
     key: bool = False  # the content comes from the key candidates, not from `text`
     needs: tuple[str, ...] = ()
+    conflict: bool = False
 
     @property
     def shared(self) -> bool:
@@ -364,16 +345,23 @@ class Change:
 
 
 def apply_order(change: Change) -> int:
-    """Key first (a source never appears without its key), files next, removals (legacy, disabled) last."""
-    return 0 if change.key else 2 if change.action == "remove" else 1
+    """Key first (a source never appears without its key), then the removal of a conflicting rival, then files,
+    then the other removals (legacy, disabled)."""
+    if change.key:
+        return 0
+    if change.conflict:
+        return 1
+    return 3 if change.action == "remove" else 2
 
 
 @dataclass(frozen=True)
 class Duplicate:
-    """A hand-written file that declares only repositories some enabled sources declare."""
+    """A hand-written file that declares only repositories some enabled sources declare. ``conflict`` is the
+    ``Signed-By`` clash with the managed file ("" when the key is the same or unset: apt only warns)."""
 
     path: Path
     owners: tuple[str, ...]
+    conflict: str = ""
 
 
 @dataclass
@@ -383,6 +371,7 @@ class Inspection:
     manual: list[Finding] = field(default_factory=list)
     unmanaged: list[Finding] = field(default_factory=list)
     refresh: list[str] = field(default_factory=list)  # names whose index refresh is pending
+    blocked: set[str] = field(default_factory=set)  # sources whose managed file would sit next to a conflict
 
     @property
     def clean(self) -> bool:
@@ -487,10 +476,15 @@ class AptSources(Module):
         files = self._list_files()
         duplicates = self._duplicates(files, managed_names, enabled, result)
         for source in self._sources:
-            if source.enabled:
-                self._inspect_enabled(source, duplicates, result)
-            else:
+            if not source.enabled:
                 self._inspect_disabled(source, result)
+                continue
+            first = len(result.changes)
+            self._inspect_enabled(source, duplicates, result)
+            if source.name in result.blocked:
+                # nothing is written next to a file the module may not edit, but a file shared with other sources
+                # stays on the list: they must not write their managed file next to it either
+                result.changes[first:] = [change for change in result.changes[first:] if change.shared]
         claimed = {duplicate.path for duplicate in duplicates}
         for path in files:
             if path.name in managed_names or path in claimed:
@@ -517,7 +511,8 @@ class AptSources(Module):
         self, files: list[Path], managed_names: set[str], enabled: list[Source], result: Inspection
     ) -> list[Duplicate]:
         """Hand-written files declaring a repository an enabled source declares. A file with other repositories too
-        (or ``sources.list`` itself) is never edited: it becomes a manual finding."""
+        (or ``sources.list`` itself) is never edited: it becomes a manual finding, and a conflicting one blocks the
+        sources it conflicts with."""
         found: list[Duplicate] = []
         main_list = self._p(MAIN_LIST)
         candidates = [path for path in files if path.name not in managed_names]
@@ -528,16 +523,53 @@ class AptSources(Module):
             text = read_text_or_none(path) or ""
             if text.startswith(MARKER):
                 continue
-            repos = declared_repos(path, text)
+            everything = declarations(path, text)
+            declared = [declaration for declaration in everything if declaration.active]  # apt ignores the others
+            repos = {(declaration.uri, declaration.suite) for declaration in declared}
             owners = tuple(source.name for source in enabled if repos & source.repos())
             if not owners:
                 continue
-            if path == main_list or not repos <= union:
-                detail = "it also declares other repositories (or is sources.list): remove the duplicate lines by hand"
-                result.manual.append(Finding(False, f"{self._shown(path)} duplicates {owners[0]}", detail, manual=True))
+            clashes = self._clashes(declared, enabled)
+            # a file is only ever removed whole: a disabled stanza of another repository still makes it "mixed"
+            mixed = {(declaration.uri, declaration.suite) for declaration in everything} - union
+            if path == main_list or mixed:
+                if clashes:
+                    self._block(path, clashes, result)
+                else:
+                    detail = (
+                        "it also declares other repositories (or is sources.list): remove the duplicate lines by hand"
+                    )
+                    result.manual.append(
+                        Finding(False, f"{self._shown(path)} duplicates {owners[0]}", detail, manual=True)
+                    )
                 continue
-            found.append(Duplicate(path, owners))
+            found.append(Duplicate(path, owners, clash_text(clashes)))
         return found
+
+    @staticmethod
+    def _clashes(declared: list[Declaration], enabled: list[Source]) -> list[tuple[Source, Declaration]]:
+        """Declarations of an enabled source's repository whose ``Signed-By`` differs from the managed one: the pairs
+        apt rejects. An entry without ``Signed-By`` only duplicates (a warning)."""
+        return [
+            (source, declaration)
+            for declaration in declared
+            if declaration.active and declaration.signed_by is not None
+            for source in enabled
+            if (declaration.uri, declaration.suite) in source.repos() and declaration.signed_by != source.signed_by
+        ]
+
+    def _block(self, path: Path, clashes: list[tuple[Source, Declaration]], result: Inspection) -> None:
+        managed = ", ".join(sorted({self._managed_shown(source) for source, _ in clashes}))
+        lines = " / ".join(dict.fromkeys(declaration.text for _, declaration in clashes))
+        detail = (
+            f"{clash_text(clashes)}: apt rejects this and the module never edits this file; "
+            f"fix: as root, delete these lines from {self._shown(path)}: {lines}"
+        )
+        result.manual.append(Finding(False, f"{self._shown(path)} conflicts with {managed}", detail, manual=True))
+        result.blocked.update(source.name for source, _ in clashes)
+
+    def _managed_shown(self, source: Source) -> str:
+        return self._shown(self._p(f"{SOURCES_DIR}/{source.sources_name}"))
 
     def _inspect_disabled(self, source: Source, result: Inspection) -> None:
         sources_path = self._p(f"{SOURCES_DIR}/{source.sources_name}")
@@ -572,19 +604,25 @@ class AptSources(Module):
         for duplicate in duplicates:
             if duplicate.owners[0] != source.name:
                 continue
-            result.facts.append(
-                Finding(
-                    False, self._shown(duplicate.path), f"hand-written file of the same repository as {source.name}"
-                )
-            )
+            shown = self._shown(duplicate.path)
+            if duplicate.conflict:
+                fix = f"sudo rm {shown} (install backs it up and removes it first)"
+                detail = f"{duplicate.conflict}: apt rejects both files; fix: {fix}"
+                result.facts.append(Finding(False, f"{shown} conflicts with {self._managed_shown(source)}", detail))
+                note = f"conflicts with {source.sources_name}: {duplicate.conflict}"
+            else:
+                detail = f"hand-written file of the same repository as {source.name}"
+                result.facts.append(Finding(False, shown, detail))
+                note = f"migrated to {source.sources_name}"
             result.changes.append(
                 Change(
                     source.name,
                     "remove",
                     duplicate.path,
                     backup=True,
-                    note=f"migrated to {source.sources_name}",
+                    note=note,
                     needs=duplicate.owners,
+                    conflict=bool(duplicate.conflict),
                 )
             )
 
@@ -637,7 +675,13 @@ class AptSources(Module):
 
     def findings(self) -> list[Finding]:
         result = self.inspect()
-        return [*result.facts, *result.manual, *result.unmanaged]
+        problem = self._own_problem(apt_sources_error(self._apt_root(), self._process))
+        accepted = Finding(
+            problem is None,
+            "apt accepts the configured sources",
+            "" if problem is None else problem.replace("\n", " ") + self._declaring(problem),
+        )
+        return [*result.facts, accepted, *result.manual, *result.unmanaged]
 
     # -- plan ----------------------------------------------------------------------------------------------
 
@@ -675,8 +719,10 @@ class AptSources(Module):
         lines = [f"  back up {shown} to {backup}/{change.path.name}"] if change.backup and change.path.exists() else []
         if change.action == "remove":
             note = f" ({change.note})" if change.note else ""
-            if change.shared:
+            if change.shared and not change.conflict:
                 note += f", only after {', '.join(change.needs)} converged"
+            elif change.conflict:
+                note += ", before any managed file is written (after the keys of its owners are in place)"
             return [*lines, f"  remove {shown}{note}"]
         old = read_text_or_none(change.path)
         lines.append(f"  {'replace' if change.action == 'replace' else 'write'} {shown}")
@@ -743,17 +789,12 @@ class AptSources(Module):
         change.path.unlink(missing_ok=True)
         return f"removed {change.path.name}" + (f" ({change.note})" if change.note else "")
 
-    def _converge(self, source: Source, changes: list[Change]) -> tuple[list[str], bool]:
-        """Apply one source's changes in ``apply_order``; ``wrote`` says whether the index needs a refresh."""
+    def _converge(self, changes: list[Change]) -> tuple[list[str], bool]:
+        """Apply one source's file changes in ``apply_order``; ``wrote`` says whether the index needs a refresh."""
         done: list[str] = []
         wrote = False
         for change in sorted(changes, key=apply_order):
-            if change.key:
-                data, origin = self._acquire_key(source)
-                write_file(change.path, data, 0o644)
-                done.append(f"key from {origin}")
-                wrote = True
-            elif change.action == "remove":
+            if change.action == "remove":
                 done.append(self._remove(change))
             else:
                 if change.backup:
@@ -800,40 +841,52 @@ class AptSources(Module):
             raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
         result = self.inspect()
         if result.clean:
+            self._require_accepted(result)
             sys.stdout.write("nothing to change\n")
             return
         by_source = result.by_source()
         failures: list[Failure] = []
+        notes: dict[str, list[str]] = {}
+        failed = self._install_keys(by_source, notes, failures)
+        held = self._remove_conflicts([change for change in result.changes if change.conflict], failed | result.blocked)
         written: set[str] = set()
         deferred: list[Change] = []
         for source in self._sources:
-            changes = by_source.get(source.name, [])
-            shared = [change for change in changes if change.shared]
-            deferred += shared
-            changes = [change for change in changes if not change.shared]
-            if not changes:
-                if not shared:
-                    sys.stdout.write(f"ok      {source.name}: unchanged\n")
+            rest = [change for change in by_source.get(source.name, []) if not change.key and not change.conflict]
+            if source.name in held:  # a rival declaration of the repository is still there: no managed file next to it
+                rest = [
+                    change
+                    for change in rest
+                    if change.path.name != source.sources_name
+                    and not (
+                        change.action == "remove" and not change.shared and change.path.parent == self._p(SOURCES_DIR)
+                    )
+                ]  # nor may a legacy file of this source go: until its .sources is written it is the declaration
+            deferred += [change for change in rest if change.shared]
+            if source.name in failed:
                 continue
-            try:
-                done, wrote = self._converge(source, changes)
-            except SourceFailure as error:
-                failures.append(Failure(source.name, str(error), error.transient))
-                sys.stdout.write(f"FAILED  {source.name}: {error}\n")
+            if source.name in result.blocked:
+                sys.stdout.write(f"kept    {source.name}: nothing written, a conflicting file needs manual removal\n")
                 continue
-            if wrote and source.enabled:
+            done, wrote = self._converge([change for change in rest if not change.shared])
+            done = [*notes.get(source.name, []), *done]
+            if (wrote or notes.get(source.name)) and source.enabled and source.name not in held:
                 written.add(source.name)
-            sys.stdout.write(f"ok      {source.name}: {'; '.join(done)}\n")
-        self._remove_shared(deferred, {failure.name for failure in failures})
+            if done:
+                sys.stdout.write(f"ok      {source.name}: {'; '.join(done)}\n")
+            elif not any(change.source == source.name for change in result.changes):
+                sys.stdout.write(f"ok      {source.name}: unchanged\n")
+        self._remove_shared(deferred, failed | result.blocked | set(held))
         enabled = {source.name for source in self._sources if source.enabled}
-        to_refresh = sorted((written | set(result.refresh)) & enabled)
+        withheld = sorted(set(result.refresh) & (failed | result.blocked | held))  # no managed file to refresh yet
+        to_refresh = sorted(((written | set(result.refresh)) & enabled) - set(withheld))
         if to_refresh:
-            self._write_pending(to_refresh)  # on disk before the network call: a crash leaves it as drift
-            refreshed, failed = self._refresh(to_refresh)
-            self._write_pending([failure.name for failure in failed])
+            self._write_pending([*to_refresh, *withheld])  # on disk before the network call: a crash leaves it as drift
+            refreshed, refresh_failed = self._refresh(to_refresh)
+            self._write_pending([*(failure.name for failure in refresh_failed), *withheld])
             for name in refreshed:
                 sys.stdout.write(f"ok      {name}: apt index refreshed\n")
-            for failure in failed:
+            for failure in refresh_failed:
                 sys.stdout.write(f"FAILED  {failure.name}: apt-get update: {failure.cause}\n")
                 failures.append(Failure(failure.name, f"apt-get update: {failure.cause}", failure.transient))
         if failures:
@@ -841,18 +894,111 @@ class AptSources(Module):
             if all(failure.transient for failure in failures):
                 raise TempFail(summary)
             raise ModuleError(summary)
-        if result.manual:
-            raise NeedsManual("; ".join(f"{item.subject}: {item.detail}" for item in result.manual))
+        self._require_accepted(result)
 
-    def _remove_shared(self, deferred: Sequence[Change], failed: set[str]) -> None:
+    def _install_keys(
+        self, by_source: Mapping[str, Sequence[Change]], notes: dict[str, list[str]], failures: list[Failure]
+    ) -> set[str]:
+        """Every source's key goes first: a source never appears without it, and a rival declaration of the repository
+        is removed only once the keys of all its owners are in place. Returns the sources whose key failed."""
+        failed: set[str] = set()
+        for source in self._sources:
+            for change in by_source.get(source.name, []):
+                if not change.key:
+                    continue
+                try:
+                    data, origin = self._acquire_key(source)
+                except SourceFailure as error:
+                    failures.append(Failure(source.name, str(error), error.transient))
+                    sys.stdout.write(f"FAILED  {source.name}: {error}\n")
+                    failed.add(source.name)
+                    continue
+                write_file(change.path, data, 0o644)
+                notes.setdefault(source.name, []).append(f"key from {origin}")
+        return failed
+
+    def _remove_conflicts(self, conflicts: Sequence[Change], waiting: set[str]) -> set[str]:
+        """Remove the files that declare a managed repository with another ``Signed-By``, before any managed file is
+        written next to them. One whose owner has no key (or is blocked) stays, and all its owners are returned so that
+        their ``.sources`` is not written. A held owner has no managed file either, so a file it shares with a third
+        source is held too (to a fixpoint): that file may be the held owner's only declaration of another repository."""
+        stuck_owners = set(waiting)
+        held: set[str] = set()
+        pending = list(conflicts)
+        grew = True
+        while grew:
+            grew = False
+            for change in list(pending):
+                stuck = sorted(stuck_owners & set(change.needs))
+                if not stuck:
+                    continue
+                pending.remove(change)
+                sys.stdout.write(
+                    f"held    {change.path.name}: {change.note}; waits for {', '.join(stuck)} to converge, "
+                    f"so {', '.join(f'{owner}.sources' for owner in change.needs)} is not written meanwhile\n"
+                )
+                grew = grew or not set(change.needs) <= stuck_owners
+                held.update(change.needs)
+                stuck_owners.update(change.needs)
+        for change in pending:
+            sys.stdout.write(f"ok      {'+'.join(change.needs)}: {self._remove(change)}\n")
+        return held
+
+    def _require_accepted(self, result: Inspection) -> None:
+        """The post-condition: apt reads the configured sources. A known manual step stays the reported reason."""
+        problem = self._own_problem(apt_sources_error(self._apt_root(), self._process))
+        manual = "; ".join(f"{item.subject}: {item.detail}" for item in result.manual)
+        if problem is None:
+            if manual:
+                raise NeedsManual(manual)
+            return
+        cause = problem.replace("\n", " ")
+        if manual:
+            raise NeedsManual(f"{manual}; apt reports: {cause}")
+        raise ModuleError(f"apt rejects the configured sources: {cause}{self._declaring(problem)}")
+
+    def _apt_root(self) -> Path | None:
+        return None if self._root == Path("/") else self._root
+
+    def _declaring(self, problem: str) -> str:
+        """`` (declared in: a, b)`` for the repository apt's error names: the files to look at."""
+        repos = {(normalize_uri(uri), suite) for uri, suite in APT_REJECTED_SOURCE.findall(problem)}
+        files = [*self._list_files(), self._p(MAIN_LIST)]
+        shown = [
+            self._shown(path) for path in files if repos and repos & declared_repos(path, read_text_or_none(path) or "")
+        ]
+        return f" (declared in: {', '.join(shown)})" if shown else ""
+
+    def _remove_shared(self, deferred: Sequence[Change], waiting: set[str]) -> None:
         """A hand-written file that several sources share goes only once every one of them converged: until then it is
-        still the only declaration of the repository whose key could not be fetched."""
+        still the only declaration of the repository whose key could not be fetched (or whose managed file was not
+        written)."""
         for change in deferred:
-            waiting = sorted(failed & set(change.needs))
-            if waiting:
-                sys.stdout.write(f"kept    {change.path.name}: waits for {', '.join(waiting)} to converge\n")
+            stuck = sorted(waiting & set(change.needs))
+            if stuck:
+                sys.stdout.write(f"kept    {change.path.name}: waits for {', '.join(stuck)} to converge\n")
             else:
                 sys.stdout.write(f"ok      {'+'.join(change.needs)}: {self._remove(change)}\n")
+
+    def _own_problem(self, problem: str | None) -> str | None:
+        """apt's complaint without the lines that only name a repository this module does not manage: one broken
+        unrelated repository must not fail this module. A line that names no repository still counts, and the generic
+        "could not be read" line stays only when something of ours stays with it."""
+        if problem is None:
+            return None
+        managed = {repo for source in self._sources if source.enabled for repo in source.repos()}
+        kept: list[str] = []
+        generic: list[str] = []
+        dropped = False
+        for line in problem.splitlines():
+            named = APT_REJECTED_SOURCE.findall(line)
+            if named and not any((normalize_uri(uri), suite) in managed for uri, suite in named):
+                dropped = True
+                continue
+            (generic if APT_UNREADABLE in line else kept).append(line)
+        if not dropped:
+            return problem
+        return "\n".join([*kept, *generic]) if kept else None
 
 
 def build(env: Mapping[str, str]) -> AptSources:
