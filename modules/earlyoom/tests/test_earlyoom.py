@@ -19,7 +19,7 @@ sys.dont_write_bytecode = True
 import earlyoom_lib as eo  # noqa: E402
 
 from ubuntu_tweaks.manifest import load_manifest  # noqa: E402
-from ubuntu_tweaks.module_script import ModuleError  # noqa: E402
+from ubuntu_tweaks.module_script import APT_ENVIRONMENT, ModuleError  # noqa: E402
 from ubuntu_tweaks.process import CommandError, CommandResult, Process  # noqa: E402
 
 # The laptop's /etc/default/earlyoom (migration copy), the values these tests pin the renderer against.
@@ -52,6 +52,7 @@ class FakeMachine(Process):
         self.limit_hit = self.user_limit_hit = False
         self.fail = None  # an argv prefix whose execution raises
         self.executed = []
+        self.apt_runs = []  # (stdin text, the noninteractive variables the child would see) per apt-get call
 
     def _stays_up(self, user=False):
         path = self.home / eo.USER_ENV if user else self.root / eo.DEFAULTS_FILE
@@ -76,6 +77,8 @@ class FakeMachine(Process):
     def execute(self, argv, *, input_text=None, cwd=None):
         argv = list(argv)
         self.executed.append(tuple(argv))
+        if argv[0] == "apt-get":
+            self.apt_runs.append((input_text, {name: os.environ.get(name) for name in APT_ENVIRONMENT}))
         if self.fail and tuple(argv[: len(self.fail)]) == self.fail:
             raise CommandError(f"{' '.join(argv)}: exited with status 1")
         if argv[0] == "apt-get" and argv[1] == "install":
@@ -307,6 +310,12 @@ class SystemInstall(Base):
         self.assertEqual(
             [c for c in self.machine.executed if "restart" in c], [("systemctl", "restart", "earlyoom.service")]
         )
+
+    def test_apt_runs_without_a_terminal_and_noninteractively(self):
+        # ticket #126: a grandchild of sudo-rs that touches the pty is stopped for ever; stdin must be at EOF
+        self.system(LAPTOP_OPTIONS).apply()
+
+        self.assertEqual(self.machine.apt_runs, [("", APT_ENVIRONMENT)])
 
     def test_a_second_install_changes_nothing_and_restarts_nothing(self):
         module = self.system(LAPTOP_OPTIONS)

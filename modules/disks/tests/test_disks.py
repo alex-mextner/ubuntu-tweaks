@@ -19,6 +19,7 @@ sys.dont_write_bytecode = True
 from ubuntu_tweaks import disks as lib  # noqa: E402
 from ubuntu_tweaks.errors import ConfigError  # noqa: E402
 from ubuntu_tweaks.module_script import (  # noqa: E402
+    APT_ENVIRONMENT,
     EXIT_DRIFT,
     EXIT_NEEDS_MANUAL,
     EXIT_OK,
@@ -85,6 +86,7 @@ class FakeMachine(Process):
         self.active = set()
         self.mounted = {}  # mount point -> (fstype, options)
         self.executed = []
+        self.apt_runs = []  # (stdin text, the noninteractive variables the child would see) per apt-get call
         self.queried = []
 
     def set_lockdown(self, mode):
@@ -167,6 +169,8 @@ class FakeMachine(Process):
     def execute(self, argv, *, input_text=None, cwd=None):
         argv = list(argv)
         self.executed.append(tuple(argv))
+        if argv[0] == "apt-get":
+            self.apt_runs.append((input_text, {name: os.environ.get(name) for name in APT_ENVIRONMENT}))
         if argv[0] == "apt-get":
             self.packages.update(a for a in argv[3:] if not a.startswith("-"))
             if "apfs-dkms" in argv:
@@ -304,7 +308,8 @@ class ApplyTest(DisksCase):
         self.assertEqual((self.root / "etc/fstab.pre-ubuntu-tweaks").read_text(), STOCK_FSTAB)
         self.assertTrue((self.root / "mnt/mac-backups").is_dir())
         self.assertEqual(
-            (self.root / "usr/local/share/ubuntu-tweaks/apfs-fuse.commit").read_text().strip(), lib.PINNED_APFS_FUSE[1] + " root-build"
+            (self.root / "usr/local/share/ubuntu-tweaks/apfs-fuse.commit").read_text().strip(),
+            lib.PINNED_APFS_FUSE[1] + " root-build",
         )
         self.assertTrue(os.access(self.root / "usr/local/bin/apfs-fuse", os.X_OK))
         self.assertEqual(machine.executed[0][:3], ("apt-get", "install", "-y"))
@@ -971,6 +976,17 @@ class OtherFilesystemsTest(DisksCase):
             "/dev/disk/by-label/Windows\\134x2011 /mnt/win ntfs-3g rw,uid=1000,gid=1000,umask=022,nosuid,nodev,nofail,x-systemd.automount",
             self.fstab(),
         )
+
+    def test_apt_runs_without_a_terminal_and_noninteractively(self):
+        # ticket #126: a grandchild of sudo-rs that touches the pty is stopped for ever; stdin must be at EOF
+        machine = self.machine(attached=False)
+        options = {
+            "mounts": {"win": {"label": "Windows 11", "fstype": "ntfs", "driver": "ntfs-3g", "read_only": False}}
+        }
+
+        self.module(machine, options).apply()
+
+        self.assertEqual(machine.apt_runs, [("", APT_ENVIRONMENT)])
 
     def test_ext4_needs_no_package_and_no_owner(self):
         machine = self.machine(attached=False)

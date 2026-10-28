@@ -34,7 +34,7 @@ from ubuntu_tweaks.module_script import (  # noqa: E402
     Module,
     ModuleError,
     NeedsManual,
-    environment,
+    apt_get,
     invoking_account,
     main,
     module_config,
@@ -431,8 +431,7 @@ class SshServer(Module):
         if not self._is_root:
             raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
         if not self._installed():
-            with environment(DEBIAN_FRONTEND="noninteractive"):
-                self._run("apt-get", "install", "-y", PACKAGE)
+            apt_get(self._process, "install", "-y", PACKAGE)
         settings = read_sshd_settings(self._root)
 
         config_changed = self._apply_password_policy(settings) if self._password_auth is not None else None

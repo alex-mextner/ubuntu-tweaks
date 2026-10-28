@@ -587,6 +587,17 @@ An installer exit code **10** means "needs a manual step" (its own output says w
 `ManualStepRequired`, no post-check, the plan goes on, `status` keeps the module Missing. Any other non-zero
 exit stays a failure.
 
+**`apt-get` in a root module script** goes through one helper, `module_script.apt_get(process, *arguments)`, never
+through a module's own call: stdin is at EOF (an empty `input_text`: the child never reads or reconfigures a
+terminal) and the child gets `DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1` and
+`APT_LISTCHANGES_FRONTEND=none` (restored afterwards). Why: under sudo-rs, which is Ubuntu 26.04's `sudo`, a command
+whose stdout is a pipe runs in the background of sudo's pty, and an `apt-get` that is a grandchild of the script
+changes that pty's settings at the end of an install; the kernel stops it and sudo-rs resumes only its direct child,
+so `apt-get` stays stopped for ever and the run shows nothing (ticket #126; *Stalled steps* in *Reconcile and failover*
+covers any other child that stops). `tests/test_module_script.py` fails on a module that calls `apt-get` around the
+helper. `Process.query` calls (captured output, stdin already `/dev/null`: `apt-sources`' `apt-get update`) cannot touch the
+terminal and are exempt; the guard looks at `execute`, `_run` and `run` only.
+
 **`doctor`.** `python3-gi`, `dconf-cli` and `libglib2.0-bin` stay hard requirements (the plan cannot be
 built without them). `git` and a module's `[deps] apt` that an enabled module installs through
 `[install] apt` of a module with `phase = "base"` (the only installs that run before the submodule init that

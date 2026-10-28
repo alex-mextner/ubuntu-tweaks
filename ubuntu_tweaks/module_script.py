@@ -29,6 +29,10 @@ Public API:
   pass an empty ``env``: their state must be found by a root script too, which never sees the user's variables.
 - ``environment(**overrides)``: context manager that sets variables for the child processes started inside
   it and restores the previous values on exit (also on failure).
+- ``apt_get(process, *arguments, cwd=None)``: the one way a module script runs ``apt-get``: stdin at EOF (never the
+  terminal: under sudo-rs a grandchild that touches the pty is stopped for ever, ticket #126) and
+  ``APT_ENVIRONMENT`` (``DEBIAN_FRONTEND=noninteractive``, ``NEEDRESTART_MODE=a``, ``NEEDRESTART_SUSPEND=1``,
+  ``APT_LISTCHANGES_FRONTEND=none``) for the child, restored afterwards.
 - ``read_owned_file(path, uid, limit)``: what a root script may read from the desktop user's tree: a regular
   file (no symlink at the end), owned by ``uid``, at most ``limit`` bytes; anything else is ``ModuleError``.
 - ``keyring_secret(process, purpose) -> str | None``: ``secret-tool lookup application ubuntu-tweaks
@@ -70,6 +74,13 @@ CONFIG_ENV = "UBUNTU_TWEAK_MODULE_CONFIG"
 ALIASES = {"--check": "check", "--dry-run": "plan"}
 USAGE = "usage: {name} check|status|plan|install"
 KEYRING_APPLICATION = "ubuntu-tweaks"
+# What apt-get may not ask for or wait for: debconf, needrestart's dialog and restart, apt-listchanges' pager.
+APT_ENVIRONMENT = {
+    "DEBIAN_FRONTEND": "noninteractive",
+    "NEEDRESTART_MODE": "a",
+    "NEEDRESTART_SUSPEND": "1",
+    "APT_LISTCHANGES_FRONTEND": "none",
+}
 
 
 class ModuleError(Exception):
@@ -205,6 +216,17 @@ def environment(**overrides: str) -> Iterator[None]:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def apt_get(process: Process, *arguments: str, cwd: Path | None = None) -> None:
+    """Run ``apt-get <arguments>`` so that it never reads or reconfigures a terminal.
+
+    Empty ``input_text`` makes stdin a pipe that is at EOF at once: apt's pty handling (``tcsetattr`` on stdin at
+    the end of an install) is skipped, and nothing it starts can wait for an answer. Streaming output and the
+    ``CommandError`` of a failure are the process seam's, unchanged."""
+    argv = ["apt-get", *arguments]
+    with environment(**APT_ENVIRONMENT):
+        process.execute(argv, input_text="", cwd=cwd)
 
 
 def read_owned_file(path: Path, uid: int, limit: int) -> bytes:

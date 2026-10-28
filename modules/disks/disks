@@ -44,7 +44,7 @@ from ubuntu_tweaks.module_script import (  # noqa: E402
     Module,
     ModuleError,
     NeedsManual,
-    environment,
+    apt_get,
     invoking_account,
     main,
     module_config,
@@ -438,8 +438,7 @@ class Disks(Module):
         return Path(tempfile.mkdtemp(prefix="ubuntu-tweaks-disks-", dir=base))
 
     def _apt_install(self, *packages: str) -> None:
-        with environment(DEBIAN_FRONTEND="noninteractive"):
-            self._run("apt-get", "install", "-y", *packages)
+        apt_get(self._process, "install", "-y", *packages)
 
     def _fetch(self, work: Path, url: str, commit: str) -> Path:
         src = work / "src"
