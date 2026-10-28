@@ -40,11 +40,13 @@ shutil.copy(answer, out)
 FAKE_APT = """\
 #!/usr/bin/python3 -B
 import os, sys
+args = sys.argv[1:]
+probe = "indextargets" in args  # the post-condition: does apt accept the configured sources
 with open(os.environ["FAKE_LOG"], "a") as log:
-    log.write("apt-get " + " ".join(sys.argv[1:]) + "\\n")
-code = int(os.environ.get("FAKE_APT_RC", "0"))
+    log.write(("apt-probe " if probe else "apt-get ") + " ".join(args) + "\\n")
+code = int(os.environ.get("FAKE_PROBE_RC" if probe else "FAKE_APT_RC", "0"))
 if code:
-    sys.stderr.write(os.environ.get("FAKE_APT_ERR", "E: failed") + "\\n")
+    sys.stderr.write(os.environ.get("FAKE_PROBE_ERR" if probe else "FAKE_APT_ERR", "E: failed") + "\\n")
 sys.exit(code)
 """
 
@@ -185,7 +187,7 @@ class Install(Staged):
         again = self.run_script("install", [item])
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertIn("nothing to change", again.stdout)
-        self.assertEqual(self.log.read_text(), "")
+        self.assertEqual(self.calls("curl") + self.calls("apt-get"), [])
         self.assertEqual({p: (self.root / p).stat().st_mtime_ns for p in self.tree()}, before)
 
     def test_plan_shows_the_exact_diff_and_changes_nothing(self):
@@ -372,9 +374,7 @@ class Failover(Staged):
 
 
 class Migration(Staged):
-    MOZILLA_LIST = (
-        "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.example.test/apt stable main\n"
-    )
+    MOZILLA_LIST = "deb [signed-by=/etc/apt/keyrings/mozilla.asc] https://packages.example.test/apt stable main\n"
 
     def seed_list(self, name="mozilla.list", text=None):
         path = self.path(f"etc/apt/sources.list.d/{name}")
@@ -464,6 +464,344 @@ class Migration(Staged):
         self.assertEqual(status.returncode, 0)
         self.assertIn("unmanaged", status.stdout)
         self.assertIn("ubuntu.sources", status.stdout)
+
+
+class Conflict(Staged):
+    """Another file declares an enabled source's repository with a different Signed-By: apt rejects every command."""
+
+    FOREIGN_KEY = "/etc/apt/keyrings/packages.mozilla.org.asc"
+    LINE = f"deb [signed-by={FOREIGN_KEY}] https://packages.example.test/apt stable main\n"
+    OTHER = "deb https://other.example.test/apt stable main\n"
+    DIR = "/etc/apt/sources.list.d"
+
+    def seed(self, name="mozilla.list", text=None):
+        path = self.path(f"etc/apt/sources.list.d/{name}")
+        path.write_text(text or self.LINE)
+        return path
+
+    def test_check_names_both_files_and_the_fix_even_when_the_managed_file_is_already_correct(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        self.seed()
+        before = self.tree()
+        result = self.run_script("check", [item])
+        self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+        for needle in (
+            f"{self.DIR}/mozilla.list",
+            f"{self.DIR}/mozilla.sources",
+            self.FOREIGN_KEY,
+            "/etc/apt/keyrings/mozilla.asc",
+            f"sudo rm {self.DIR}/mozilla.list",
+        ):
+            self.assertIn(needle, result.stdout)
+        self.assertEqual(self.tree(), before)
+
+    def test_install_removes_the_conflicting_duplicate_before_it_writes_the_managed_file(self):
+        legacy = self.seed()
+        item = self.good()
+        result = self.run_script("install", [item])
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(legacy.exists())
+        backups = list(self.path("var/backups/ubuntu-tweaks/apt-sources").glob("*/mozilla.list"))
+        self.assertEqual([path.read_text() for path in backups], [self.LINE])
+        removal = next(line for line in result.stdout.splitlines() if "removed mozilla.list" in line)
+        self.assertIn("mozilla.sources", removal)
+        self.assertLess(result.stdout.index("removed mozilla.list"), result.stdout.index("wrote mozilla.sources"))
+        self.assertEqual(self.run_script("check", [item]).returncode, 0)
+
+    def test_a_conflicting_duplicate_beside_a_correct_managed_file_goes_without_an_index_refresh(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        legacy = self.seed()
+        self.log.write_text("")
+        result = self.run_script("install", [item])
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(legacy.exists())
+        self.assertEqual(self.calls("curl") + self.calls("apt-get"), [])
+        self.assertEqual(self.run_script("check", [item]).returncode, 0)
+
+    def test_a_deb822_file_with_another_signed_by_is_migrated_too(self):
+        foreign = self.path("etc/apt/sources.list.d/vendor.sources")
+        foreign.write_text(
+            "Types: deb\nURIs: https://packages.example.test/apt/\nSuites: stable\nComponents: main\n"
+            f"Signed-By: {self.FOREIGN_KEY}\n"
+        )
+        item = self.good()
+        self.assertEqual(self.run_script("check", [item]).returncode, 3)
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        self.assertFalse(foreign.exists())
+
+    def test_a_shared_conflicting_file_stays_and_no_managed_file_is_written_while_a_co_owner_key_fails(self):
+        shared = self.seed("vendors.list", self.LINE + "deb https://second.example.test/apt stable main\n")
+        first = self.good()
+        second = self.good(
+            "second", uris=["https://second.example.test/apt"], key_url="https://keys.example.test/second.asc"
+        )
+        self.answers[second["key_url"]] = OFFLINE
+        failed = self.run_script("install", [first, second])
+        self.assertEqual(failed.returncode, 75, failed.stderr + failed.stdout)
+        self.assertTrue(shared.exists())
+        self.assertFalse(self.path("etc/apt/sources.list.d/mozilla.sources").exists())
+        self.assertIn("held", failed.stdout)
+        self.assertIn("vendors.list", failed.stdout)
+        self.answers[second["key_url"]] = self.good_asc
+        self.assertEqual(self.run_script("install", [first, second]).returncode, 0)
+        self.assertFalse(shared.exists())
+        self.assertTrue(self.path("etc/apt/sources.list.d/mozilla.sources").is_file())
+        self.assertEqual(self.run_script("check", [first, second]).returncode, 0)
+
+    def test_a_mixed_file_blocks_the_source_and_names_both_files_and_the_lines_to_delete(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        mixed = self.seed("mixed.list", self.LINE + self.OTHER)
+        before = self.tree()
+        for command, code in (("check", 3), ("install", 10)):
+            result = self.run_script(command, [item])
+            self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+            for needle in (f"{self.DIR}/mixed.list", f"{self.DIR}/mozilla.sources", self.LINE.strip()):
+                self.assertIn(needle, result.stdout)
+        self.assertEqual(mixed.read_text(), self.LINE + self.OTHER)
+        self.assertEqual(self.tree(), before)
+
+    def test_a_blocked_first_install_writes_nothing_for_that_source(self):
+        self.seed("mixed.list", self.LINE + self.OTHER)
+        item = self.good()
+        before = self.tree()
+        result = self.run_script("install", [item])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertIn(f"{self.DIR}/mozilla.sources", result.stdout)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.calls("curl") + self.calls("apt-get"), [])
+
+    def test_a_conflicting_line_in_sources_list_blocks_the_source_the_same_way(self):
+        main = self.path("etc/apt/sources.list")
+        main.write_text(self.LINE)
+        item = self.good()
+        before = self.tree()
+        for command, code in (("check", 3), ("install", 10)):
+            result = self.run_script(command, [item])
+            self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+            for needle in ("/etc/apt/sources.list:", f"{self.DIR}/mozilla.sources", self.LINE.strip()):
+                self.assertIn(needle, result.stdout)
+        self.assertEqual(main.read_text(), self.LINE)
+        self.assertEqual(self.tree(), before)
+
+    def test_a_blocked_source_does_not_stop_the_others(self):
+        self.seed("mixed.list", self.LINE + self.OTHER)
+        blocked = self.good()
+        other = self.good("second", uris=["https://second.example.test/apt"], key_url="https://keys.example.test/s.asc")
+        result = self.run_script("install", [blocked, other])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertFalse(self.path("etc/apt/sources.list.d/mozilla.sources").exists())
+        self.assertTrue(self.path("etc/apt/sources.list.d/second.sources").is_file())
+
+    def test_a_shared_file_is_kept_while_a_co_owner_is_blocked(self):
+        shared = self.seed(
+            "vendors.list",
+            "deb [signed-by=/etc/apt/keyrings/second.asc] https://second.example.test/apt stable main\n"
+            "deb [signed-by=/etc/apt/keyrings/mozilla.asc] https://packages.example.test/apt stable main\n",
+        )
+        self.seed("mixed.list", self.LINE + self.OTHER)
+        first = self.good()
+        second = self.good(
+            "second", uris=["https://second.example.test/apt"], key_url="https://keys.example.test/second.asc"
+        )
+        result = self.run_script("install", [first, second])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertTrue(shared.exists(), "the blocked source's only declaration must stay")
+
+    def test_a_blocked_first_owner_does_not_let_a_co_owner_write_next_to_the_shared_clashing_file(self):
+        shared = self.seed(
+            "vendors.list",
+            self.LINE + "deb [signed-by=/etc/apt/keyrings/vendor2.asc] https://second.example.test/apt stable main\n",
+        )
+        self.seed("mixed.list", self.LINE + self.OTHER)  # blocks the first owner
+        first = self.good()
+        second = self.good(
+            "second", uris=["https://second.example.test/apt"], key_url="https://keys.example.test/second.asc"
+        )
+        result = self.run_script("install", [first, second])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertTrue(shared.exists())
+        self.assertFalse(self.path("etc/apt/sources.list.d/second.sources").exists())
+
+    def test_a_disabled_stanza_of_another_repository_still_makes_the_file_mixed(self):
+        mixed = self.seed(
+            "vendor.sources",
+            "Types: deb\nURIs: https://packages.example.test/apt\nSuites: stable\nComponents: main\n"
+            "Signed-By: /etc/apt/keyrings/other.asc\n\n"
+            "Types: deb\nURIs: https://disabled.example.test/apt\nSuites: stable\nComponents: main\nEnabled: no\n",
+        )
+        before = mixed.read_text()
+        result = self.run_script("install", [self.good()])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertEqual(mixed.read_text(), before, "a file that declares anything else is never edited")
+
+    def test_a_held_owner_holds_the_other_clashing_file_it_shares_too(self):
+        # a's key cannot be fetched: z-ab.list is held, so b has no managed file; a-bc.list (sorted first, so a
+        # single pass would remove it) may be b's only declaration of its second repository and must stay as well
+        ab = self.seed(
+            "z-ab.list",
+            self.LINE + "deb [signed-by=/etc/apt/keyrings/vendor.asc] https://b.example.test/apt stable main\n",
+        )
+        bc = self.seed(
+            "a-bc.list",
+            "deb [signed-by=/etc/apt/keyrings/vendor.asc] https://b.example.test/apt stable main\n"
+            "deb [signed-by=/etc/apt/keyrings/vendor.asc] https://c.example.test/apt stable main\n",
+        )
+        a = self.good()
+        b = self.good("b", uris=["https://b.example.test/apt"], key_url="https://keys.example.test/b.asc")
+        c = self.good("c", uris=["https://c.example.test/apt"], key_url="https://keys.example.test/c.asc")
+        self.answers[a["key_url"]] = OFFLINE
+        result = self.run_script("install", [b, c, a])  # b's files are listed before the one it shares with a
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue(ab.exists() and bc.exists())
+        self.assertFalse(self.path("etc/apt/sources.list.d/b.sources").exists())
+
+    def test_a_held_source_keeps_its_other_legacy_files(self):
+        # vendors.list (shared, clashing) is held because mozilla is blocked; second-b.list is second's only
+        # declaration of its other repository and must stay until second.sources is written
+        self.seed(
+            "vendors.list",
+            self.LINE + "deb [signed-by=/etc/apt/keyrings/vendor2.asc] https://second.example.test/apt stable main\n",
+        )
+        self.seed("mixed.list", self.LINE + self.OTHER)
+        legacy = self.seed("second-b.list", "deb https://second-b.example.test/apt stable main\n")
+        first = self.good()
+        second = self.good(
+            "second",
+            uris=["https://second.example.test/apt", "https://second-b.example.test/apt"],
+            key_url="https://keys.example.test/second.asc",
+        )
+        result = self.run_script("install", [first, second])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertTrue(legacy.exists(), "no managed file replaces it yet")
+
+    def test_a_disabled_deb822_stanza_is_not_a_declaration(self):
+        inactive = self.seed(
+            "vendor.sources",
+            "Types: deb\nURIs: https://packages.example.test/apt\nSuites: stable\nComponents: main\n"
+            "Enabled: no\nSigned-By: /etc/apt/keyrings/other.asc\n",
+        )
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        self.assertTrue(inactive.exists(), "apt ignores it: the module has nothing to migrate")
+        self.assertEqual(self.run_script("check", [item]).returncode, 0)
+
+
+class PostCondition(Staged):
+    CAUSE = (
+        "E: Conflicting values set for option Signed-By regarding source https://packages.example.test/apt/ "
+        "stable: /etc/apt/keyrings/a.asc != /etc/apt/keyrings/b.asc"
+    )
+
+    def test_check_asks_apt_and_is_satisfied_when_it_accepts(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        status = self.run_script("status", [item])
+        self.assertEqual(status.returncode, 0, status.stderr + status.stdout)
+        self.assertIn("apt accepts the configured sources", status.stdout)
+        probe = self.calls("apt-probe")[-1]
+        self.assertIn(f"Dir::Etc::sourceparts={self.root}/etc/apt/sources.list.d", probe)
+
+    def test_check_is_drift_with_the_cause_when_apt_rejects_the_sources(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        self.env_extra = {"FAKE_PROBE_RC": "100", "FAKE_PROBE_ERR": self.CAUSE}
+        result = self.run_script("check", [item])
+        self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+        self.assertIn("apt accepts the configured sources", result.stdout)
+        self.assertIn(self.CAUSE, result.stdout)
+        self.assertIn("/etc/apt/sources.list.d/mozilla.sources", result.stdout)
+
+    def test_install_fails_with_the_cause_and_the_files_when_apt_still_rejects(self):
+        self.env_extra = {"FAKE_PROBE_RC": "100", "FAKE_PROBE_ERR": self.CAUSE}
+        result = self.run_script("install", [self.good()])
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn(self.CAUSE, result.stderr)
+        self.assertIn("/etc/apt/sources.list.d/mozilla.sources", result.stderr)
+
+    def test_install_asks_apt_last_and_succeeds_when_it_accepts(self):
+        result = self.run_script("install", [self.good()])
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        lines = self.log.read_text().splitlines()
+        self.assertTrue(lines[-1].startswith("apt-probe"), lines)
+        self.assertTrue(any(line.startswith("apt-get update") for line in lines[:-1]))
+
+    def test_a_converged_machine_is_not_reported_as_nothing_to_change_while_apt_rejects_it(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        self.env_extra = {"FAKE_PROBE_RC": "100", "FAKE_PROBE_ERR": self.CAUSE}
+        result = self.run_script("install", [item])
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn(self.CAUSE, result.stderr)
+
+    def test_a_pending_refresh_of_a_blocked_source_is_kept_and_not_run(self):
+        mixed = "deb [signed-by=/etc/apt/keyrings/x.asc] https://packages.example.test/apt stable main\n"
+        self.path("etc/apt/sources.list.d/mixed.list").write_text(mixed + "deb https://other.example.test/apt s main\n")
+        pending = self.path("var/lib/ubuntu-tweaks/apt-sources/pending-update")
+        pending.parent.mkdir(parents=True)
+        pending.write_text("mozilla\n")
+        other = self.good("second", uris=["https://second.example.test/apt"], key_url="https://keys.example.test/s.asc")
+        result = self.run_script("install", [self.good(), other])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertIn("mozilla", pending.read_text())
+        updates = [line for line in self.calls("apt-get") if "update" in line]
+        self.assertFalse(any("mozilla.sources" in line for line in updates), updates)
+
+    def test_an_unrelated_conflict_does_not_hide_an_error_that_names_no_repository(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        both = (
+            "E: Conflicting values set for option Signed-By regarding source https://elsewhere.example.test/apt/ "
+            "stable: /a != /b\nE: Malformed entry 1 in list file /etc/apt/sources.list.d/mozilla.sources (Suites)\n"
+            "E: The list of sources could not be read."
+        )
+        self.env_extra = {"FAKE_PROBE_RC": "100", "FAKE_PROBE_ERR": both}
+        result = self.run_script("check", [item])
+        self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+        self.assertIn("Malformed entry 1", result.stdout)
+        self.assertNotIn("elsewhere.example.test", result.stdout)
+
+    def test_apt_complaining_only_about_a_repository_the_module_does_not_manage_is_not_this_modules_failure(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)
+        unrelated = (
+            "E: Conflicting values set for option Signed-By regarding source https://elsewhere.example.test/apt/ "
+            "stable: /a != /b\nE: The list of sources could not be read."
+        )
+        self.env_extra = {"FAKE_PROBE_RC": "100", "FAKE_PROBE_ERR": unrelated}
+        for command in ("check", "install"):
+            result = self.run_script(command, [item])
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_a_known_manual_conflict_stays_a_manual_step_with_the_cause_appended(self):
+        mixed = "deb [signed-by=/etc/apt/keyrings/x.asc] https://packages.example.test/apt stable main\n"
+        self.path("etc/apt/sources.list.d/mixed.list").write_text(mixed + "deb https://other.example.test/apt s main\n")
+        self.env_extra = {"FAKE_PROBE_RC": "100", "FAKE_PROBE_ERR": self.CAUSE}
+        result = self.run_script("install", [self.good()])
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertIn("mixed.list", result.stdout)
+        self.assertIn(self.CAUSE, result.stdout)
+
+
+@unittest.skipUnless(shutil.which("apt-get"), "apt-get is not installed")
+class RealApt(Staged):
+    """The real apt-get on the staged tree: the conflict is real, so is its disappearance."""
+
+    def test_real_apt_rejects_the_conflicting_tree_and_accepts_it_after_the_migration(self):
+        item = self.good()
+        self.assertEqual(self.run_script("install", [item]).returncode, 0)  # with the fake apt-get: no network
+        (self.bin / "apt-get").unlink()
+        legacy = self.path("etc/apt/sources.list.d/mozilla.list")
+        legacy.write_text(Conflict.LINE)
+        before = self.run_script("check", [item])
+        self.assertEqual(before.returncode, 3, before.stderr + before.stdout)
+        self.assertIn("Conflicting values set for option Signed-By", before.stdout)
+        after = self.run_script("install", [item])  # nothing is written: no index refresh, no network
+        self.assertEqual(after.returncode, 0, after.stderr + after.stdout)
+        self.assertFalse(legacy.exists())
+        self.assertEqual(self.run_script("check", [item]).returncode, 0)
 
 
 class Undeclared(Staged):

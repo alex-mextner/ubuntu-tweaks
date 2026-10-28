@@ -87,6 +87,32 @@ with the file name. A foreign file with the managed name itself (`1password.sour
 backed up the same way and replaced. A foreign pin file with the managed name is backed up and replaced. Key files
 the migrated entry referenced are left where they are.
 
+### Conflicting duplicates (a different `Signed-By` for the same repository)
+
+apt refuses a configuration where two entries for the same repository (normalized URI + suite, any `Types`) carry
+**different** `Signed-By` values: every `apt-get` command then fails with `E: Conflicting values set for option
+Signed-By regarding source <uri> <suite>: <a> != <b>` and `E: The list of sources could not be read.` (verified
+against apt; an entry without `Signed-By` next to one with it, or two equal values, is only a duplicate-target
+warning). A hand-written `mozilla.list` with `[signed-by=/etc/apt/keyrings/packages.mozilla.org.asc]` next to the
+managed `mozilla.sources` (`Signed-By: /etc/apt/keyrings/mozilla.asc`) is exactly that state, **even when the managed
+file is already correct**. The module therefore compares the `Signed-By` of every other declaration of an enabled
+source's repository (one-line `[signed-by=...]`, deb822 `Signed-By:`, a key path or an inline key block; a stanza
+with `Enabled: no` does not count) with the managed `/etc/apt/keyrings/<name>.<asc|gpg>`; a different value is a
+**conflict**:
+
+- `check` is drift (exit 3). The finding names **both** files, the two `Signed-By` values and the exact fix:
+  `sudo rm <file>` for a file that only declares repositories the profile declares, otherwise the exact lines to delete.
+- `install` never leaves apt broken. A conflicting file that only declares managed repositories is migrated as above,
+  but **before** any managed file that would sit next to it is written (so there is no moment with both), and only
+  after the keys of **all** its owners converged; the output says `removed <file>` and names the managed file. If an
+  owner's key failed, the file stays, the owners' `.sources` are **not written** (`held`), and the failure of that
+  key is the exit status (75/1) as before.
+- A conflicting file that also declares other repositories, or `/etc/apt/sources.list`, is never edited and **blocks
+  the source**: nothing is written for it (no key, no `.sources`, no pin), the install exits 10 (`needs manual`),
+  and the finding names both files and the exact lines to delete. The other sources are still converged.
+
+A same-key duplicate keeps the plain migration above (warning only; unchanged).
+
 Sources the module does not manage (`ubuntu.sources`, a hand-added repository nobody declared) are left alone and
 listed by `status` as `unmanaged`.
 A file that carries the module's marker but belongs to a source the profile no longer declares (the entry was deleted
@@ -115,12 +141,36 @@ one broken unrelated repository cannot fail this module. Sources whose index ref
 `/var/lib/ubuntu-tweaks/apt-sources/pending-update` and are **drift** for `check` until a later `install` refreshed
 them: the retry after a transient failure still refreshes the index.
 
+## Post-condition: apt accepts the sources
+
+Whatever the module believes, the truth is whether apt can read the configured sources. `ubuntu_tweaks/apt_consistency.py`
+`apt_sources_error(root=None, process=None)` runs the **unprivileged** `LC_ALL=C apt-get indextargets` (it reads
+`sources.list` and every `sources.list.d` file, writes nothing, needs no network; exit 100 on a conflicting
+`Signed-By`) and returns the apt error text (`E:` lines, deduplicated), or `None` when apt accepts the tree, `apt-get`
+is missing or the probe timed out (nothing can be said then; a slow disk is not an inconsistent list). With a staged
+root the probe adds `-o Dir::Etc::sourcelist=<root>/etc/apt/sources.list -o
+Dir::Etc::sourceparts=<root>/etc/apt/sources.list.d`. The helper is the shared check for **any** root module that
+writes apt sources; `apt-sources` is currently the only one.
+
+- `check` / `status` carry the finding `apt accepts the configured sources`, detail = the cause plus the files that
+  declare the repository the error names; a failing probe is drift. An error that names only repositories **no
+  enabled source declares** (`regarding source <uri> <suite>`) is not this module's failure and is ignored: one broken
+  unrelated repository cannot fail it. A line that names no repository still counts.
+- A file shared by several sources that clashes stays on the list while any of its owners is blocked, so no co-owner
+  writes its managed file next to it; a source whose `.sources` is held back for that reason also keeps its other
+  hand-written files of the same repositories until its own file is written.
+- `install` runs the probe last, after every change and refresh. If apt still rejects the tree it fails: exit 10 with
+  the cause appended when the reason is a known manual conflict above, otherwise exit 1 with the apt cause and the
+  files named. A converged tree is never reported as success while apt cannot read it.
+
 ## Staging and tests
 
 `APT_SOURCES_ROOT=DIR` points `check`, `status`, `plan` and `install` at a staged root (every path below `DIR`,
 no root needed, `apt-get` still goes through `PATH` so a test puts a double there); under sudo the variable is
 dropped by `env_reset`, so it can never redirect a real install. Tests (`modules/apt-sources/tests`) use a generated
-GPG key (never a vendor key), a fake `curl` / `apt-get` on `PATH` and the real `gpg`.
+GPG key (never a vendor key), a fake `curl` / `apt-get` on `PATH` and the real `gpg`. The fake `apt-get` answers
+`indextargets` (the post-condition probe) from `FAKE_PROBE_RC` / `FAKE_PROBE_ERR`; one test class puts only the real
+`apt-get` on `PATH` (skipped when it is missing) and proves the probe rejects a staged conflicting tree.
 
 ## Coverage
 
