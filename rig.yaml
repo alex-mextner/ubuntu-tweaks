@@ -1,0 +1,16 @@
+# rig.yaml: repo-level config. TEMPORARY ratchet for the commit-time lint gate (`rig lint check`, hook 30-lint-check).
+#
+# The gate checks whole staged files, and this repo already exceeds the default limits (cognitive 15, cyclomatic 20,
+# 2400 lines per file) in about 50 files, so no change to them could be committed. These values sit just above the
+# worst existing case in the files that change most (the main spec, process.py, reconcile.py, the module test fakes);
+# a NEW function or file above them is still refused. Remove or lower every value once rig-cli#798 (diff-scoped gate
+# with a baseline) is in. Ticket: #134 of this repository.
+
+version: 1
+
+lint_checks:
+  complexity:
+    max_cognitive: 60 # ratchet down, see rig-cli#798 (worst touched today: planners/base.py build 53)
+    max_cyclomatic: 40 # ratchet down, see rig-cli#798 (worst touched today: reconcile.py _commit 37)
+  file_lines:
+    error_above: 3100 # ratchet down, see rig-cli#798 (docs/specs/ubuntu-tweak-cli.md is 2951 lines today)
