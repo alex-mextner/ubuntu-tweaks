@@ -1,10 +1,13 @@
 """Reconcile and failover: classification, retries, dependency blocking, fallbacks, root deferral, the journal."""
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from ubuntu_tweaks import journal
+from ubuntu_tweaks import journal, process, reconcile
 from ubuntu_tweaks.actions import (
     Action,
     ManualStepRequired,
@@ -17,6 +20,7 @@ from ubuntu_tweaks.actions import (
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.manifest import parse_manifest
 from ubuntu_tweaks.process import CommandError
+from ubuntu_tweaks.watchdog import Stall
 
 
 class Step(Action):
@@ -273,13 +277,101 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
+                ("done", "running"),
                 ("done", "done"),
+                ("failed", "running"),
                 ("failed", "failed"),
                 ("blocked", "blocked"),
                 ("deferred", "deferred"),
+                ("manual", "running"),
                 ("manual", "manual"),
             ],
         )
+
+    def test_a_running_action_is_watched_and_its_stall_reaches_the_observer(self) -> None:
+        events: list[tuple[str, str, str]] = []
+        watches: list[process.Watch | None] = []
+
+        class Slow(Step):
+            stall_seconds = 45.0
+
+            def step_name(self) -> str:
+                return "run the slow thing"
+
+            def run(self) -> None:
+                watches.append(process.current_watch())
+                watch = process.current_watch()
+                assert watch is not None and watch.on_stall is not None
+                watch.on_stall(Stall("quiet", "run the slow thing", 130.0))
+                super().run()
+
+        Plan((Slow("slow"),)).execute(observer=lambda a, s, d: events.append((a.name, s, d)))
+
+        self.assertEqual(
+            events,
+            [
+                ("slow", "running", ""),
+                ("slow", "running", "stalled: no output and no CPU for 130 s"),
+                ("slow", "done", ""),
+            ],
+        )
+        watch = watches[0]
+        assert watch is not None
+        self.assertEqual((watch.label, watch.stall_seconds), ("run the slow thing", 45.0))
+        self.assertIsNone(process.current_watch())  # the block ended with the action
+
+    def test_a_stall_reported_after_the_attempt_ended_does_not_undo_its_status(self) -> None:
+        events: list[tuple[str, str]] = []
+        late: list[object] = []
+
+        class Quick(Step):
+            def run(self) -> None:
+                watch = process.current_watch()
+                assert watch is not None and watch.on_stall is not None
+                late.append(watch.on_stall)
+                super().run()
+
+        Plan((Quick("q"),)).execute(observer=lambda a, s, d: events.append((a.name, s)))
+        late[0](Stall("quiet", "do q", 130.0))  # type: ignore[operator]
+
+        self.assertEqual(events, [("q", "running"), ("q", "done")])
+
+    def test_an_interrupted_no_sudo_fallback_leaves_the_step_it_stood_at(self) -> None:
+        events: list[tuple[str, str]] = []
+        primary = Step("p", needs_root=True)
+        alternative = Alternative(primary)
+        primary.alts = [alternative]
+        alternative.run = lambda: (_ for _ in ()).throw(KeyboardInterrupt())  # type: ignore[method-assign]
+
+        with self.assertRaises(KeyboardInterrupt):
+            Plan((primary,)).execute(no_sudo=True, observer=lambda a, s, d: events.append((a.name, s)))
+
+        self.assertEqual(events, [("p", "running")])
+
+    def test_the_step_name_defaults_to_the_first_line_of_the_description(self) -> None:
+        class Multi(Step):
+            def describe(self) -> str:
+                return "do it\n        with a long preview\n        and more"
+
+        self.assertEqual(Multi("m").step_name(), "do it")
+        self.assertIsNone(Step("s").stall_seconds)
+
+    def test_a_fallback_is_watched_under_its_own_name(self) -> None:
+        labels: list[str] = []
+
+        class Recording(Alternative):
+            def run(self) -> None:
+                watch = process.current_watch()
+                assert watch is not None
+                labels.append(watch.label)
+                super().run()
+
+        primary = Step("p", script=[ConfigError("no")])
+        primary.alts = [Recording(primary)]
+
+        Plan((primary,)).execute(policy=quick()[0])
+
+        self.assertEqual(labels, ["alternative way"])
 
 
 class JournalTests(unittest.TestCase):
@@ -309,6 +401,56 @@ class JournalTests(unittest.TestCase):
         earlier = journal.previous(self.path)
         assert earlier is not None
         self.assertFalse(earlier.finished)
+
+    def test_an_interrupted_run_names_the_step_it_stood_at_and_the_next_run_resumes_there(self) -> None:
+        first, second, third = Step("a"), Step("b"), Step("c")
+        second.script = [KeyboardInterrupt()]
+        run_journal = journal.RunJournal(self.path, "apply --commit")
+        run_journal.begin([first, second, third])
+
+        def stall_then_interrupt() -> None:
+            watch = process.current_watch()
+            assert watch is not None and watch.on_stall is not None
+            watch.on_stall(Stall("stopped", "do b", 12.0, 77, "apt-get", False, "sudo kill -CONT 77"))
+            raise KeyboardInterrupt
+
+        second.run = stall_then_interrupt  # type: ignore[method-assign]
+        with self.assertRaises(KeyboardInterrupt):
+            Plan((first, second, third)).execute(observer=run_journal.record)
+        earlier = journal.previous(self.path)
+        assert earlier is not None
+
+        self.assertFalse(earlier.finished)
+        self.assertEqual(
+            [(e.text, e.status) for e in earlier.entries], [("do a", "done"), ("do b", "running"), ("do c", "pending")]
+        )
+        self.assertIn("sudo kill -CONT 77", earlier.running()[0].detail)
+
+        second.run = Step.run.__get__(second)  # type: ignore[method-assign]
+        second.script = []
+        again = journal.RunJournal(self.path, "apply --commit")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(journal, "journal_path", return_value=self.path):
+            reconcile._announce_interrupted(self.path)
+        result = Plan((first, second, third)).execute(observer=again.record)
+
+        text = out.getvalue()
+        self.assertIn("interrupted", text)
+        self.assertIn("do b", text)
+        self.assertIn("stalled", text)
+        self.assertEqual((first.runs, second.runs, third.runs, result.changed), (1, 1, 1, 2))  # a was not run again
+
+    def test_a_finished_run_leaves_no_running_entry(self) -> None:
+        step = Step("a")
+        run_journal = journal.RunJournal(self.path, "apply --commit")
+        run_journal.begin([step])
+
+        Plan((step,)).execute(observer=run_journal.record)
+        run_journal.finish(0)
+
+        last = journal.previous(self.path)
+        assert last is not None
+        self.assertEqual(last.running(), [])
 
     def test_resume_is_just_a_rerun_because_every_item_is_observed_again(self) -> None:
         steps = [Step("a"), Step("b"), Step("c")]

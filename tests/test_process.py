@@ -3,10 +3,15 @@
 import contextlib
 import gc
 import io
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
+import threading
 import time
 import unittest
 import warnings
@@ -15,7 +20,9 @@ from pathlib import Path
 from unittest import mock
 
 from ubuntu_tweaks import process as process_module
+from ubuntu_tweaks import ui, watchdog
 from ubuntu_tweaks.process import CommandError, CommandResult, FakeProcess, Process, root_prefix, run, use_root_prefix
+from ubuntu_tweaks.watchdog import Stall
 
 
 class QueryTests(unittest.TestCase):
@@ -276,6 +283,211 @@ class FakeProcessTests(unittest.TestCase):
         fake.execute(["c"], input_text="x")
         self.assertEqual(fake.queries, [("a",), ("b",)])
         self.assertEqual(fake.executed, [(("c",), "x")])
+
+
+SPAWNS_A_GRANDCHILD_THAT_STOPS = textwrap.dedent(
+    """
+    import os, signal, subprocess, sys
+    stopper = "import os, signal; os.kill(os.getpid(), signal.SIGSTOP); print('grandchild went on')"
+    child = subprocess.Popen([sys.executable, "-c", stopper])
+    print("grandchild", child.pid, flush=True)
+    sys.exit(child.wait())
+    """
+)
+
+
+class StallWatchdogTest(unittest.TestCase):
+    """``run_streamed`` watches the child and everything below it: ticket #126 (a stopped ``apt-get`` behind sudo-rs)."""
+
+    def setUp(self) -> None:
+        ui.configure(plain=True, lang="en")
+        self.addCleanup(ui.configure)
+        self.stalls: list[Stall] = []
+        self.out = io.StringIO()
+
+    def stream(self, argv: list[str], *, timeout: float | None = None, **options: object) -> int:
+        settings: dict[str, object] = {
+            "label": "run earlyoom",
+            "stall_seconds": 0.6,
+            "poll_seconds": 0.1,
+            "on_stall": self.stalls.append,
+        }
+        settings.update(options)
+        with contextlib.redirect_stdout(self.out), process_module.watching(**settings):  # type: ignore[arg-type]
+            return process_module.run_streamed(argv, timeout=timeout)
+
+    def test_a_stopped_grandchild_is_continued_by_the_engine_and_the_step_finishes(self) -> None:
+        code = self.stream([sys.executable, "-c", SPAWNS_A_GRANDCHILD_THAT_STOPS])
+
+        shown = self.out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("grandchild went on", shown)
+        self.assertEqual([(s.kind, s.resumed) for s in self.stalls], [("stopped", True)])
+        self.assertIn("run earlyoom", shown)
+        self.assertIn("SIGCONT", shown)
+
+    def test_a_grandchild_that_cannot_be_continued_is_reported_with_the_literal_command_and_left_alone(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.stream([sys.executable, "-c", SPAWNS_A_GRANDCHILD_THAT_STOPS], timeout=8, resume=lambda _pid: False)
+
+        shown = self.out.getvalue()
+        match = re.search(r"grandchild (\d+)", shown)
+        self.assertIsNotNone(match, shown)
+        pid = int(match.group(1))  # type: ignore[union-attr]
+        self.addCleanup(self.reap, pid)
+        self.assertEqual(watchdog.read_processes()[pid].state, "T")  # the engine never resumed it itself here
+        self.assertEqual(
+            [(s.kind, s.pid, s.command) for s in self.stalls][:1], [("stopped", pid, f"sudo kill -CONT {pid}")]
+        )
+        self.assertIn(f"sudo kill -CONT {pid}", shown)
+
+    @staticmethod
+    def reap(pid: int) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 9)
+
+    def test_a_quiet_child_is_reported_and_left_to_finish_by_itself(self) -> None:
+        code = self.stream([sys.executable, "-c", "import time; time.sleep(2.5); print('slow but fine')"])
+
+        shown = self.out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("slow but fine", shown)
+        self.assertEqual([s.kind for s in self.stalls], ["quiet"])
+        self.assertIn("run earlyoom", shown)
+
+    def test_output_keeps_a_slow_child_unreported(self) -> None:
+        script = "import time\nfor i in range(8):\n    print(i, flush=True)\n    time.sleep(0.2)"
+
+        code = self.stream([sys.executable, "-c", script], stall_seconds=3.0)  # slack for a loaded machine
+
+        self.assertEqual((code, self.stalls), (0, []))
+
+    def test_the_watch_belongs_to_its_block(self) -> None:
+        self.assertIsNone(process_module.current_watch())
+        with process_module.watching(label="step"):
+            watch = process_module.current_watch()
+            self.assertIsNotNone(watch)
+            self.assertEqual(watch.label, "step")  # type: ignore[union-attr]
+        self.assertIsNone(process_module.current_watch())
+        with contextlib.redirect_stdout(self.out):
+            self.assertEqual(process_module.run_streamed(["true"]), 0)  # no block: the defaults, no label needed
+
+    def test_a_child_that_cannot_start_still_propagates_as_before(self) -> None:
+        with self.assertRaises(FileNotFoundError), process_module.watching(label="x"):
+            process_module.run_streamed(["/nonexistent/ubuntu-tweak-test"])
+
+
+class HeartbeatWhileStreaming(unittest.TestCase):
+    def tearDown(self) -> None:
+        ui.configure()
+
+    def test_a_quiet_step_shows_a_heartbeat_that_is_erased_before_the_next_output(self) -> None:
+        ui.configure(color="always", lang="en")
+        script = "import time; print('before', flush=True); time.sleep(1.0); print('after', flush=True)"
+        out = io.StringIO()
+
+        with (
+            contextlib.redirect_stdout(out),
+            process_module.watching(label="run earlyoom", stall_seconds=60, poll_seconds=0.1, heartbeat_after=0.3),
+        ):
+            code = process_module.run_streamed([sys.executable, "-c", script])
+
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("before\n", text)  # a loaded machine may draw a heartbeat before the first output
+        self.assertIn("run earlyoom", text)
+        self.assertRegex(text, r"00:0[0-9]")
+        self.assertTrue(text.endswith("\r\x1b[2Kafter\n"), repr(text[-40:]))  # erased right before the output
+
+    def test_no_heartbeat_bytes_without_the_explained_layout(self) -> None:
+        ui.configure(plain=True)
+        out = io.StringIO()
+
+        with (
+            contextlib.redirect_stdout(out),
+            process_module.watching(label="x", stall_seconds=60, poll_seconds=0.1, heartbeat_after=0.1),
+        ):
+            process_module.run_streamed([sys.executable, "-c", "import time; time.sleep(0.6); print('end')"])
+
+        self.assertEqual(out.getvalue(), "end\n")
+
+    def test_a_prompt_without_a_newline_is_not_erased_by_the_heartbeat(self) -> None:
+        ui.configure(color="always", lang="en")
+        script = "import time; print('Continue? [Y/n] ', end='', flush=True); time.sleep(1.0); print('y', flush=True)"
+        out = io.StringIO()
+
+        with (
+            contextlib.redirect_stdout(out),
+            process_module.watching(label="x", stall_seconds=60, poll_seconds=0.1, heartbeat_after=0.2),
+        ):
+            process_module.run_streamed([sys.executable, "-c", script])
+
+        text = out.getvalue()
+        self.assertTrue(text.endswith("Continue? [Y/n] y\n"), repr(text))  # nothing erased the prompt
+
+    def test_a_terminal_that_stops_reading_cannot_stop_the_timeout(self) -> None:
+        ui.configure(color="always", lang="en")
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class Stuck(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+            def write(self, text: str) -> int:
+                release.wait(10)  # the terminal was paused with Ctrl-S
+                return len(text)
+
+        started = time.monotonic()
+        with (
+            contextlib.redirect_stdout(Stuck()),
+            process_module.watching(label="x", stall_seconds=60, poll_seconds=0.1, heartbeat_after=0.2),
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process_module.run_streamed(["sleep", "30"], timeout=1.5)
+
+        self.assertLess(time.monotonic() - started, 6)
+
+    def test_without_a_block_nothing_is_watched_so_nested_engines_never_report_twice(self) -> None:
+        with mock.patch.object(watchdog, "Watchdog") as dog, contextlib.redirect_stdout(io.StringIO()):
+            process_module.run_streamed(["true"])
+
+        dog.assert_not_called()
+
+    def test_without_a_block_there_is_no_heartbeat_even_in_the_explained_layout(self) -> None:
+        ui.configure(color="always")
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            process_module.run_streamed([sys.executable, "-c", "import time; time.sleep(0.6); print('end')"])
+
+        self.assertEqual(out.getvalue(), "end\n")
+
+
+class SudoRsBackgroundPtyModel(unittest.TestCase):
+    """The cause of ticket #126, reproduced in a sandbox with a model of sudo-rs 0.2.13's monitor."""
+
+    def model(self, stdin_kind: str) -> dict[str, object]:
+        script = Path(__file__).with_name("sudo_rs_monitor.py")
+        done = subprocess.run([sys.executable, str(script), stdin_kind], capture_output=True, text=True, timeout=30)
+        if done.returncode != 0 and "OSError" in done.stderr:
+            self.skipTest("no pty can be opened here")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_a_grandchild_that_touches_the_pty_is_left_stopped_while_its_parent_runs_on(self) -> None:
+        report = self.model("tty")
+
+        self.assertEqual(report["grandchild_state"], "T")
+        self.assertFalse(report["grandchild_finished"])
+        self.assertNotEqual(report["command_state"], "T")  # the direct child was resumed: sudo sees nothing wrong
+        self.assertGreaterEqual(report["bounces"], 1)  # type: ignore[operator]
+
+    def test_a_grandchild_whose_stdin_is_not_a_terminal_never_stops(self) -> None:
+        report = self.model("devnull")
+
+        self.assertTrue(report["grandchild_finished"])
+        self.assertEqual(report["bounces"], 0)
 
 
 if __name__ == "__main__":

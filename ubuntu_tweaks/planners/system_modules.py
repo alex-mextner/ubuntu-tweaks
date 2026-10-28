@@ -70,11 +70,15 @@ class SystemModuleAction(Action):
         self.scope = manifest.name
         self.key = f"system-module:{manifest.name}"
         self.needs_root = manifest.source.root
+        self.stall_seconds = manifest.stall_seconds
         self._manifest = manifest
         self._display_root = display_root
         self._process = process or Process()
         self._module_config = module_config
         self._preview_text: str | None = None
+
+    def step_name(self) -> str:
+        return f"run {self._manifest.name}"
 
     def _argv(self, command: Sequence[str]) -> list[str]:
         directory = self._manifest.directory

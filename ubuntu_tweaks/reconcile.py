@@ -290,6 +290,12 @@ def _announce_interrupted(path: Path) -> None:
             "continuing, every item is observed again",
             flush=True,
         )
+        for entry in earlier.running():
+            stalled = f" ({entry.detail})" if entry.detail else ""
+            print(
+                f"  it stood at [{entry.kind}] {entry.text}{stalled}: that step is observed again like every other item",
+                flush=True,
+            )
 
 
 def _exit_code(failed: int, blocked: int, state: _RunState, skipped: int, unconverged: bool) -> int:

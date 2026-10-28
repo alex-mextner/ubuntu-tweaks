@@ -108,6 +108,10 @@ as any behavior change.
 24. «Если тебе нужны какие-то мои действия — всё подготовь, чтобы я очень легко смог это сделать» — one command,
     `ubuntu-tweak finish` (the profile installs it as `finish-setup`, with a desktop launcher), that lists only the
     human-only steps still left and runs the machine part of each one itself (*Finish*).
+25. (24 Oct 2026, the owner's `finish-setup` stopped printing at step 19 of 142 for an hour; ticket #126) a step that
+    stops making progress must be seen, named and, where that is safe, resumed by the engine itself, never silent:
+    a watchdog on every streamed command, a visible heartbeat, and one shared non-interactive `apt-get` for the root
+    module scripts (*Stalled steps*).
 
 ## Requirements
 
@@ -1964,6 +1968,58 @@ action and after every action: run id, start time, the commit command, and per a
 (crash, Ctrl-C, power loss) says so first (`previous run was interrupted: N done, M pending`) and simply continues:
 convergence needs no replay because every action is re-observed. A finished journal is kept as the record of the
 last run; `status` prints its failed / blocked / deferred items under **Last run**.
+
+**Stalled steps (watchdog and heartbeat).** Request 25. Every command an **action** streams
+(`process.run_streamed` inside `process.watching`, which `Plan.execute` opens per action and per attempt, fallbacks
+included) is watched once a second together with **all its descendants**, the root module script behind `sudo` and
+its `apt-get` among them. A command run outside an action (the child `apply` of `finish` and `update`, a module
+script's own helpers) has no watchdog of its own, so nothing is reported twice; the action that runs it carries the
+watch, read from `/proc` (world-readable, so a root process behind `sudo` is
+visible to the unprivileged engine). Two signs of a stall:
+
+| Sign | Condition | Reported |
+|---|---|---|
+| stopped | a descendant is in state `T` (stopped by a signal; a tracing stop `t` is a debugger's and is left alone) | after 10 s (less when the stall time is shorter), so a stop that `sudo` bounces in milliseconds is not noise |
+| quiet | no output on stdout/stderr **and** no CPU time used by the whole tree | after the stall time, **120 s** by default |
+
+Output keeps a step from being *quiet* but says nothing about a stopped sibling, so the process tree is read at least
+every 5 s whatever the step prints. The output pumps and the watchdog share one lock, and the watchdog never waits for it
+longer than 0.2 s: a terminal that stops reading (Ctrl-S) cannot freeze the timeout or the end of the step.
+
+The warning is plain words, in the wizard's language (`--lang ru` or English), coloured in a terminal (yellow headline,
+cyan command), and says what is stopped (name, pid, for how long), what the engine did, what the person can do, and that
+Ctrl-C stops the run and the next run continues at this step. One report per episode; output or CPU re-arms the quiet
+report. The only recovery is **SIGCONT to a stopped descendant**: sent by the engine itself, or, when the process is
+root's, `sudo -n kill -CONT <pid>` through the credentials the run's `RootSession` already holds (never a password
+prompt, never `pkexec`). When neither works, or the process stays stopped a further grace period after SIGCONT, the
+warning prints the literal one-line command with the pid for another terminal (`sudo kill -CONT 1621259`). **Nothing
+is ever killed for being slow or stopped, and nothing is hidden**: the run keeps waiting. A stall is recorded twice: the
+run journal entry of the action gets status `running` with the detail `stalled: ...` (so an interrupted run names the
+step it stood at), and the session log gets the warning text and a `# stall:` footer note.
+
+The stall time is the step's own `stall_seconds` (5 to 86400) in `module.toml`, else `UBUNTU_TWEAK_STALL_SECONDS`,
+else 120. A step that is quiet by nature only gets a warning and goes on, so there is no switch to turn it off.
+
+**Heartbeat.** In the explained layout (`ui.rich`: a terminal, or `--color always` as `finish` hands it to the child
+`apply`) an action that has printed nothing for 3 s shows one dim line, `  … <step> (still running, mm:ss)`, rewritten
+every second; it is erased (`\r` + erase-line) before the child's next output and before any message, and is never
+written in the plain layout, so piped output carries no heartbeat byte and the session log, which collapses redraws,
+never holds one. It is never drawn over a line the child left unfinished (a prompt such as `Continue? [Y/n] `, a
+progress line without its newline) that went through the child's stdout or stderr: while the cursor is not in column 0
+the heartbeat stays silent. A prompt a child writes straight to the terminal (a `sudo` or `pkexec` password asked again
+mid-run) is invisible to the engine; the root session obtains the credentials up front so that is rare, and it is a
+known limit. Only actions have a heartbeat (`process.watching`).
+
+**Why (the freeze of 24 Oct 2026).** On Ubuntu 26.04 `sudo` is sudo-rs 0.2.13. With stdout a pipe it starts the command
+in the *background* of its own pty (no terminal input, the monitor owns the foreground). `apt-get`, a grandchild of a
+root module script, changes that pty's settings when its install ends (`tcsetattr(TCSAFLUSH)`, `StopPtyMagic`): the
+kernel sends SIGTTOU to the whole process group. sudo-rs sees only its direct child stop, gives it the foreground and
+resumes **that pid** (`kill(command_pid, SIGCONT)`, "FIXME: We should call killpg"), so `apt-get` stays stopped for
+ever while its parent waits. It is not a Ctrl+Z: a SIGTSTP from a keystroke goes to the whole foreground group and
+would stop the module script too. Every `apt-get` of a root module script therefore runs through one shared helper
+(`module_script.apt_get`: stdin at EOF (an empty pipe), so it never touches the pty, plus `DEBIAN_FRONTEND=noninteractive`,
+`NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1`, `APT_LISTCHANGES_FRONTEND=none`), and the watchdog above covers any other
+child that stops. `tests/sudo_rs_monitor.py` models the sudo-rs monitor and reproduces the stop in a sandbox.
 
 **Summary and exit code.** The run ends with `N changed` and one list per class (converged count, failed with the
 cause and the next command, blocked with the blocker, root remainder, needs-human). Exit codes: `0` everything

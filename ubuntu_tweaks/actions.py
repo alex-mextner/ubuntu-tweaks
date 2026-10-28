@@ -38,6 +38,9 @@ Public API:
   ``blocker() -> Action | None`` (optional, default ``None``): an action standing for what this one needs and
   lacks (a unit file nobody provides); asked right before ``run()``, a non-``None`` answer makes the action
   *blocked by* it: reported, never run, not a failure.
+  ``step_name() -> str`` (optional, default the first line of ``describe()``): how a stall warning and the heartbeat
+  name the action; ``stall_seconds: float | None = None`` (optional): this action's own stall time for the
+  watchdog (``watchdog``; a module's ``stall_seconds`` in ``module.toml`` sets it).
 - ``Plan.build(candidates, *, only=None) -> Plan``: when ``only`` is non-empty, keeps the
   candidates whose ``scope`` is in it (a candidate with ``scope=None`` is dropped); an empty or
   ``None`` ``only`` selects everything. Orders by ``(phase, order)`` (stable inside both), keeps the
@@ -50,7 +53,9 @@ Public API:
   order, skips root actions when ``no_sudo``, skips (without counting) an action that became
   satisfied since ``build`` (an earlier action or another process did its work), verifies
   ``check()`` after each ``run()`` and raises ``ActionFailed`` (exit 1) when it still fails.
-  ``on_start`` is called with each action before it runs, ``on_done`` after it ran and verified.
+  ``on_start`` is called with each action before it runs, ``on_done`` after it ran and verified. While an action
+  runs it is reported to ``observer`` as ``running`` (its stall, if any, again as ``running`` with the detail
+  ``stalled: ...``) and every command it streams is watched under its ``step_name()`` (``process.watching``).
 - ``ExecutionResult(changed, skipped, manual)``, ``ExecutionResult.render_skipped() -> str`` (the
   ``--no-sudo`` skips) and ``ExecutionResult.render_manual() -> str`` (the closing ``Manual steps`` block).
   Like ``Plan.render`` they print the compact text, or the explained one (``ui.rich()``).
@@ -60,14 +65,16 @@ from __future__ import annotations
 
 import random
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 
-from ubuntu_tweaks import ui
+from ubuntu_tweaks import process, ui
 from ubuntu_tweaks.errors import UbuntuTweakError
+from ubuntu_tweaks.watchdog import Stall
 
 DEFAULT_ORDER = 100
 
@@ -184,6 +191,7 @@ class Action(ABC):
     scope: str | None = None
     order: float = DEFAULT_ORDER
     key: str | None = None  # stable identity across plan rebuilds (``describe()`` can embed live state)
+    stall_seconds: float | None = None  # the watchdog's stall time for this action (None: the default)
 
     @abstractmethod
     def describe(self) -> str:
@@ -193,6 +201,10 @@ class Action(ABC):
         """One sentence on why this kind of action exists (shown in interactive output); the default is the
         per-kind wording of ``ui.kind_why``. Override for an action whose reason depends on its state."""
         return ui.kind_why(self.kind)
+
+    def step_name(self) -> str:
+        """The name a stall warning and the heartbeat give this action: the first line of ``describe()``."""
+        return (self.describe().splitlines() or [""])[0]
 
     @abstractmethod
     def check(self) -> bool:
@@ -440,11 +452,31 @@ class _Execution:
             return chained
         return None
 
-    def _try(self, action: Action, runner: Callable[[], None]) -> tuple[BaseException | None, int]:
-        """Run ``runner`` with the retry policy; ``(error or None, attempts used)``. A manual step propagates."""
+    def _try(
+        self, action: Action, runner: Callable[[], None], *, owner: Action | None = None
+    ) -> tuple[BaseException | None, int]:
+        """Run ``runner`` with the retry policy; ``(error or None, attempts used)``. A manual step propagates.
+        Every attempt is watched under the action's name (``process.watching``); a stall is noted on ``owner``'s
+        journal entry (the primary action, when ``action`` is one of its alternatives)."""
+        reported = owner or action
+        seconds = action.stall_seconds if action.stall_seconds is not None else reported.stall_seconds
+
         for attempt in range(1, max(self.policy.attempts, 1) + 1):
+            ended = threading.Event()
+            guard = threading.Lock()  # the check and the write of a late report are one step w.r.t. the final status
+
+            def stalled(stall: Stall, ended: threading.Event = ended, guard: threading.Lock = guard) -> None:
+                with guard:
+                    if not ended.is_set():  # a report that arrives after the attempt must not undo its final status
+                        self._note(reported, "running", stall.detail())
+
             try:
-                runner()
+                try:
+                    with process.watching(action.step_name(), stall_seconds=seconds, on_stall=stalled):
+                        runner()
+                finally:
+                    with guard:
+                        ended.set()
             except ManualStepRequired:
                 raise
             except Exception as error:
@@ -477,7 +509,7 @@ class _Execution:
                 tried.append(f"{alternative.describe()} (needs root: skipped)")
                 continue
             try:
-                error, _attempts = self._try(alternative, alternative.run)
+                error, _attempts = self._try(alternative, alternative.run, owner=action)
             except ManualStepRequired as needed:
                 tried.append(f"{alternative.describe()} (needs you: {needed})")
                 continue
@@ -503,6 +535,8 @@ class _Execution:
             return
         tried: list[str] = []
         if action.needs_root and self.no_sudo:
+            if action.alternatives():
+                self._note(action, "running")  # an interrupted fallback leaves the step it stood at
             if not self._fallback(action, tried):
                 self.skipped.append(action)
                 self._note(action, "deferred", "needs root")
@@ -511,6 +545,7 @@ class _Execution:
             return
         if self.on_start is not None:
             self.on_start(action)
+        self._note(action, "running")
         try:
             error, attempts = self._try(action, action.run)
         except ManualStepRequired as needed:

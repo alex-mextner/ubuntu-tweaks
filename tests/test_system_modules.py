@@ -81,6 +81,19 @@ class SystemModulePlannerTests(TempDirCase):
         self.assertEqual(action.describe(), "run memguard: sudo -- modules/memguard/install.sh --now")
         self.assertIn("[sudo] [system-module] run memguard: sudo -- modules/memguard/install.sh --now", plan.render())
 
+    def test_the_action_is_named_by_its_module_and_carries_the_manifests_stall_time(self) -> None:
+        write(
+            self.repo / "modules/earlyoom/module.toml",
+            "stall_seconds = 900\n" + MANIFEST.format(enabled="true"),
+        )
+        self.module("plain")
+
+        actions = {action.scope: action for action in self.candidates(Recorder(check_exit=3))}
+
+        earlyoom, plain = actions["earlyoom"], actions["plain"]
+        self.assertEqual((earlyoom.stall_seconds, earlyoom.step_name()), (900, "run earlyoom"))
+        self.assertIsNone(plain.stall_seconds)
+
     def test_checker_runs_inside_the_module_directory_without_sudo_and_with_a_timeout(self) -> None:
         self.module("memguard")
         runner = Recorder(check_exit=0)

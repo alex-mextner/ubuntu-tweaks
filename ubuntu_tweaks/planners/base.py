@@ -165,11 +165,15 @@ class PostAction(Action):
         self.order = manifest.order + POST_ORDER_OFFSET
         self.key = f"post:{manifest.name}:{post.name}"
         self.needs_root = post.needs_root
+        self.stall_seconds = manifest.stall_seconds
         self._waits_for = tuple(waits_for)
 
     def describe(self) -> str:
         what = self._post.description or f"{self._post.name}: {shlex.join(self._run_argv)}"
         return f"{self._manifest.name}: {what}"
+
+    def step_name(self) -> str:
+        return f"{self._manifest.name}: {self._post.name}"
 
     def check(self) -> bool:
         result = self._process.query(self._check_argv, timeout=POST_CHECK_TIMEOUT_SECONDS, cwd=self._manifest.directory)

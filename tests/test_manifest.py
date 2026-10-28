@@ -126,6 +126,13 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, pattern):
             parse(text, name)
 
+    def test_stall_seconds_is_a_whole_number_of_seconds_from_5_to_86400(self) -> None:
+        self.assertIsNone(parse('[source]\nkind = "builtin"\n', "x").stall_seconds)
+        self.assertEqual(parse('stall_seconds = 600\n[source]\nkind = "builtin"\n', "x").stall_seconds, 600)
+        for bad in ("4", "86401", "0", "-1", '"120"', "1.5", "true"):
+            with self.subTest(bad=bad):
+                self.assertInvalid(f'stall_seconds = {bad}\n[source]\nkind = "builtin"\n', "'stall_seconds' must be")
+
     def test_ego_is_reserved_and_rejected(self) -> None:
         self.assertInvalid('[source]\nkind = "ego"\nuuid = "a@b"\n', r"not supported yet \(#20\)")
 
