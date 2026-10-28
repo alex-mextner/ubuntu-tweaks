@@ -36,16 +36,18 @@ import atexit
 import codecs
 import contextlib
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from ubuntu_tweaks import watchdog
 from ubuntu_tweaks.errors import UbuntuTweakError
 
 _CHUNK = 65536
@@ -53,6 +55,8 @@ _TAIL = 2000  # characters of a child's stderr kept for the error message of a f
 _DETAIL = 400  # ... of which the last three non-empty lines are shown on one line, clipped to this many
 _DRAIN_GRACE = 2.0  # seconds to wait for output left in the pipes once the child has exited
 _INTERRUPT_GRACE = 0.25  # seconds a child gets to react to the Ctrl-C it received too, before it is stopped
+_POLL_SECONDS = 1.0  # how often the watchdog looks at a running child
+_STEP_LABEL = 100  # characters of a command line kept as the name of a step the engine knows nothing else about
 _abandoned: list[IO[bytes]] = []  # pipes whose reader is still blocked: closing them would let the fd be reused
 
 
@@ -111,9 +115,58 @@ def elevate(argv: Sequence[str]) -> list[str]:
     raise CommandError("root is required but neither sudo nor pkexec is installed")
 
 
-def _pump(pipe: IO[bytes], stream_name: str, abandoned: threading.Event, tail: list[str] | None = None) -> None:
+@dataclass(frozen=True)
+class Watch:
+    """What ``run_streamed`` knows about the step it runs for: its name in a stall warning, its own stall time
+    (``None``: ``UBUNTU_TWEAK_STALL_SECONDS``, then 120 s), who is told of a stall, and a heartbeat for it."""
+
+    label: str = ""
+    stall_seconds: float | None = None
+    on_stall: Callable[[watchdog.Stall], None] | None = None
+    resume: Callable[[int], bool] | None = None  # a test seam: what continues a stopped descendant
+    poll_seconds: float = _POLL_SECONDS
+    heartbeat_after: float = watchdog.HEARTBEAT_AFTER_SECONDS
+
+
+_watch: Watch | None = None
+
+
+def current_watch() -> Watch | None:
+    return _watch
+
+
+@contextlib.contextmanager
+def watching(
+    label: str = "",
+    *,
+    stall_seconds: float | None = None,
+    on_stall: Callable[[watchdog.Stall], None] | None = None,
+    resume: Callable[[int], bool] | None = None,
+    poll_seconds: float = _POLL_SECONDS,
+    heartbeat_after: float = watchdog.HEARTBEAT_AFTER_SECONDS,
+) -> Iterator[None]:
+    """Every command started inside the block belongs to the step ``label``: a stall is named after it, reaches
+    ``on_stall`` and, in the explained layout, a quiet step shows an elapsed-time heartbeat."""
+    global _watch
+    previous = _watch
+    _watch = Watch(label, stall_seconds, on_stall, resume, poll_seconds, heartbeat_after)
+    try:
+        yield
+    finally:
+        _watch = previous
+
+
+def _pump(
+    pipe: IO[bytes],
+    stream_name: str,
+    abandoned: threading.Event,
+    monitor: watchdog.Watchdog | None,
+    tail: list[str] | None = None,
+) -> None:
     """Copy ``pipe`` to ``sys.<stream_name>`` chunk by chunk (not by line, so a prompt without a newline shows).
     ``tail``, when given, keeps the last ``_TAIL`` characters of what was read (the reason a failure shows).
+    Every chunk tells the watchdog (``None`` outside a ``watching`` block) that the child is alive; the heartbeat
+    line is erased before it is shown and never drawn over a line the child left unfinished.
 
     Once ``abandoned`` is set the caller has stopped waiting: the thread only drains, so it never writes to a
     stream the interpreter is about to tear down."""
@@ -128,20 +181,35 @@ def _pump(pipe: IO[bytes], stream_name: str, abandoned: threading.Event, tail: l
         text = decoder.decode(chunk, final=not chunk)
         if text and tail is not None:
             tail[:] = ["".join(tail + [text])[-_TAIL:]]
-        if text and shown and not abandoned.is_set():
-            stream = getattr(sys, stream_name)
-            try:
-                try:
-                    stream.write(text)
-                except UnicodeEncodeError:  # a character the terminal's encoding lacks: show a replacement, not silence
-                    encoding = getattr(stream, "encoding", None) or "ascii"
-                    stream.write(text.encode(encoding, "replace").decode(encoding))
-                stream.flush()
-            except (OSError, ValueError):  # the terminal or pipe we write to is gone: keep draining the child
-                shown = False
+        if text and not abandoned.is_set():
+            with monitor.lock if monitor is not None else contextlib.nullcontext():
+                if monitor is not None:
+                    monitor.activity(text)
+                if shown:
+                    stream = getattr(sys, stream_name)
+                    try:
+                        try:
+                            stream.write(text)
+                        except UnicodeEncodeError:  # a character the terminal's encoding lacks: show a replacement
+                            encoding = getattr(stream, "encoding", None) or "ascii"
+                            stream.write(text.encode(encoding, "replace").decode(encoding))
+                        stream.flush()
+                    except (OSError, ValueError):  # the terminal or pipe we write to is gone: keep draining the child
+                        shown = False
         if not chunk:
             break
     pipe.close()  # an abandoned pipe is released as soon as the last writer lets go of it
+
+
+def _poll_loop(monitor: watchdog.Watchdog, stop: threading.Event, poll: float) -> None:
+    """Look at the child's process tree every ``poll`` seconds until ``stop`` is set. A thread of its own: a write of
+    the heartbeat or a warning that blocks (a terminal paused with Ctrl-S) must not stop the caller from seeing the
+    child exit or its timeout run out."""
+    while not stop.wait(poll):
+        try:
+            monitor.poll()
+        except Exception as error:  # the watchdog is an aid: its own failure never fails or hides the step
+            print(f"watchdog: {type(error).__name__}: {error}", file=sys.stderr)
 
 
 def _feed(pipe: IO[bytes], data: bytes) -> None:
@@ -149,6 +217,18 @@ def _feed(pipe: IO[bytes], data: bytes) -> None:
         pipe.write(data)
     with contextlib.suppress(OSError):
         pipe.close()
+
+
+def _watchdog_for(pid: int, watch: Watch, argv: Sequence[str]) -> watchdog.Watchdog:
+    step = (watch.label or shlex.join(map(str, argv)))[:_STEP_LABEL]
+    return watchdog.Watchdog(
+        pid,
+        step=step,
+        stall_seconds=watchdog.stall_seconds(os.environ, watch.stall_seconds),
+        resume=watch.resume if watch.resume is not None else watchdog.resume_stopped,
+        on_stall=watch.on_stall,
+        heartbeat=watchdog.Heartbeat(step, sys.stdout, after=watch.heartbeat_after),
+    )
 
 
 def run_streamed(
@@ -165,6 +245,12 @@ def run_streamed(
     session log's tees); stdin is the terminal, or ``input_text`` when given. ``OSError`` when the program cannot
     start and ``subprocess.TimeoutExpired`` (the child is stopped first) propagate as ``subprocess.run`` raises them.
     ``stderr_tail`` (a list) ends up holding one string: the last characters the child wrote to stderr.
+
+    Inside a ``watching`` block (one per action) a watchdog looks at the child and every descendant once a second
+    (``watchdog``): a stopped one is continued and reported, a step with no output and no CPU for the stall time is
+    reported, and a quiet step shows a heartbeat. Outside a block nothing is watched, so a command nested in a
+    watched one (the child ``apply`` of ``finish``, a module script's ``apt-get``) is never reported twice.
+    Nothing is ever killed for being slow.
     """
     # A Python child on a pipe would hold its prompts back and mix its two streams: ask it not to buffer.
     environment = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -176,10 +262,16 @@ def run_streamed(
         stderr=subprocess.PIPE,
         env=environment,
     )
+    watch = _watch
+    monitor = _watchdog_for(process.pid, watch, argv) if watch is not None else None
+    stop = threading.Event()
+    poll_seconds = watch.poll_seconds if watch is not None else _POLL_SECONDS
     readers = [
         (
             threading.Thread(
-                target=_pump, args=(pipe, name, abandoned, stderr_tail if name == "stderr" else None), daemon=True
+                target=_pump,
+                args=(pipe, name, abandoned, monitor, stderr_tail if name == "stderr" else None),
+                daemon=True,
             ),
             pipe,
             abandoned,
@@ -191,6 +283,8 @@ def run_streamed(
     try:
         for reader, _, _ in readers:
             reader.start()
+        if monitor is not None:
+            threading.Thread(target=_poll_loop, args=(monitor, stop, poll_seconds), daemon=True).start()
         if input_text is not None and process.stdin is not None:
             threading.Thread(target=_feed, args=(process.stdin, input_text.encode()), daemon=True).start()
         returncode = process.wait(timeout)
@@ -209,6 +303,9 @@ def run_streamed(
                 process.wait()
         raise
     finally:
+        stop.set()
+        if monitor is not None:
+            monitor.finish()
         deadline = time.monotonic() + _DRAIN_GRACE
         for reader, pipe, abandoned in readers:
             if reader.ident is None:  # never started

@@ -26,11 +26,13 @@ Public API:
   description, unless_linked)``: the init-pipeline tables ``[install]``, ``[[step]]`` and ``[[post]]`` (spec, *Init
   pipeline*); ``PACKAGE_PLACEHOLDER`` matches the ``{packages.<manager>}`` argv placeholder.
 - ``Manifest(name, directory, description, enabled, source, extension, settings, seeds,
-  migrations, deps, order, phase, install, steps, post, manual)``; ``enabled`` is the module default that
-  ``profile.toml`` / ``machine.toml`` can override; ``order`` (0-999, default ``DEFAULT_ORDER``) and
+  migrations, deps, order, phase, install, steps, post, manual, stall_seconds)``; ``enabled`` is the module default
+  that ``profile.toml`` / ``machine.toml`` can override; ``order`` (0-999, default ``DEFAULT_ORDER``) and
   ``phase`` (``base`` / ``packages`` / ``system`` as a ``Phase``, or ``None``) place the module's
   install-time actions in the plan; ``manual`` is the optional hint printed in the closing ``Manual
-  steps`` block when the module's installer exits 10 (how the user finishes it).
+  steps`` block when the module's installer exits 10 (how the user finishes it); ``stall_seconds`` (5 to 86400,
+  default ``None``) is how long one of the module's commands may print nothing and use no CPU before the watchdog
+  warns (spec, *Stalled steps*).
 - ``FinishStep(id, title, why, action, check, ...)`` and ``Manifest.finish``: the ``[[finish]]`` tables, the
   human-only steps ``ubuntu-tweak finish`` walks through (spec, *Finish*); ``check`` exits 0 when done,
   ``prepare``, ``run`` and ``gate`` are optional argv lists, ``./name`` is a file of the module directory;
@@ -62,6 +64,7 @@ from ubuntu_tweaks.dconf_path import is_dconf_dir_path
 from ubuntu_tweaks.actions import DEFAULT_ORDER, Phase
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.profile import Profile, TomlTable, TomlValue
+from ubuntu_tweaks.watchdog import MAX_STALL_SECONDS, MIN_STALL_SECONDS
 
 MANIFEST_FILE = "module.toml"
 _NAME = re.compile(r"[a-z0-9][a-z0-9._-]*")
@@ -211,6 +214,7 @@ class Manifest:
     steps: tuple[Step, ...] = ()
     post: tuple[Post, ...] = ()
     manual: str = ""  # how the user completes the step the installer reports as manual (exit 10)
+    stall_seconds: int | None = None  # the watchdog's quiet time for this module's commands (None: the default)
     requires: tuple[str, ...] = ()  # modules whose failure blocks this one (failover dependencies)
     fallbacks: tuple[Fallback, ...] = ()  # system modules: alternative installers
     coverage: tuple[Rule, ...] = ()  # [[coverage]] rules this module contributes (spec, *Coverage*)
@@ -572,6 +576,7 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         "step",
         "post",
         "manual",
+        "stall_seconds",
         "requires",
         "fallback",
         "coverage",
@@ -622,6 +627,11 @@ def parse_manifest(name: str, text: str, directory: Path, origin: Origin = "engi
         steps=steps,
         post=_parse_posts(root.array("post")),
         manual=root.string("manual") or "",
+        stall_seconds=(
+            root.integer("stall_seconds", 0, int(MIN_STALL_SECONDS), int(MAX_STALL_SECONDS))
+            if "stall_seconds" in root.table
+            else None
+        ),
         requires=root.strings("requires"),
         fallbacks=_parse_fallbacks(root.array("fallback"), source, root),
         coverage=tuple(parse_rules([item.table for item in root.array("coverage")], Layer.MODULE, where, name)),

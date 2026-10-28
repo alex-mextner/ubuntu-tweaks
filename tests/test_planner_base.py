@@ -647,6 +647,17 @@ class PostTests(BaseCase):
         self.assertEqual(executed, [("/bin/true",), ("sudo", "--", "/bin/true")])
         self.assertEqual((wire.phase, wire.order, rooted.needs_root), (Phase.BASE, 40.5, True))
 
+    def test_a_post_carries_its_modules_stall_time_and_is_named_by_module_and_post(self) -> None:
+        self.module(
+            "brew",
+            'order = 40\nstall_seconds = 900\n[source]\nkind = "builtin"\n'
+            '[[post]]\nname = "wire"\nrun = ["/bin/true"]\ncheck = ["/bin/false"]\n',
+        )
+
+        (action,) = self.candidates(FakeProcess({("/bin/false",): CommandResult(1)}))
+
+        self.assertEqual((action.stall_seconds, action.step_name()), (900, "brew: wire"))
+
     def test_a_program_that_does_not_exist_yet_is_a_manual_step_not_a_crash(self) -> None:
         self.post_module(
             '[[post]]\nname = "late"\nrun = ["/no/such/brew", "install", "x"]\ncheck = ["/no/such/brew"]\n'

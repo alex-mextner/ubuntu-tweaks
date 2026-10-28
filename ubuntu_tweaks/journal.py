@@ -11,12 +11,14 @@ Public API:
 
 - ``journal_path(environ=None, home=None) -> Path``.
 - ``RunJournal(path, command)``: ``begin(actions)``, ``add(actions)`` (a rebuilt plan), ``record(action, status,
-  detail="")`` with status ``pending`` / ``done`` / ``failed`` / ``blocked`` / ``deferred`` / ``manual``,
-  ``finish(exit_code)``.
+  detail="")`` with status ``pending`` / ``running`` / ``done`` / ``failed`` / ``blocked`` / ``deferred`` / ``manual``,
+  ``finish(exit_code)``. ``running`` is written when an action starts and again, with the detail ``stalled: ...``,
+  when the stall watchdog reports it: a run that dies leaves the step it stood at.
 - ``previous(path) -> Run | None``: the journal on disk; ``Run.finished`` False means that run was interrupted.
 - ``Run`` (``id``, ``command``, ``started``, ``finished``, ``exit_code``, ``entries``) and ``Entry`` (``key``,
   ``kind``, ``text``, ``status``, ``detail``); ``Run.counts() -> dict[str, int]``,
-  ``Run.problems() -> list[Entry]`` (failed, blocked, deferred).
+  ``Run.problems() -> list[Entry]`` (failed, blocked, deferred), ``Run.running() -> list[Entry]`` (the step an
+  interrupted run stood at).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from ubuntu_tweaks.capture.secrets import mask_secrets
 MAX_TEXT = 500  # one journal line is a pointer to the session log, not the log
 
 PENDING = "pending"
+RUNNING = "running"
 PROBLEM_STATUSES = ("failed", "blocked", "deferred")
 
 
@@ -82,6 +85,9 @@ class Run:
 
     def problems(self) -> list[Entry]:
         return [entry for entry in self.entries if entry.status in PROBLEM_STATUSES]
+
+    def running(self) -> list[Entry]:
+        return [entry for entry in self.entries if entry.status == RUNNING]
 
 
 def previous(path: Path) -> Run | None:

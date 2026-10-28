@@ -184,7 +184,10 @@ def last_run_lines() -> list[str]:
         return []
     problems = last.problems()
     if not last.finished:
-        return ["Last run: interrupted before it finished; `ubuntu-tweak apply --commit` continues it"]
+        lines = ["Last run: interrupted before it finished; `ubuntu-tweak apply --commit` continues it"]
+        for entry in last.running():
+            lines.append(f"  stood at: [{entry.kind}] {entry.text}" + (f" ({entry.detail})" if entry.detail else ""))
+        return lines
     if not problems:
         return []
     lines = [f"Last run (`{last.command}`, exit {last.exit_code}): {len(problems)} item(s) did not converge"]

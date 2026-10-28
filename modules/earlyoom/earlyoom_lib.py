@@ -37,7 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ubuntu_tweaks.module_script import Finding, Module, ModuleError, environment, main, module_config, write_file
+from ubuntu_tweaks.module_script import Finding, Module, ModuleError, apt_get, main, module_config, write_file
 from ubuntu_tweaks.process import CommandError, Process
 
 PACKAGE = "earlyoom"
@@ -385,7 +385,7 @@ class UserEarlyoom(Module):
         prefix.parent.mkdir(parents=True, exist_ok=True)
         # staged next to the final place (same filesystem), so the last step is one rename
         with tempfile.TemporaryDirectory(prefix=".earlyoom-", dir=prefix.parent) as scratch:
-            self._process.execute(["apt-get", "download", PACKAGE], cwd=scratch)
+            apt_get(self._process, "download", PACKAGE, cwd=Path(scratch))
             debs = sorted(Path(scratch).glob(f"{PACKAGE}_*.deb"))
             if not debs:
                 raise ModuleError("apt-get download earlyoom produced no .deb file")
@@ -520,10 +520,7 @@ class SystemEarlyoom(Module):
         try:
             if not self._installed():
                 # --force-confold: a later package upgrade must not stop to ask about the file this module owns
-                with environment(DEBIAN_FRONTEND="noninteractive"):
-                    self._process.execute(
-                        ["apt-get", "install", "-y", "-o", "Dpkg::Options::=--force-confold", PACKAGE]
-                    )
+                apt_get(self._process, "install", "-y", "-o", "Dpkg::Options::=--force-confold", PACKAGE)
             previous = _read(self.defaults_path)
             changed = previous != render_defaults(self._options)
             if changed:

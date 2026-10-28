@@ -1,14 +1,19 @@
 """The shared scaffolding of Python system-module scripts: options, the desktop user, the dispatcher."""
 
+import contextlib
 import io
 import json
+import os
+import re
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from ubuntu_tweaks import module_script as kit
-from ubuntu_tweaks.process import CommandResult
+from ubuntu_tweaks.process import CommandError, CommandResult, Process
 
 
 def passwd(name, uid, home):
@@ -239,6 +244,90 @@ class PlanHelpers(unittest.TestCase):
         self.assertIn("    -two", changed)
         self.assertIn("    +2", changed)
         self.assertEqual(kit.unified_diff_lines("/etc/a", "same\n", "same\n"), [])
+
+
+class AptGet(unittest.TestCase):
+    """Ticket #126: ``apt-get`` of a root module script must never touch the pty sudo-rs gives it."""
+
+    class Recorder(Process):
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], str | None, object, dict[str, str | None]]] = []
+
+        def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+            self.calls.append(
+                (list(argv), input_text, cwd, {name: os.environ.get(name) for name in kit.APT_ENVIRONMENT})
+            )
+
+    def test_apt_get_runs_with_stdin_at_eof_and_the_four_noninteractive_variables(self):
+        machine = self.Recorder()
+
+        kit.apt_get(machine, "install", "-y", "earlyoom")
+
+        argv, stdin, cwd, seen = machine.calls[0]
+        self.assertEqual(argv, ["apt-get", "install", "-y", "earlyoom"])
+        self.assertEqual(stdin, "")  # a pipe that is at EOF at once, never the terminal
+        self.assertIsNone(cwd)
+        self.assertEqual(
+            seen,
+            {
+                "DEBIAN_FRONTEND": "noninteractive",
+                "NEEDRESTART_MODE": "a",
+                "NEEDRESTART_SUSPEND": "1",
+                "APT_LISTCHANGES_FRONTEND": "none",
+            },
+        )
+
+    def test_the_working_directory_is_passed_on(self):
+        machine = self.Recorder()
+
+        kit.apt_get(machine, "download", "earlyoom", cwd=Path("/tmp/x"))
+
+        self.assertEqual(machine.calls[0][2], Path("/tmp/x"))
+
+    def test_the_environment_is_restored_afterwards_and_after_a_failure(self):
+        class Failing(Process):
+            def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+                raise CommandError("apt-get install: exited with status 100", 100)
+
+        with mock.patch.dict(os.environ, {"DEBIAN_FRONTEND": "dialog"}):
+            os.environ.pop("NEEDRESTART_MODE", None)
+            with self.assertRaises(CommandError):
+                kit.apt_get(Failing(), "install", "x")
+            self.assertEqual(os.environ["DEBIAN_FRONTEND"], "dialog")
+            self.assertNotIn("NEEDRESTART_MODE", os.environ)
+
+    def test_the_real_process_hands_the_child_a_closed_stdin_and_the_variables(self):
+        with tempfile.TemporaryDirectory() as raw:
+            fake = Path(raw) / "apt-get"
+            fake.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, sys\n"
+                "print(sys.stdin.isatty(), repr(sys.stdin.read()), os.environ['DEBIAN_FRONTEND'], "
+                "os.environ['NEEDRESTART_MODE'], os.environ['NEEDRESTART_SUSPEND'], os.environ['APT_LISTCHANGES_FRONTEND'])\n"
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            out = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"PATH": f"{raw}:{os.environ['PATH']}"}),
+                contextlib.redirect_stdout(out),
+            ):
+                kit.apt_get(Process(), "install", "-y", "x")
+
+        self.assertEqual(out.getvalue().strip(), "False '' noninteractive a 1 none")
+
+    def test_no_root_module_script_runs_apt_get_around_the_helper(self):
+        modules = Path(kit.__file__).resolve().parents[1] / "modules"
+        offenders = []
+        for path in modules.glob("*/*"):
+            if not path.is_file() or path.suffix in (".md", ".toml", ".json", ".service", ".timer", ".rules"):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if re.search(r"\b(?:execute|_run|run)\(\s*\[?\s*[\"']apt(?:-get)?[\"']", text):
+                offenders.append(f"{path.parent.name}/{path.name}")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

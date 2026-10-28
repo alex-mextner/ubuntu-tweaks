@@ -139,6 +139,18 @@ writes `~/.local/state/ubuntu-tweaks/run-journal.json` (an interrupted run is no
 lists the last run's failed/blocked/deferred items). Opt-in unattended self-heal: `[modules.autoheal] enabled = true`
 (user timer running `apply --commit --no-sudo` at login and daily; never asks for root). Spec: *Reconcile and failover*.
 
+### A step that stops answering
+
+Every command `apply --commit` runs, and everything it starts (a root module script behind `sudo`, the `apt-get` below
+it), is watched once a second. A quiet step shows a dim `… <step> (still running, mm:ss)` line; a step that prints
+nothing and uses no CPU for 120 s (`stall_seconds = N` in its `module.toml`, or `UBUNTU_TWEAK_STALL_SECONDS`) or has a
+**stopped** process below it gets a plain warning (Russian with `--lang ru`) naming the step and the process. A
+stopped process is continued by the engine (`SIGCONT`, through your open `sudo` session when it is root's); if that does
+not work the warning prints the exact command for another terminal, for example `sudo kill -CONT 1621259`. Nothing is
+ever killed. Ctrl-C stops the run, and the next `apply --commit` says which step the last one stood at and continues
+there. Why this exists: on Ubuntu 26.04 `sudo` is sudo-rs, which leaves the `apt-get` of a root module script stopped
+for ever (ticket #126); module scripts now run `apt-get` through one helper that cannot hit it. Spec: *Stalled steps*.
+
 ### Settings workflow: preview → commit → review → PR
 
 What you configure in GNOME Settings (and the config files you keep under `~/.config`) lives in the

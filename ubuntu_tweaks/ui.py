@@ -535,6 +535,13 @@ _TEXT: dict[str, dict[str, str]] = {
         "finish.apply.no_gi": "PyGObject (python3-gi) is missing: the sudo step installs it",
         "finish.apply.plan_error": "the plan could not be computed: {detail}",
         "finish.apply.left": "root actions: {root}; failed items of the last run: {problems}",
+        "stall.stopped": "step '{step}' looks stuck: {comm} (pid {pid}) has been stopped for {seconds} s and nothing resumes it.",
+        "stall.resumed": "The engine sent it SIGCONT; if it stays stopped, this is reported once more.",
+        "stall.command": "What you can do: run this in another terminal (the step then goes on):",
+        "stall.leave": "Ctrl-C here stops this run, and the next run continues at this same step. Nothing was killed or hidden.",
+        "stall.quiet": "step '{step}' looks stuck: no output and no CPU for {seconds} s.",
+        "stall.quiet_hint": "It may just be slow: wait. A step that is quiet by nature can say so with stall_seconds in its module.toml or {env}. Ctrl-C stops this run, and the next run continues at this same step.",
+        "heartbeat": "  … {step} (still running, {time})",
     },
     "ru": {
         "header.machine": "машина",
@@ -659,6 +666,13 @@ _TEXT: dict[str, dict[str, str]] = {
         "finish.apply.no_gi": "нет PyGObject (python3-gi): его поставит шаг с sudo",
         "finish.apply.plan_error": "не удалось посчитать план: {detail}",
         "finish.apply.left": "действий с root: {root}; сбоев прошлого запуска: {problems}",
+        "stall.stopped": "шаг «{step}» завис: {comm} (pid {pid}) остановлен уже {seconds} с, и никто его не продолжает.",
+        "stall.resumed": "Движок послал ему SIGCONT; если он останется остановленным, я скажу об этом ещё раз.",
+        "stall.command": "Что можно сделать: в другом терминале выполни команду (шаг пойдёт дальше):",
+        "stall.leave": "Ctrl-C здесь остановит этот запуск, а следующий продолжит с этого же шага. Ничего не убито и не скрыто.",
+        "stall.quiet": "шаг «{step}» не выводит ничего и не использует процессор уже {seconds} с.",
+        "stall.quiet_hint": "Возможно, он просто медленный: подожди. Если шаг по природе тихий, задай stall_seconds в его module.toml или {env}. Ctrl-C остановит этот запуск, а следующий продолжит с этого же шага.",
+        "heartbeat": "  … {step} (идёт, {time})",
     },
 }
 

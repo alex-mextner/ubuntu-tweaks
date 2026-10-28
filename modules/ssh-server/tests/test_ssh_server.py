@@ -15,6 +15,7 @@ sys.path.insert(0, str(MODULE.parents[1]))
 sys.dont_write_bytecode = True
 
 from ubuntu_tweaks.module_script import (  # noqa: E402
+    APT_ENVIRONMENT,
     EXIT_DRIFT,
     EXIT_FAILED,
     EXIT_NEEDS_MANUAL,
@@ -52,7 +53,19 @@ AllowUsers alice
 """
 STOCK_CONFIG = "Include /etc/ssh/sshd_config.d/*.conf\n\nPort 22\n#ListenAddress 0.0.0.0\nUsePAM yes\n"
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXampleEXampleEXampleEXampleEXample test@host"
-MUTATING = {"apt-get", "apt", "enable", "disable", "start", "stop", "reload", "restart", "daemon-reload", "reset-failed", "mask"}
+MUTATING = {
+    "apt-get",
+    "apt",
+    "enable",
+    "disable",
+    "start",
+    "stop",
+    "reload",
+    "restart",
+    "daemon-reload",
+    "reset-failed",
+    "mask",
+}
 
 
 class FakeMachine(Process):
@@ -71,6 +84,7 @@ class FakeMachine(Process):
         self.loaded_dropin = None  # the unit drop-in text systemd has loaded (None: no drop-in)
         self.fail_on = None  # a (verb, unit) whose execution fails
         self.executed = []
+        self.apt_runs = []  # (stdin text, the noninteractive variables the child would see) per apt-get call
         self.queried = []
 
     def listeners(self):
@@ -108,6 +122,8 @@ class FakeMachine(Process):
     def execute(self, argv, *, input_text=None, cwd=None):
         argv = list(argv)
         self.executed.append(tuple(argv))
+        if argv[0] == "apt-get":
+            self.apt_runs.append((input_text, {name: os.environ.get(name) for name in APT_ENVIRONMENT}))
         if self.fail_on and argv[:2] == ["systemctl", self.fail_on]:
             if self.fail_on == "restart":
                 self.active = False  # a failed restart leaves sshd stopped
@@ -280,7 +296,9 @@ class Check(Base):
         self.assertFalse(ssh.is_listening(("fd7a:115c:a1e0::1233:1a5f", 2223), listeners))
         self.assertTrue(ssh.is_listening(("100.74.26.95", 2223), listeners))
         # sshd sets IPV6_V6ONLY: a `::` socket never serves a v4 address, but a `*` one does
-        self.assertFalse(ssh.is_listening(("100.74.26.95", 2223), ssh.parse_listeners("LISTEN 0 128 [::]:2223 [::]:*\n")))
+        self.assertFalse(
+            ssh.is_listening(("100.74.26.95", 2223), ssh.parse_listeners("LISTEN 0 128 [::]:2223 [::]:*\n"))
+        )
         self.assertTrue(ssh.is_listening(("100.74.26.95", 2223), ssh.parse_listeners("LISTEN 0 128 *:2223 *:*\n")))
 
     def test_a_hostname_listen_address_is_matched_by_port(self):
@@ -352,6 +370,15 @@ class Install(Base):
         self.assertTrue(all(f.ok for f in module.findings()))
         self.assertEqual(sorted((self.root / "etc").rglob("*.conf")), [])  # no config written
         self.assertEqual(os.environ.get("DEBIAN_FRONTEND"), before)  # restored
+
+    def test_apt_runs_without_a_terminal_and_noninteractively(self):
+        # ticket #126: a grandchild of sudo-rs that touches the pty is stopped for ever; stdin must be at EOF
+        self.write("etc/ssh/sshd_config", STOCK_CONFIG)
+        machine = FakeMachine(self.root, installed=False)
+
+        self.module(machine).apply()
+
+        self.assertEqual(machine.apt_runs, [("", APT_ENVIRONMENT)])
 
     def test_refuses_without_root(self):
         machine = self.tailscale_box()
@@ -533,7 +560,9 @@ class PasswordPolicy(Base):
 
     def test_restricted_keys_do_not_count(self):
         self.write("etc/ssh/sshd_config", STOCK_CONFIG)
-        (self.home / ".ssh/authorized_keys").write_text(f'command="/usr/bin/rrsync /backup",restrict {KEY}\nfrom="10.0.0.0/8" {KEY}\n')
+        (self.home / ".ssh/authorized_keys").write_text(
+            f'command="/usr/bin/rrsync /backup",restrict {KEY}\nfrom="10.0.0.0/8" {KEY}\n'
+        )
         machine = FakeMachine(self.root, enabled=True, active=True)
         with self.assertRaises(NeedsManual):
             self.module(machine, {"password_auth": False}).apply()

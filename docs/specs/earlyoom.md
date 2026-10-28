@@ -30,6 +30,9 @@ earlyoom` when missing (the option keeps *our* file at a later upgrade instead o
 atomically, `systemctl enable`, and `systemctl restart` **only when the file changed** (`start` when the service was
 down; nothing when everything already matches, so a second run reports `nothing to change`). The Ubuntu package
 already starts the service with its stock file; the first install therefore changes the file and restarts once.
+Every `apt-get` of the module (the install and the rootless `apt-get download`) runs through `module_script.apt_get`:
+stdin at EOF and the four non-interactive variables, so it never touches the terminal sudo-rs gives the script
+(*Stalled steps* of the main spec; this module's install stood stopped for an hour on 24 Oct 2026 without it).
 
 *Rollback.* After a start or restart the module looks again after one second. earlyoom exits at once on a flag it
 rejects (a bad `extra_args` word), and a last line of defence must never end up stopped by the module that configures
