@@ -1438,10 +1438,16 @@ when python3 is missing) and exit 10 for a needed manual step; options arrive as
   machine-level plan, listing what the machine cannot support. `ctmux` (github.com/alex-mextner/ctmux-cli) is
   cloned and installed by rig on macOS and Ubuntu (ctmux's own `install.sh` owns the OS gate and `--check`).
   `[deps] apt = ["python3-yaml"]` is what rig reads its config with.
+- **A uv-managed launcher is kept (ticket 140).** When `~/.local/bin/rig` is a symlink that resolves to
+  `~/.local/share/uv/tools/hyper-rig/bin/rig` (an executable) and that tool directory has uv's
+  `uv-receipt.toml`, the install is complete as it is: the module needs neither a checkout nor `repo`, never
+  fast-forwards or relinks anything, and runs `rig profile sync` / `rig activate` through that launcher. This is
+  what stops the nightly autoheal from re-pointing an immutable `uv tool install hyper-rig` at a dirty checkout.
 - **Manual steps (exit 10):** no `repo` (`needs manual: set [modules.rig] repo ...`), a clone that fails (forge
   credentials: `fj auth login` / `gh auth login`), a directory or file where the checkout or the symlink should
-  go (never replaced), a profile conflict (`rig profile sync --take local|remote`). Anything else non-zero is a
-  failure.
+  go, a symlink at `~/.local/bin/rig` that is neither the checkout's `bin/rig` nor the uv launcher (broken, or
+  another tool's: reported, never replaced; `--check` says drift), a profile conflict
+  (`rig profile sync --take local|remote`). Anything else non-zero is a failure.
 - Needs the Base slice's manifest (`[source] root = false`, `preview`, exit 10, `UBUNTU_TWEAK_MODULE_CONFIG`).
   Tests: `modules/rig/tests/test_install.py` (a local git repo and a stub `rig`; throwaway `HOME`).
 - **Manual real-run checklist** (root and the forge are not available to tests): `ubuntu-tweak apply` shows
