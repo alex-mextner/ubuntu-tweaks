@@ -5,6 +5,7 @@ order of the steps (clone, link, profile, activate) and which calls are read-onl
 touches the real $HOME, the network or the real rig.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -226,11 +227,130 @@ class RigInstall(unittest.TestCase):
         with open(self.link) as f:
             self.assertEqual(f.read(), "mine\n")
 
-    def test_a_stale_symlink_is_repointed(self):
+    def test_a_broken_symlink_is_reported_and_never_repointed(self):
         os.makedirs(os.path.dirname(self.link))
         os.symlink("/nonexistent/rig", self.link)
-        self.assertEqual(self.run_install().returncode, 0)
-        self.assertEqual(os.path.realpath(self.link), os.path.realpath(os.path.join(self.dir, "bin", "rig")))
+        res = self.run_install()
+        self.assertEqual(res.returncode, 10)
+        self.assertIn("needs manual", res.stderr)
+        self.assertEqual(os.readlink(self.link), "/nonexistent/rig")
+        res = self.run_install("--plan")
+        self.assertIn("needs manual", res.stdout)
+        self.assertNotIn("ln -s", res.stdout)
+        res = self.run_install("--check")
+        self.assertEqual(res.returncode, 3)
+        self.assertEqual(os.readlink(self.link), "/nonexistent/rig")
+
+    def test_a_symlink_to_an_unrelated_tool_is_reported_and_never_repointed(self):
+        other = os.path.join(self.home, ".local", "share", "uv", "tools", "other-tool")
+        os.makedirs(os.path.join(other, "bin"))
+        with open(os.path.join(other, "uv-receipt.toml"), "w") as f:
+            f.write("[tool]\n")
+        self.write_executable(os.path.join(other, "bin", "rig"))
+        os.makedirs(os.path.dirname(self.link))
+        os.symlink(os.path.join(other, "bin", "rig"), self.link)
+        self.assert_link_kept_fail_closed()
+
+    def test_a_hyper_rig_tool_dir_without_a_uv_receipt_is_not_trusted(self):
+        self.make_uv_layout(receipt=False)
+        self.assert_link_kept_fail_closed()
+
+    def test_a_hyper_rig_tool_dir_without_an_executable_rig_is_not_trusted(self):
+        self.make_uv_layout()
+        os.chmod(self.uv_rig, 0o644)
+        self.assert_link_kept_fail_closed()
+
+    def test_a_symlink_into_hyper_rig_that_is_not_the_launcher_is_not_trusted(self):
+        self.make_uv_layout(entry="other")
+        self.assert_link_kept_fail_closed()
+
+    # -- a uv-managed hyper-rig launcher is kept (ticket #140) -------------------------------------
+    def make_uv_layout(self, receipt=True, entry="rig"):
+        """What `uv tool install hyper-rig` leaves behind: the tool dir and ~/.local/bin/rig pointing into it."""
+        self.uv_tool = os.path.join(self.home, ".local", "share", "uv", "tools", "hyper-rig")
+        self.uv_rig = os.path.join(self.uv_tool, "bin", "rig")
+        os.makedirs(os.path.join(self.uv_tool, "bin"))
+        if receipt:
+            with open(os.path.join(self.uv_tool, "uv-receipt.toml"), "w") as f:
+                f.write('[tool]\nrequirements = [{ name = "hyper-rig" }]\n')
+        self.write_executable(self.uv_rig, tagged=True)
+        os.makedirs(os.path.dirname(self.link), exist_ok=True)
+        if entry != "rig":
+            self.write_executable(os.path.join(self.uv_tool, "bin", entry))
+        os.symlink(os.path.join(self.uv_tool, "bin", entry), self.link)
+
+    def write_executable(self, path, tagged=False):
+        """A stub rig; the tagged one also notes in $RIG_LOG.uv that it, not another rig, was called."""
+        shebang, rest = FAKE_RIG.split("\n", 1)
+        body = f'{shebang}\necho uv >>"$RIG_LOG.uv"\n{rest}' if tagged else FAKE_RIG
+        with open(path, "w") as f:
+            f.write(body)
+        os.chmod(path, 0o755)
+
+    def calls_through_uv(self):
+        try:
+            with open(self.log + ".uv") as f:
+                return len(f.read().splitlines())
+        except FileNotFoundError:
+            return 0
+
+    def make_dirty_old_checkout(self):
+        git("clone", "-q", self.origin, self.dir)
+        with open(os.path.join(self.dir, "riglib", "cli.py"), "w") as f:
+            f.write("# someone else's uncommitted work\n")
+
+    def launcher(self):
+        with open(os.path.realpath(self.link), "rb") as f:
+            return os.readlink(self.link), os.path.realpath(self.link), hashlib.sha256(f.read()).hexdigest()
+
+    def assert_link_kept_fail_closed(self):
+        before = os.readlink(self.link)
+        res = self.run_install()
+        self.assertEqual(res.returncode, 10, res.stdout + res.stderr)
+        self.assertIn("needs manual", res.stderr)
+        res = self.run_install("--plan")
+        self.assertIn("needs manual", res.stdout)
+        self.assertNotIn("ln -s", res.stdout)
+        res = self.run_install("--check")
+        self.assertEqual(res.returncode, 3)
+        self.assertEqual(os.readlink(self.link), before)
+
+    def test_a_uv_launcher_survives_plan_check_and_two_installs_beside_a_dirty_checkout(self):
+        self.make_uv_layout()
+        self.make_dirty_old_checkout()
+        mine = os.path.join(self.dir, "riglib", "cli.py")
+        before = self.launcher()
+        home_tree = tree(self.home)
+
+        res = self.run_install("--plan")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("ln -s", res.stdout)
+        self.assertEqual(self.launcher(), before)
+        self.assertEqual(tree(self.home), home_tree)
+
+        res = self.run_install("--check")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.launcher(), before)
+
+        for _ in range(2):
+            res = self.run_install()
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertEqual(self.launcher(), before)
+            self.assertEqual(tree(self.home), home_tree)
+        with open(mine) as f:
+            self.assertEqual(f.read(), "# someone else's uncommitted work\n")
+        self.assertEqual(git("status", "--porcelain", cwd=self.dir), " M riglib/cli.py\n")
+        self.assertEqual(self.calls().count("activate commit"), 2)
+        self.assertEqual(self.calls_through_uv(), len(self.calls()), "every rig call must go through the uv launcher")
+
+    def test_a_uv_launcher_needs_neither_a_checkout_nor_the_repo_option(self):
+        self.make_uv_layout()
+        before = self.launcher()
+        for args in ("--plan", "--check", None):
+            res = self.run_install(*([args] if args else []), options={"repo": ""})
+            self.assertEqual(res.returncode, 0, f"{args}: {res.stdout}{res.stderr}")
+        self.assertEqual(self.launcher(), before)
+        self.assertFalse(os.path.exists(self.dir))
 
     def test_a_profile_conflict_is_a_manual_step_and_stops_before_activate(self):
         os.makedirs(os.path.join(self.home, ".config", "rig", "profile", "repo", ".git"))
