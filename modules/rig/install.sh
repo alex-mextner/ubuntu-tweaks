@@ -67,7 +67,7 @@ link_ok() { [ -L "$link" ] && [ "$(readlink -f "$link")" = "$(readlink -f "$chec
 # The uv-managed launcher (`uv tool install hyper-rig`): a symlink that resolves to the tool's own bin/rig,
 # and that tool dir has uv's receipt. Only then is the install complete without a checkout.
 link_uv() {
-  [ -L "$link" ] && [ -f "$uv_tool/uv-receipt.toml" ] && [ -x "$uv_tool/bin/rig" ] &&
+  [ -L "$link" ] && [ -f "$uv_tool/uv-receipt.toml" ] && [ -f "$uv_tool/bin/rig" ] && [ -x "$uv_tool/bin/rig" ] &&
     [ "$(readlink -f "$link")" = "$(readlink -f "$uv_tool/bin/rig")" ]
 }
 if link_uv; then uv=true rig="$link"; else uv=false rig="$checkout_rig"; fi
