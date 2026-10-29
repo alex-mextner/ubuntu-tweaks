@@ -260,6 +260,14 @@ class RigInstall(unittest.TestCase):
         os.chmod(self.uv_rig, 0o644)
         self.assert_link_kept_fail_closed()
 
+    def test_a_hyper_rig_bin_rig_that_is_a_directory_is_not_trusted(self):
+        self.make_uv_layout()
+        os.remove(self.link)
+        os.remove(self.uv_rig)
+        os.mkdir(self.uv_rig)
+        os.symlink(self.uv_rig, self.link)
+        self.assert_link_kept_fail_closed()
+
     def test_a_symlink_into_hyper_rig_that_is_not_the_launcher_is_not_trusted(self):
         self.make_uv_layout(entry="other")
         self.assert_link_kept_fail_closed()

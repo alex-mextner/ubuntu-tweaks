@@ -1439,7 +1439,7 @@ when python3 is missing) and exit 10 for a needed manual step; options arrive as
   cloned and installed by rig on macOS and Ubuntu (ctmux's own `install.sh` owns the OS gate and `--check`).
   `[deps] apt = ["python3-yaml"]` is what rig reads its config with.
 - **A uv-managed launcher is kept (ticket 140).** When `~/.local/bin/rig` is a symlink that resolves to
-  `~/.local/share/uv/tools/hyper-rig/bin/rig` (an executable) and that tool directory has uv's
+  `~/.local/share/uv/tools/hyper-rig/bin/rig` (an executable regular file) and that tool directory has uv's
   `uv-receipt.toml`, the install is complete as it is: the module needs neither a checkout nor `repo`, never
   fast-forwards or relinks anything, and runs `rig profile sync` / `rig activate` through that launcher. This is
   what stops the nightly autoheal from re-pointing an immutable `uv tool install hyper-rig` at a dirty checkout.
