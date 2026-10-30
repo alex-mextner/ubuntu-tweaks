@@ -6,9 +6,10 @@
                      reinstalled from the checkout and the daemon restarted
     finish run       `passwords-app signin`, with the Apple ID prefilled from [modules.passwords-app] apple_id
 
-The probe is one init-only GrandSlam request for an Apple ID that does not exist: with the fix Apple answers
-ec=-20970 ("entered incorrectly"), without it ec=-80045 (the client identity is refused before the account is
-even looked at). No password, no 2FA code and no real account are involved, and nothing is signed in or stored.
+The probe is one init-only GrandSlam request for an Apple ID that does not exist: Apple answers ec=-20970
+("entered incorrectly") when it accepts the client, ec=-80045 when it refuses it before the account is even looked
+at: an old client identity, or anisette data Apple no longer accepts (Dadoum/anisette-v3-server#61). No password,
+no 2FA code and no real account are involved, and nothing is signed in or stored.
 The Apple ID, password, the code and the device passcode are typed by the owner into `passwords-app signin`
 itself; this script never sees them. The Apple ID option is not a secret.
 """
@@ -120,7 +121,7 @@ def check(runner: Runner) -> int:
 
 
 def probe(runner: Runner, venv_python: Path) -> str:
-    """``-20970`` (fix present), ``-80045`` (fix missing) or the first line of whatever else the probe said."""
+    """``-20970`` (Apple accepts the client), ``-80045`` (it refuses it) or the last line of whatever else it said."""
     code, text = runner.capture([str(venv_python), "-c", PROBE], timeout=PROBE_TIMEOUT)
     found = re.search(r"ec=(-?\d+)", text)
     if found:
@@ -144,7 +145,7 @@ def prepare(
         print(f"the Apple probe gave no usable answer: {answer}")
         return 1
     checkout = checkout_dir(options, home)
-    print(f"the installed venv still answers ec={REFUSED_CODE}: reinstalling it from {checkout}")
+    print(f"the installed venv answers ec={REFUSED_CODE}: reinstalling it from {checkout}")
     code, text = runner.capture(
         ["uv", "pip", "install", "-q", "--python", str(python), "--reinstall-package", "passwords-app", str(checkout)],
         timeout=300,
@@ -158,11 +159,19 @@ def prepare(
         return 1
     sleep(SETTLE_SECONDS)
     answer = probe(runner, python)
-    if answer != FIXED_CODE:
-        print(f"after the reinstall the probe still says {answer}: the checkout {checkout} does not carry the fix")
-        return 1
-    print(f"reinstalled; the probe now answers ec={FIXED_CODE}")
-    return 0
+    if answer == FIXED_CODE:
+        print(f"reinstalled; the probe now answers ec={FIXED_CODE}")
+        return 0
+    if answer == REFUSED_CODE:
+        print(
+            f"after the reinstall the probe still says ec={REFUSED_CODE}: {checkout} is what runs now, so it either "
+            f"predates the client-identity fix (git -C {checkout} pull) or Apple refuses the anisette data of the "
+            "anisette server (Dadoum/anisette-v3-server#61). Every sign-in step that asks Apple's GrandSlam for a "
+            "token, continuing at the device passcode included, fails until the server serves data Apple accepts"
+        )
+    else:
+        print(f"after the reinstall the Apple probe gave no usable answer: {answer}")
+    return 1
 
 
 def run(runner: Runner, options: Mapping[str, object]) -> int:
