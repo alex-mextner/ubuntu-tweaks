@@ -95,6 +95,83 @@ class StreamedOutputTests(unittest.TestCase):
 
         self.assertEqual((out, err), ("to-out\n", "to-err\n"))
 
+    def test_last_line_merges_stderr_into_the_stdout_stream_and_env_is_the_whole_environment(self) -> None:
+        script = "import os, sys; print('to-out'); print('to-err', file=sys.stderr); print(os.environ.get('ONLY'))"
+        last: list[str] = []
+
+        out, err = self.shown(
+            lambda: process_module.run_streamed([sys.executable, "-c", script], env={"ONLY": "this"}, last_line=last)
+        )
+
+        self.assertEqual((out, err), ("to-out\nto-err\nthis\n", ""))
+        self.assertEqual(last, ["this"])
+
+    def test_last_line_is_empty_for_a_silent_child_and_skips_blank_lines(self) -> None:
+        silent: list[str] = []
+        self.shown(lambda: process_module.run_streamed(["true"], last_line=silent))
+        self.assertEqual(silent, [])
+        blank: list[str] = []
+        self.shown(lambda: process_module.run_streamed(["sh", "-c", "echo kept; echo; echo '   '"], last_line=blank))
+        self.assertEqual(blank, ["kept"])
+
+    def test_last_line_masks_what_the_session_log_would_mask(self) -> None:
+        last: list[str] = []
+        script = "echo '-----BEGIN " + "PRIVATE KEY-----'; echo SYNTHETIC-KEY-FRAGMENT"
+        self.shown(lambda: process_module.run_streamed(["sh", "-c", script], last_line=last))
+        self.assertEqual(last, ["***"])
+
+    def test_last_line_masks_after_removing_escapes_and_across_chunks(self) -> None:
+        token = "ghp_" + "A1b2" * 9
+        script = (
+            f"import sys, time; t = {token!r}; sys.stdout.write(t[:24] + '\\x1b[31m'); sys.stdout.flush(); time.sleep(0.2); "
+            "sys.stdout.write(t[24:] + '\\x1b[0m\\n'); "
+            "sys.stdout.write('https://alice:demo-password@example.org/' + 'x' * 1967); sys.stdout.flush(); time.sleep(0.2); "
+            "sys.stdout.write('\\n')"
+        )
+        last: list[str] = []
+        out, _ = self.shown(lambda: process_module.run_streamed([sys.executable, "-c", script], last_line=last))
+        self.assertIn("alice", out)  # the test child printed it; the reason must not carry the password
+        self.assertNotIn("demo-password", last[0])
+
+    def test_last_line_masks_a_token_split_by_an_escape(self) -> None:
+        token = "ghp_" + "A1b2" * 9
+        script = f"t = {token!r}; print(t[:24] + '\\x1b[31m' + t[24:] + '\\x1b[0m')"
+        last: list[str] = []
+        self.shown(lambda: process_module.run_streamed([sys.executable, "-c", script], last_line=last))
+        self.assertEqual(last, ["***"])
+
+    def test_last_line_does_not_split_a_credential_where_an_endless_line_is_cut(self) -> None:
+        script = (
+            "import sys, time; sys.stdout.write(' ' * 262144 + 'https://alice:'); sys.stdout.flush(); time.sleep(0.3); "
+            "sys.stdout.write('SYNTHETIC-PASSWORD-123@example.org/\\n')"
+        )
+        last: list[str] = []
+        self.shown(lambda: process_module.run_streamed([sys.executable, "-c", script], last_line=last))
+        self.assertEqual(last, ["https://***@example.org/"])
+
+    def test_last_line_is_what_the_session_log_shows_even_after_many_erased_lines(self) -> None:
+        script = "import sys; sys.stdout.write('-----BEGIN ' + 'PRIVATE KEY-----\\n' + '\\x1b[2K\\n' * 201 + 'SYNTHETIC-KEY-FRAGMENT\\n')"
+        last: list[str] = []
+        self.shown(lambda: process_module.run_streamed([sys.executable, "-c", script], last_line=last))
+        self.assertEqual(last, ["***"])
+
+    def test_a_grandchild_writing_after_the_child_is_gone_does_not_change_the_last_line(self) -> None:
+        last: list[str] = []
+        with mock.patch.object(process_module, "_DRAIN_GRACE", 0.2):
+            self.shown(
+                lambda: process_module.run_streamed(
+                    ["sh", "-c", "(sleep 1; echo background-status) & echo real-failure"], last_line=last
+                )
+            )
+            time.sleep(1.3)
+        self.assertEqual(last, ["real-failure"])
+
+    def test_stderr_tail_still_holds_only_stderr(self) -> None:
+        script = "import sys; print('to-out'); print('to-err', file=sys.stderr)"
+        tail: list[str] = []
+        self.shown(lambda: process_module.run_streamed([sys.executable, "-c", script], stderr_tail=tail))
+        self.assertEqual("".join(tail), "to-err\n")
+
     def test_run_without_capture_copies_output_and_returns_empty(self) -> None:
         returned: list[str] = []
 

@@ -40,6 +40,29 @@ class TerminalTextTests(unittest.TestCase):
         self.assertEqual(sessionlog.strip_terminal_text("long text\r\x1b[Kshort"), "short")
 
 
+class LineMaskerTests(unittest.TestCase):
+    """The one place that turns written chunks into the plain, masked lines of the log (and of a failure reason)."""
+
+    def test_lines_come_out_when_their_newline_arrives_and_the_rest_at_the_end(self) -> None:
+        lines = sessionlog.LineMasker()
+        self.assertEqual(lines.feed("one\ntw"), [("one", "one")])
+        self.assertEqual(lines.pending(), "tw")
+        self.assertEqual(lines.feed("o\n"), [("two", "two")])
+        lines.feed("three")
+        self.assertEqual(lines.rest(), [("three", "three")])
+        self.assertEqual(lines.rest(), [])
+
+    def test_escapes_are_removed_redraws_collapsed_and_a_line_that_only_erased_itself_is_dropped(self) -> None:
+        lines = sessionlog.LineMasker()
+        shown = lines.feed("10%\r\x1b[32mdone\x1b[0m\n\x1b[2K\n\n")
+        self.assertEqual([masked for _raw, masked in shown], ["done", ""])
+
+    def test_a_pem_block_stays_masked_across_the_lines_that_erased_themselves(self) -> None:
+        lines = sessionlog.LineMasker()
+        text = "-----BEGIN " + "PRIVATE KEY-----\n" + "\x1b[2K\n" * 201 + "SYNTHETIC-KEY-FRAGMENT\n"
+        self.assertEqual([masked for _raw, masked in lines.feed(text)][-1], "***")
+
+
 class MaskSecretsTests(unittest.TestCase):
     def test_tokens_jwts_and_base64_runs_become_stars(self) -> None:
         self.assertEqual(mask_secrets(f"token {TOKEN} end"), "token *** end")
@@ -705,7 +728,7 @@ class NeverBreaksTheCommandTests(LogCase):
                 print(f"line {number}")
             return 9
 
-        with mock.patch.object(sessionlog._Sink, "_line", side_effect=OSError(28, "No space left on device")):
+        with mock.patch.object(sessionlog._Sink, "_write", side_effect=OSError(28, "No space left on device")):
             code, out, err, _ = self.logged(command)
 
         self.assertEqual((code, out), (9, "".join(f"line {n}\n" for n in range(5))))
