@@ -23,6 +23,8 @@ Public API:
 - ``set_command(name)`` renames the log to ``<timestamp>-<name>.log`` (``none`` until then) and ``note(key, value)``
   adds a ``# key: value`` line to the footer; both do nothing outside a logged run.
 - ``strip_terminal_text(text) -> str``: the escape-free, ``\\r``-collapsed form of one line.
+- ``LineMasker``: one stream's chunks in, the plain, masked lines the log would write out (also used by
+  ``process.run_streamed`` for the last line of a child's output, so a failure reason never shows what the log hides).
 """
 
 from __future__ import annotations
@@ -120,6 +122,65 @@ def _iso(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+class LineMasker:
+    """One stream's text as the log shows it: the chunks written so far in, plain masked lines out. It holds an
+    unfinished line until its newline arrives (a very long one is cut after a space so no token is split), collapses
+    redraws, removes escape sequences, drops a line that only erased itself and masks each line with a ``SecretMasker``
+    that has seen every earlier line of the stream. ``feed`` and ``rest`` return ``(raw, masked)`` pairs, ``raw`` being the
+    line as written. The session log and the failure reason of a child (``process.run_streamed``) share it, so the
+    reason can never show what the log hides. Not thread-safe: one writer at a time."""
+
+    def __init__(self) -> None:
+        self._pending: list[str] = []  # chunks: appending never recopies
+        self._held = 0
+        self._masker = SecretMasker()
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        if "\n" in text:
+            *complete, rest = (self.take() + text).split("\n")
+            rest = _collapse(rest)
+            if rest:
+                self._pending.append(rest)
+                self._held = len(rest)
+        else:
+            self._pending.append(text)
+            self._held += len(text)
+            if self._held <= _MAX_PENDING:
+                return []
+            # One endless line (a minified file): log it in pieces, cut after a space so no token is split.
+            whole = self.take()
+            cut = whole.rfind(" ") + 1 or len(whole)
+            complete = [whole[:cut]]
+            if cut < len(whole):
+                self._pending.append(whole[cut:])
+                self._held = len(whole) - cut
+        return self._shown(complete)
+
+    def rest(self) -> list[tuple[str, str]]:
+        """The unfinished line, now that the stream has ended."""
+        text = self.take()
+        return self._shown([text]) if text else []
+
+    def take(self) -> str:
+        """The unfinished line as written, which is then empty."""
+        text = "".join(self._pending)
+        self._pending.clear()
+        self._held = 0
+        return text
+
+    def pending(self) -> str:
+        return "".join(self._pending)
+
+    def _shown(self, raws: Iterable[str]) -> list[tuple[str, str]]:
+        shown: list[tuple[str, str]] = []
+        for raw in raws:
+            line = strip_terminal_text(raw)
+            if not line and raw.strip("\r"):  # a redraw that erased itself (spinner cleanup): not a blank line
+                continue
+            shown.append((raw, self._masker.line(line)))
+        return shown
+
+
 class _Sink:
     """The open log file. One lock orders every write of both streams, the reader threads of child output
     included; each stream keeps its unfinished line until the newline arrives."""
@@ -131,9 +192,7 @@ class _Sink:
         self.notes: dict[str, str] = {}
         self._file = file
         self._real_stderr = real_stderr
-        self._pending: dict[str, list[str]] = {"stdout": [], "stderr": []}  # chunks: appending never recopies
-        self._held = {"stdout": 0, "stderr": 0}
-        self._maskers = {"stdout": SecretMasker(), "stderr": SecretMasker()}  # a PEM block never spans two streams
+        self._lines = {"stdout": LineMasker(), "stderr": LineMasker()}  # a PEM block never spans two streams
         self._broken = False
         self._last_secretive = False  # the line before the answer asked for a secret
         self._typing: str | None = None  # the answer being typed, once its first character was read
@@ -144,27 +203,12 @@ class _Sink:
         """Log ``text`` just written to ``stream``; the caller holds ``lock``."""
         if self._broken:
             return
-        if "\n" in text:
-            *complete, rest = (self._take(stream) + text).split("\n")
-            rest = _collapse(rest)
-            if rest:
-                self._pending[stream].append(rest)
-                self._held[stream] = len(rest)
-        else:
-            self._pending[stream].append(text)
-            self._held[stream] += len(text)
-            if self._held[stream] <= _MAX_PENDING:
-                return
-            # One endless line (a minified file): log it in pieces, cut after a space so no token is split.
-            whole = self._take(stream)
-            cut = whole.rfind(" ") + 1 or len(whole)
-            complete = [whole[:cut]]
-            if cut < len(whole):
-                self._pending[stream].append(whole[cut:])
-                self._held[stream] = len(whole) - cut
+        shown = self._lines[stream].feed(text)
+        if not shown:
+            return
         try:
-            for raw in complete:
-                self._line(stream, raw)
+            for raw, masked in shown:
+                self._write(stream, raw, masked)
             self._file.flush()
         except (OSError, ValueError) as error:
             self.fail(error)
@@ -177,11 +221,11 @@ class _Sink:
         with self.lock:
             for piece in text.splitlines(keepends=True):
                 if self._typing is None:
-                    self._typing_prompt = self._take("stdout")
+                    self._typing_prompt = self._lines["stdout"].take()
                     self._typing_secret = bool(
                         _SECRET_WORD.search(self._typing_prompt)
                         or self._last_secretive
-                        or _SECRET_WORD.search("".join(self._pending["stderr"]))
+                        or _SECRET_WORD.search(self._lines["stderr"].pending())
                     )
                     self._typing = ""
                 self._typing += piece.rstrip("\r\n")
@@ -195,14 +239,6 @@ class _Sink:
         prompt, self._typing = self._typing_prompt, None
         self.feed("stdout", f"> {prompt}{answer}\n")
         self._last_secretive = False  # the echo line above is not a question: it must not mask the next answer
-
-    def _take(self, stream: str) -> str:
-        """The unfinished line of ``stream``, which is then empty."""
-        held = self._pending[stream]
-        text = "".join(held)
-        held.clear()
-        self._held[stream] = 0
-        return text
 
     def header(self, argv: Sequence[str], started: datetime) -> None:
         engine = Path(__file__).resolve().parent.parent
@@ -223,10 +259,10 @@ class _Sink:
         with self.lock:
             self._log_typed()
             for stream in ("stdout", "stderr"):
-                rest = self._take(stream)
-                if rest and not self._broken:
+                if not self._broken:
                     try:
-                        self._line(stream, rest)
+                        for raw, masked in self._lines[stream].rest():
+                            self._write(stream, raw, masked)
                     except (OSError, ValueError) as error:
                         self.fail(error)
             ended = datetime.now(UTC)
@@ -259,13 +295,10 @@ class _Sink:
         except (OSError, ValueError) as error:
             self.fail(error)
 
-    def _line(self, stream: str, raw: str) -> None:
-        line = strip_terminal_text(raw)
-        if not line and raw.strip("\r"):  # a redraw that erased itself (spinner cleanup): not a blank line
-            return
+    def _write(self, stream: str, raw: str, masked: str) -> None:
         self._last_secretive = bool(_SECRET_WORD.search(raw))
         prefix = ERROR_PREFIX if stream == "stderr" else ""
-        self._file.write(f"{prefix}{self._maskers[stream].line(line)}\n")
+        self._file.write(f"{prefix}{masked}\n")
 
 
 def _cwd() -> str:

@@ -31,7 +31,9 @@ Public API:
 - ``exit_code(steps, statuses) -> int``: 0 when every required step is done, else 3.
 - ``validate(steps)``: a step that requires itself or sits in a requirement cycle is a ``ConfigError``;
   ``requirements(steps, step_id)`` and ``closure(steps, step_id)`` walk the requirement graph.
-- ``Shell`` / ``SubprocessShell`` / ``Output``: the one place a command is started (a seam for tests).
+- ``Shell`` / ``SubprocessShell`` / ``Output``: the one place a command is started (a seam for tests). ``stream`` (a
+  machine part) copies the output through ``sys.stdout``, so the session log has it (stderr is merged into it), and returns
+  its last non-blank line, secrets masked, as ``Output.out``; ``interactive`` (the part that needs you) inherits the terminal and is not logged.
 - ``command_step(spec, *, directory, env, shell) -> Step`` for a manifest's ``[[finish]]``; ``ApplySettings`` /
   ``apply_settings(config)`` / ``apply_step(...)`` / ``apply_probe(actions, last_run)`` for the built-in step.
 """
@@ -54,6 +56,7 @@ from ubuntu_tweaks import ui
 from ubuntu_tweaks.atomic_write import atomic_write
 from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError
 from ubuntu_tweaks.manifest import FinishStep
+from ubuntu_tweaks.process import run_streamed
 
 if TYPE_CHECKING:
     from ubuntu_tweaks.actions import Action
@@ -162,6 +165,8 @@ class Output:
 class Shell(Protocol):
     def capture(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> Output: ...
 
+    def stream(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> Output: ...
+
     def interactive(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> int: ...
 
 
@@ -185,7 +190,9 @@ class SubprocessShell:
     """The real runner. A command that is missing, not executable or too slow is an exit code and a line of text,
     never an exception: a broken check must not stop the whole checklist. ``capture`` (checks and gates) has a
     timeout and no terminal; ``interactive`` (a machine part, the part that needs you) owns the terminal and has no
-    timeout: a venv build may take minutes and its output must be visible."""
+    timeout: a venv build may take minutes and its output must be visible. ``stream`` is ``interactive`` for a
+    command that needs no keyboard: its output goes through our streams (so the session log keeps it) and its last
+    non-blank line comes back in ``Output.out``, the reason a failure shows."""
 
     def capture(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> Output:
         try:
@@ -205,6 +212,17 @@ class SubprocessShell:
         except OSError as error:  # missing, not executable, no shebang, a file where a directory should be
             return Output(_exit_for(error), err=f"{argv[0]}: cannot run: {error.strerror or error}")
         return Output(done.returncode, done.stdout, done.stderr)
+
+    def stream(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> Output:
+        last: list[str] = []
+        try:
+            with child_owns_ctrl_c():
+                code = run_streamed(argv, cwd=cwd, env=env, last_line=last)
+        except OSError as error:
+            message = f"{argv[0]}: cannot run: {error.strerror or error}"
+            print(message, file=sys.stderr)
+            return Output(_exit_for(error), out=message)
+        return Output(code, out="".join(last))
 
     def interactive(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> int:
         try:
@@ -251,8 +269,8 @@ def command_step(spec: FinishStep, *, directory: Path, env: Mapping[str, str], s
     if spec.prepare:
 
         def prepare() -> Probe:
-            code = shell.interactive(_argv(directory, spec.prepare), cwd=directory, env=env)
-            return Probe(code == 0, ui.t("finish.exit_code", code=code))
+            output = shell.stream(_argv(directory, spec.prepare), cwd=directory, env=env)
+            return Probe(output.code == 0, output.out or ui.t("finish.exit_code", code=output.code))
 
     if spec.run:
 

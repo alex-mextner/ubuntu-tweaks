@@ -796,7 +796,13 @@ on `PATH`. Every command gets `UBUNTU_TWEAK_MODULE_CONFIG` (the module's `[modul
 system modules), `UBUNTU_TWEAK_LANG` (`ru` or `en`) and `UBUNTU_TWEAK_FINISH_DRY_RUN=1` under `--dry-run`. The step texts
 are written by the module author in `title` / `title_ru` and so on; the missing `_ru` falls back to English. A
 command never prints a secret (the session log masks the usual ones anyway). `check` and `gate` run without a terminal
-and within 60 seconds; `prepare` and `run` own the terminal, have no time limit and show their output as it comes.
+and within 60 seconds. `prepare` and `run` have no time limit and show their output as it comes. `run` owns the terminal
+(the interactive part: it is not logged, as a child's own prompt never is). `prepare` is the machine part and needs no
+keyboard: it is a child with pipes like any other (*Session log*, child output), so its output reaches the screen and the
+session log, and when it fails the step's reason is the **last non-empty line it printed** (`exit code N` only when it
+printed nothing): a script says why it failed in its last line. Its stderr is merged into the stdout pipe (one stream, so
+"last" is the child's own order; the screen and the log then show its stderr lines without the `! ` prefix), and that line
+is masked like the log (a key fragment is hidden by the PEM block it belongs to) and stripped of escape sequences.
 
 State of a step, decided by the commands alone: **done** (`check` exits 0), **pending** (it does not), **wait** (a
 `gate` printed something: it says plainly `WAIT` and why, and the step is not run), **blocked** (a `requires` step
@@ -875,7 +881,7 @@ safe: done steps are only listed.
 | Step | Module | Why only you | What `finish` does itself |
 |---|---|---|---|
 | `apply` | built-in | the sudo password | the gate, then `ubuntu-tweak apply --commit` |
-| `icloud-signin` | `passwords-app` | Apple ID password, 2FA code, device passcode | probes what Apple answers to an init-only sign-in request for a fake id: `ec=-20970` means Apple accepts the client; `ec=-80045` means it refuses the client identity or the anisette data. On `-80045` it reinstalls the venv from the checkout and probes again; if that does not help it stops (exit 1) and says the refusal is either an old checkout or the anisette server (Dadoum/anisette-v3-server#61), not the installed venv. Every sign-in step asks GrandSlam for a token, continuing at the device passcode included, so none of them works while the refusal lasts. Then it runs `passwords-app signin --apple-id <apple_id option>` |
+| `icloud-signin` | `passwords-app` | Apple ID password, 2FA code, device passcode | probes what Apple answers to an init-only sign-in request for a fake id: `ec=-20970` means Apple accepts the client; `ec=-80045` means it refuses the client identity or the anisette data. On `-80045` it reinstalls the venv from the checkout and restarts the daemon, then probes again, unless every installed copy of `passwords_app` already has exactly the files of the checkout's `src/passwords_app` (bytecode caches left out): then a reinstall would change nothing and it goes straight to the verdict. If the refusal stays it stops (exit 1) and says Apple refuses the anisette data of the local anisette server, signing in cannot work until the anisette source changes, with the issue link https://github.com/alex-mextner/passwords-app/issues/144 (Dadoum/anisette-v3-server#61), and that an old checkout would need `git pull` first. Every sign-in step asks GrandSlam for a token, continuing at the device passcode included, so none of them works while the refusal lasts. Then it runs `passwords-app signin --apple-id <apple_id option>` |
 | `amo-key` | `firefox` | the AMO API key belongs to the owner's Mozilla account | opens the AMO key page, asks for both halves with hidden input, stores them in the Secret Service, then the next `apply` signs the extension |
 | `firefox-backend-prompt` | `firefox-autologin` | the WebExtension-backend prompt only the owner can answer | starts Firefox through the module and waits until the extension is active |
 
@@ -1978,8 +1984,8 @@ last run; `status` prints its failed / blocked / deferred items under **Last run
 **Stalled steps (watchdog and heartbeat).** Request 25. Every command an **action** streams
 (`process.run_streamed` inside `process.watching`, which `Plan.execute` opens per action and per attempt, fallbacks
 included) is watched once a second together with **all its descendants**, the root module script behind `sudo` and
-its `apt-get` among them. A command run outside an action (the child `apply` of `finish` and `update`, a module
-script's own helpers) has no watchdog of its own, so nothing is reported twice; the action that runs it carries the
+its `apt-get` among them. A command run outside an action (the child `apply` and the `prepare` command of `finish`, the
+child `apply` of `update`, a module script's own helpers) has no watchdog of its own, so nothing is reported twice; the action that runs it carries the
 watch, read from `/proc` (world-readable, so a root process behind `sudo` is
 visible to the unprivileged engine). Two signs of a stall:
 
@@ -2285,7 +2291,7 @@ place a dry run may write.
   last state, and every **stderr** line is prefixed `! ` (stdout lines carry no prefix), so one stream of text
   tells which stream said what. Terminal escapes and colors are never in the log, whatever `--color` says.
 - **Child output.** `Process.execute` and `process.run(capture=False)` (apt, git, the module installers, the child
-  `apply --commit` of `update`) used to let the child write to the terminal directly, which no tee can see. They now
+  `apply --commit` of `update`, the `prepare` command of a `finish` step) used to let the child write to the terminal directly, which no tee can see. They now
   give the child pipes for stdout and stderr and copy the bytes as they arrive (raw `os.read` chunks, not
   line-buffered, so a prompt without a newline appears at once) to `sys.stdout` / `sys.stderr`, so the user sees the
   same text and the tee logs it. stdin stays the terminal: a child may still read an answer. A tool that

@@ -566,6 +566,10 @@ class FakeShell:
         self.calls.append((list(argv), cwd, dict(env)))
         return self.outputs.get(Path(argv[0]).name, Output(0))
 
+    def stream(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> Output:
+        self.calls.append((list(argv), cwd, dict(env)))
+        return self.outputs.get(Path(argv[0]).name, Output(0))
+
     def interactive(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> int:
         self.calls.append((list(argv), cwd, dict(env)))
         return self.interactive_code
@@ -627,16 +631,29 @@ class CommandStepTests(TempDirCase):
         self.assertIn("gh: not logged in", reason)
         self.assertNotEqual(reason, "")
 
-    def test_prepare_runs_with_the_terminal_and_no_check_timeout_and_reports_the_exit_code(self) -> None:
-        shell = FakeShell()
-        shell.interactive_code = 3
+    def test_a_failed_prepare_shows_the_last_line_the_machine_part_printed(self) -> None:
+        shell = FakeShell({"finish": Output(3, out="the probe still says -80045")})
         built = self.build(shell)
         assert built.prepare is not None
         probe = built.prepare()
-        self.assertEqual((probe.ok, probe.detail), (False, "exit code 3"))
+        self.assertEqual((probe.ok, probe.detail), (False, "the probe still says -80045"))
         self.assertEqual(shell.calls[-1][0], [str(self.tmp / "finish"), "icloud-signin", "prepare"])
-        shell.interactive_code = 0
+
+    def test_a_silent_failed_prepare_falls_back_to_the_exit_code(self) -> None:
+        ui.configure(color="never", plain=True, lang="en")
+        self.addCleanup(ui.configure)
+        built = self.build(FakeShell({"finish": Output(3)}))
+        assert built.prepare is not None
+        probe = built.prepare()
+        self.assertEqual((probe.ok, probe.detail), (False, "exit code 3"))
+
+    def test_a_prepare_that_succeeds_is_ok_and_the_run_keeps_the_terminal(self) -> None:
+        shell = FakeShell({"finish": Output(0, out="ready\n")})
+        built = self.build(shell)
+        assert built.prepare is not None and built.run is not None
         self.assertTrue(built.prepare().ok)
+        shell.interactive_code = 4
+        self.assertEqual(built.run(), 4)
 
     def test_texts_and_requirements_come_from_the_manifest(self) -> None:
         built = self.build(FakeShell())
@@ -669,6 +686,69 @@ class SubprocessShellTests(TempDirCase):
         gone = self.tmp / "gone"
         self.assertNotEqual(shell.capture(["true"], cwd=gone, env={}).code, 0)
         self.assertNotEqual(shell.interactive(["true"], cwd=gone, env={}), 0)
+
+    def test_a_streamed_command_reaches_our_stream_and_returns_its_last_line(self) -> None:
+        path = self.script("noisy", "#!/bin/sh\necho first\necho 'the reason' >&2\nexit 1\n")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            output = SubprocessShell().stream([str(path)], cwd=self.tmp, env={})
+        self.assertEqual((output.code, output.out), (1, "the reason"))
+        self.assertEqual(out.getvalue(), "first\nthe reason\n")  # stderr is merged: one pipe, the child's own order
+
+    def test_the_last_line_is_the_childs_last_in_either_stream_order_every_time(self) -> None:
+        for body in ("echo working >&2; echo fatal", "echo working; echo fatal >&2"):
+            path = self.script("order", f"#!/bin/sh\n{body}\nexit 7\n")
+            for _ in range(40):
+                with mock.patch.object(sys, "stdout", io.StringIO()):
+                    self.assertEqual(SubprocessShell().stream([str(path)], cwd=self.tmp, env={}).out, "fatal")
+
+    def test_a_diagnostic_followed_by_a_flood_of_blank_text_is_still_the_reason(self) -> None:
+        path = self.script("blank", "#!/bin/sh\necho fatal\nprintf '%3000s\\n\\n   ' ''\nexit 7\n")
+        with mock.patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(SubprocessShell().stream([str(path)], cwd=self.tmp, env={}).out, "fatal")
+
+    def test_a_key_fragment_in_the_last_line_is_masked_by_the_block_it_belongs_to(self) -> None:
+        body = "echo '-----BEGIN " + "PRIVATE KEY-----'; echo SYNTHETIC-KEY-FRAGMENT; exit 3"
+        path = self.script("key", f"#!/bin/sh\n{body}\n")
+        with mock.patch.object(sys, "stdout", io.StringIO()):
+            output = SubprocessShell().stream([str(path)], cwd=self.tmp, env={})
+        self.assertNotIn("SYNTHETIC-KEY-FRAGMENT", output.out)
+
+    def test_escape_sequences_and_redraws_are_not_part_of_the_reason(self) -> None:
+        path = self.script("tty", "#!/bin/sh\nprintf '10%%\\r\\033[31mfailed to build\\033[0m\\n'\nexit 1\n")
+        with mock.patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(SubprocessShell().stream([str(path)], cwd=self.tmp, env={}).out, "failed to build")
+
+    def test_a_last_line_without_a_newline_counts(self) -> None:
+        path = self.script("bare", "#!/bin/sh\nprintf 'done\\nstopped at step 3'\nexit 1\n")
+        with mock.patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(SubprocessShell().stream([str(path)], cwd=self.tmp, env={}).out, "stopped at step 3")
+
+    def test_a_streamed_command_that_cannot_start_is_an_exit_code_and_a_line(self) -> None:
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            output = SubprocessShell().stream(["/nonexistent/prog"], cwd=self.tmp, env={})
+        self.assertEqual(output.code, 127)
+        self.assertIn("cannot run", err.getvalue())
+        self.assertIn("cannot run", output.out)
+
+    def test_a_streamed_command_gets_exactly_the_environment_given(self) -> None:
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdout", out):
+            output = SubprocessShell().stream(["/usr/bin/env"], cwd=self.tmp, env={"ONLY": "this"})
+        self.assertEqual(output.code, 0)
+        self.assertIn("ONLY=this", out.getvalue())
+        self.assertNotIn("HOME=", out.getvalue())
+
+    def test_a_failed_prepare_through_the_real_shell_logs_its_line_and_shows_it_as_the_reason(self) -> None:
+        self.script("finish", "#!/bin/sh\necho 'Apple refuses the anisette data'\nexit 1\n")
+        out = io.StringIO()
+        built = finish.command_step(SPEC, directory=self.tmp, env={}, shell=SubprocessShell())
+        assert built.prepare is not None
+        with mock.patch.object(sys, "stdout", out):
+            probe = built.prepare()
+        self.assertEqual((probe.ok, probe.detail), (False, "Apple refuses the anisette data"))
+        self.assertEqual(out.getvalue(), "Apple refuses the anisette data\n")
 
     def test_a_timeout_is_124(self) -> None:
         with mock.patch.object(finish, "CHECK_TIMEOUT_SECONDS", 0.2):

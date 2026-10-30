@@ -5,9 +5,11 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 MODULE = Path(__file__).resolve().parents[1]
@@ -88,13 +90,34 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(self.prepare(runner), 0)
         self.assertEqual([Path(call[0]).name for call in runner.calls], ["python"])
 
+    def prepare_shown(self, runner, **options):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.prepare(runner, **options)
+        return code, out.getvalue()
+
+    def install_package(self, source: dict[str, str], *, installed: dict[str, str] | None = None) -> Path:
+        """A checkout whose ``src/passwords_app`` holds ``source`` and a venv with ``installed`` (default: the same)."""
+        checkout = self.home / "dev/passwords-app"
+        for root, files in (
+            (checkout / "src/passwords_app", source),
+            (
+                self.home / ".local/share/passwords-app/venv/lib/python3.14/site-packages/passwords_app",
+                source if installed is None else installed,
+            ),
+        ):
+            shutil.rmtree(root, ignore_errors=True)
+            for name, text in files.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+        return checkout
+
     def test_a_venv_without_the_fix_is_reinstalled_from_the_checkout_and_probed_again(self) -> None:
         runner = FakeRunner(probes=["-80045", "-20970"])
         self.assertEqual(self.prepare(runner, checkout="/srv/passwords-app"), 0)
         programs = [Path(call[0]).name for call in runner.calls]
         self.assertEqual(programs, ["python", "uv", "systemctl", "python"])
-        uv = runner.calls[1]
-        self.assertIn("/srv/passwords-app", uv)
+        self.assertIn("/srv/passwords-app", runner.calls[1])
         self.assertEqual(runner.calls[2], ["systemctl", "--user", "restart", finish.UNIT])
 
     def test_a_refusal_that_survives_a_fresh_install_is_not_blamed_on_the_checkout(self) -> None:
@@ -116,6 +139,67 @@ class PrepareTests(unittest.TestCase):
             code = self.prepare(runner)
         self.assertEqual(code, 1)
         self.assertIn("no usable answer: ERROR anisette is down", out.getvalue())
+
+    def test_a_venv_that_already_has_the_files_of_the_checkout_is_neither_reinstalled_nor_the_daemon_restarted(
+        self,
+    ) -> None:
+        self.install_package({"const.py": "A = 1\n", "icloud/gsa.py": "B = 2\n"})
+        stale_cache = self.python.parents[1] / "lib/python3.14/site-packages/passwords_app/__pycache__/const.pyc"
+        stale_cache.parent.mkdir()
+        stale_cache.write_bytes(b"\0")  # bytecode is not what was installed
+        runner = FakeRunner(probes=["-80045"])
+        code, text = self.prepare_shown(runner)
+        self.assertEqual(code, 1)
+        self.assertEqual([Path(call[0]).name for call in runner.calls], ["python"])
+        self.assertIn("a reinstall would change nothing", text)
+        self.assertIn("Apple refuses the anisette data of the local anisette server", text.splitlines()[-1])
+
+    def test_every_python_version_the_venv_has_lived_under_must_match(self) -> None:
+        self.install_package({"const.py": "A = 1\n"})
+        older = self.python.parents[1] / "lib/python3.13/site-packages/passwords_app"
+        older.mkdir(parents=True)
+        (older / "const.py").write_text("A = 0\n")
+        runner = FakeRunner(probes=["-80045", "-20970"])
+        self.assertEqual(self.prepare(runner), 0)
+        self.assertIn("uv", [Path(call[0]).name for call in runner.calls])
+
+    def test_a_venv_that_differs_from_the_checkout_is_reinstalled(self) -> None:
+        differing = {
+            "another content": {"const.py": "A = 0\n"},
+            "an extra file": {"const.py": "A = 1\n", "extra.py": ""},
+            "a missing file": {},
+        }
+        for name, installed in differing.items():
+            with self.subTest(name):
+                self.install_package({"const.py": "A = 1\n"}, installed=installed)
+                runner = FakeRunner(probes=["-80045", "-20970"])
+                self.assertEqual(self.prepare(runner), 0)
+                self.assertIn("uv", [Path(call[0]).name for call in runner.calls])
+
+    def test_a_package_that_cannot_be_read_is_not_proof_that_it_is_current(self) -> None:
+        self.install_package({"const.py": "A = 1\n"})
+        runner = FakeRunner(probes=["-80045", "-20970"])
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+            self.assertEqual(self.prepare(runner), 0)
+        self.assertIn("uv", [Path(call[0]).name for call in runner.calls])
+
+    def test_an_uncommitted_edit_in_the_checkout_is_installed_not_blamed_on_apple(self) -> None:
+        checkout = self.install_package({"const.py": "A = 1\n"})
+        (checkout / "src/passwords_app/const.py").write_text("A = 2\n")
+        runner = FakeRunner(probes=["-80045", "-20970"])
+        self.assertEqual(self.prepare(runner), 0)
+        self.assertIn("uv", [Path(call[0]).name for call in runner.calls])
+
+    def test_apple_refusing_after_the_reinstall_is_blamed_on_the_anisette_data_not_the_checkout(self) -> None:
+        runner = FakeRunner(probes=["-80045", "-80045"])
+        code, text = self.prepare_shown(runner)
+        self.assertEqual(code, 1)
+        last = text.splitlines()[-1]
+        self.assertIn("Apple refuses the anisette data of the local anisette server (ec=-80045)", last)
+        self.assertIn("signing in cannot work until the anisette source changes", last)
+        self.assertIn(finish.ANISETTE_ISSUE, last)
+        self.assertIn(finish.ANISETTE_UPSTREAM, text)
+        self.assertNotIn("does not carry the fix", text)
 
     def test_a_failed_reinstall_stops_before_the_restart(self) -> None:
         runner = FakeRunner(probes=["-80045"], uv=(1, "no network"))

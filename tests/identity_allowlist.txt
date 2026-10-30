@@ -21,6 +21,7 @@ modules/firefox-policy/tests/test_firefox_policy.py | tool reference: the same e
 modules/firefox/firefox | tool reference: the passwords-app extension id it builds and signs
 modules/passwords-app-polkit/passwords-app-polkit | tool reference: the passwords-app polkit action namespace
 modules/passwords-app-polkit/tests/test_passwords_app_polkit.py | tool reference: the same namespace in fixtures
+modules/passwords-app/finish | tool reference: the passwords-app issue that explains Apple refusing the anisette data
 modules/passwords-app/module.toml | tool reference: default [source] repo of passwords-app
 modules/passwords-app/passwords-app | tool reference: passwords-app's bus name, object path, native host and extension id
 modules/passwords-app/tests/test_passwords_app.py | tool reference: the same identifiers in expectations
