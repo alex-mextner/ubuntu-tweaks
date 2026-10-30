@@ -6,10 +6,15 @@
                      reinstalled from the checkout and the daemon restarted
     finish run       `passwords-app signin`, with the Apple ID prefilled from [modules.passwords-app] apple_id
 
+The probe asks through the anisette server the sync service itself uses: PASSWORDS_APP_ANISETTE_URL as the running
+daemon sees it (its /proc environment, so drop-ins, EnvironmentFile= and inherited values all count; a stopped
+daemon falls back to the unit's Environment=), else the installed package's default. Not through whatever this
+script's own environment says: the daemon talks to Apple, so the daemon's server is the one that has to be accepted.
+The URL may carry credentials: it reaches the probe through its environment, never argv, and is shown without
+user info and query.
 The probe is one init-only GrandSlam request for an Apple ID that does not exist: Apple answers ec=-20970
 ("entered incorrectly") when it accepts the client, ec=-80045 when it refuses it before the account is even looked
-at: an old client identity, or anisette data Apple no longer accepts (Dadoum/anisette-v3-server#61). No password,
-no 2FA code and no real account are involved, and nothing is signed in or stored.
+at: an old client identity, or anisette data Apple no longer accepts (Dadoum/anisette-v3-server#61). No password, no 2FA code and no real account are involved, and nothing is signed in or stored.
 The Apple ID, password, the code and the device passcode are typed by the owner into `passwords-app signin`
 itself; this script never sees them. The Apple ID option is not a secret.
 """
@@ -19,12 +24,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -36,21 +43,31 @@ FIXED_CODE = "-20970"
 REFUSED_CODE = "-80045"
 DEFAULT_CHECKOUT = "~/dev/passwords-app"
 UNIT = "passwords-appd.service"
+ANISETTE_URL_VARIABLE = "PASSWORDS_APP_ANISETTE_URL"
+PROBE_URL_VARIABLE = "FINISH_PROBE_ANISETTE_URL"
 PROBE_TIMEOUT = 45
 SETTLE_SECONDS = 4
 
 # Runs inside the installed venv: the same request `passwords-app signin` starts with, for an address nobody owns.
 # It reaches into the client's private `GSAClient._request`, because the public sign-in needs a password.
+# The Apple ID is fresh every run: Apple answers ec=-20209 ("locked for security reasons") for a name it was asked
+# about about ten times, which would hide the verdict this probe is after.
+# The daemon's anisette URL arrives in FINISH_PROBE_ANISETTE_URL (not argv: it may carry credentials), empty when the
+# daemon sets none, then the installed package's own default, which is what the daemon uses too; this script's own
+# PASSWORDS_APP_ANISETTE_URL is deliberately not consulted.
 PROBE = """
+import os
+import uuid
 from srp import _pysrp as srp
 from passwords_app.icloud.auth.anisette import Anisette
+from passwords_app.icloud.const import DEFAULT_ANISETTE_URL
 from passwords_app.icloud.auth.device import Device
 from passwords_app.icloud.auth.gsa import GSAClient, GSAError, _S2K_PROTOCOLS, _status
-name = "finish-probe@example.invalid"
+name = f"finish-probe-{uuid.uuid4().hex[:12]}@example.invalid"
 user = srp.User(name, b"", hash_alg=srp.SHA256, ng_type=srp.NG_2048)
 _, a_pub = user.start_authentication()
 try:
-    reply = GSAClient(Device.generate(), Anisette())._request({"A2k": a_pub, "ps": list(_S2K_PROTOCOLS), "u": name, "o": "init"})
+    reply = GSAClient(Device.generate(), Anisette(os.environ.get("FINISH_PROBE_ANISETTE_URL") or DEFAULT_ANISETTE_URL))._request({"A2k": a_pub, "ps": list(_S2K_PROTOCOLS), "u": name, "o": "init"})
     print("RESULT", _status(reply))
 except GSAError as error:
     print("ERROR", error)
@@ -58,16 +75,21 @@ except GSAError as error:
 
 
 class Runner(Protocol):
-    def capture(self, argv: Sequence[str], *, timeout: float) -> tuple[int, str]: ...
+    def capture(
+        self, argv: Sequence[str], *, timeout: float, env: Mapping[str, str] | None = None
+    ) -> tuple[int, str]: ...
 
     def interactive(self, argv: Sequence[str]) -> int: ...
 
 
 class SystemRunner:
-    def capture(self, argv: Sequence[str], *, timeout: float) -> tuple[int, str]:
+    def capture(
+        self, argv: Sequence[str], *, timeout: float, env: Mapping[str, str] | None = None
+    ) -> tuple[int, str]:
         try:
             done = subprocess.run(
                 list(argv),
+                env=None if env is None else {**os.environ, **env},
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -120,12 +142,60 @@ def check(runner: Runner) -> int:
     return 0
 
 
-def probe(runner: Runner, venv_python: Path) -> str:
+def read_daemon_environment(pid: int) -> bytes | None:
+    """The environment block the running daemon was started with, or None when it cannot be read."""
+    try:
+        return Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+
+
+def daemon_anisette_url(runner: Runner) -> str:
+    """The anisette URL the sync service uses, or "" when it sets none."""
+    prefix = f"{ANISETTE_URL_VARIABLE}="
+    code, text = runner.capture(["systemctl", "--user", "show", UNIT, "--property=MainPID", "--value"], timeout=15)
+    if code == 0 and text.strip().isdigit() and int(text) > 0:
+        block = read_daemon_environment(int(text))
+        if block is not None:
+            entries = (entry.decode(errors="replace") for entry in block.split(b"\0"))
+            return next((entry.removeprefix(prefix) for entry in entries if entry.startswith(prefix)), "")
+    # Not running (or not readable): what the unit itself sets. systemd quotes an assignment that holds characters
+    # such as `[`, `?` or spaces, so the value is split the way the shell would.
+    code, text = runner.capture(["systemctl", "--user", "show", UNIT, "--property=Environment", "--value"], timeout=15)
+    if code != 0:
+        return ""
+    try:
+        entries = shlex.split(text)
+    except ValueError:
+        return ""
+    # systemd also escapes `$` inside the quotes (`\$`), which the shell rules leave in place.
+    value = next((entry.removeprefix(prefix) for entry in entries if entry.startswith(prefix)), "")
+    return value.replace("\\$", "$")
+
+
+def shown(url: str) -> str:
+    """The URL without user info, query and fragment, for output."""
+    if not url:
+        return "the installed default"
+    parts = urlsplit(url)
+    host = parts.netloc.rpartition("@")[2]
+    return f"{parts.scheme}://{host}{parts.path}"
+
+
+def scrub(text: str) -> str:
+    """Drop user info and query strings from every URL in a message, however the client normalised it."""
+    return re.sub(r"\?[^\s'\"]*", "", re.sub(r"(\w+://)[^/\s@]*@", r"\1", text))
+
+
+def probe(runner: Runner, venv_python: Path, anisette_url: str) -> str:
     """``-20970`` (Apple accepts the client), ``-80045`` (it refuses it) or the last line of whatever else it said."""
-    code, text = runner.capture([str(venv_python), "-c", PROBE], timeout=PROBE_TIMEOUT)
+    code, text = runner.capture(
+        [str(venv_python), "-c", PROBE], timeout=PROBE_TIMEOUT, env={PROBE_URL_VARIABLE: anisette_url}
+    )
     found = re.search(r"ec=(-?\d+)", text)
     if found:
         return found.group(1)
+    text = scrub(text)
     return text.splitlines()[-1] if text else f"the probe exited {code} without output"
 
 
@@ -137,15 +207,17 @@ def prepare(
     if not python.exists():
         print(f"passwords-app is not installed in {venv}: run `ubuntu-tweak apply --commit` first")
         return 1
-    answer = probe(runner, python)
+    url = daemon_anisette_url(runner)
+    where = shown(url)
+    answer = probe(runner, python, url)
     if answer == FIXED_CODE:
-        print(f"the installed passwords-app carries the Apple client fix (probe ec={FIXED_CODE})")
+        print(f"the installed passwords-app carries the Apple client fix (probe ec={FIXED_CODE}, anisette: {where})")
         return 0
     if answer != REFUSED_CODE:
         print(f"the Apple probe gave no usable answer: {answer}")
         return 1
     checkout = checkout_dir(options, home)
-    print(f"the installed venv answers ec={REFUSED_CODE}: reinstalling it from {checkout}")
+    print(f"the installed venv still answers ec={REFUSED_CODE}: reinstalling it from {checkout}")
     code, text = runner.capture(
         ["uv", "pip", "install", "-q", "--python", str(python), "--reinstall-package", "passwords-app", str(checkout)],
         timeout=300,
@@ -158,20 +230,23 @@ def prepare(
         print(f"could not restart {UNIT} ({code}): {text.splitlines()[-1] if text else 'no output'}")
         return 1
     sleep(SETTLE_SECONDS)
-    answer = probe(runner, python)
-    if answer == FIXED_CODE:
-        print(f"reinstalled; the probe now answers ec={FIXED_CODE}")
-        return 0
+    url = daemon_anisette_url(runner)  # the restart may have activated a pending drop-in
+    where = shown(url)
+    answer = probe(runner, python, url)
     if answer == REFUSED_CODE:
         print(
-            f"after the reinstall the probe still says ec={REFUSED_CODE}: {checkout} is what runs now, so it either "
-            f"predates the client-identity fix (git -C {checkout} pull) or Apple refuses the anisette data of the "
-            "anisette server (Dadoum/anisette-v3-server#61). Every sign-in step that asks Apple's GrandSlam for a "
-            "token, continuing at the device passcode included, fails until the server serves data Apple accepts"
+            f"after the reinstall the probe still says ec={REFUSED_CODE} through {where}: {checkout} is what runs now, so "
+            f"it either predates the client-identity fix (git -C {checkout} pull) or Apple refuses the data of that "
+            "anisette server (the Android-based dadoum/anisette-v3-server is refused since 2026-10-12, "
+            "Dadoum/anisette-v3-server#61, passwords-app#144; Windows or macOS ADI is accepted). Every sign-in step "
+            "that asks Apple's GrandSlam for a token fails until the server serves data Apple accepts"
         )
-    else:
+        return 1
+    if answer != FIXED_CODE:
         print(f"after the reinstall the Apple probe gave no usable answer: {answer}")
-    return 1
+        return 1
+    print(f"reinstalled; the probe now answers ec={FIXED_CODE}")
+    return 0
 
 
 def run(runner: Runner, options: Mapping[str, object]) -> int:
