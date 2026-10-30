@@ -1,7 +1,9 @@
 """The passwords-app finish step: sign-in state, the venv probe with its repair, and the sign-in command."""
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -95,9 +97,25 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("/srv/passwords-app", uv)
         self.assertEqual(runner.calls[2], ["systemctl", "--user", "restart", finish.UNIT])
 
-    def test_a_checkout_without_the_fix_is_reported_not_papered_over(self) -> None:
+    def test_a_refusal_that_survives_a_fresh_install_is_not_blamed_on_the_checkout(self) -> None:
+        # the venv was just rebuilt from the checkout, so what still runs IS the checkout: Apple refusing
+        # the anisette data (Dadoum/anisette-v3-server#61) answers the same -80045 as a missing fix did
         runner = FakeRunner(probes=["-80045", "-80045"])
-        self.assertEqual(self.prepare(runner), 1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.prepare(runner, checkout="/srv/passwords-app")
+        self.assertEqual(code, 1)
+        self.assertIn("anisette", out.getvalue())
+        self.assertIn("/srv/passwords-app", out.getvalue())
+        self.assertNotIn("does not carry the fix", out.getvalue())
+
+    def test_an_answer_after_the_reinstall_that_is_neither_code_is_not_called_a_refusal(self) -> None:
+        runner = FakeRunner(probes=["-80045", "ERROR anisette is down"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.prepare(runner)
+        self.assertEqual(code, 1)
+        self.assertIn("no usable answer: ERROR anisette is down", out.getvalue())
 
     def test_a_failed_reinstall_stops_before_the_restart(self) -> None:
         runner = FakeRunner(probes=["-80045"], uv=(1, "no network"))
