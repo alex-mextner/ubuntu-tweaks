@@ -13,6 +13,10 @@ alone. Without a terminal on stdin nothing is run. Exit 0: every required
 step is done; 3: one is not.
 
 Public API: ``register(subparsers)``, ``run(ctx, args)``, ``collect_steps(ctx, ...) -> list[Step]``.
+
+Every step command (and the child ``apply``) inherits this process's environment; when that has no display (a shell
+started before the graphical login, such as a boot-time tmux server), the session's ``DISPLAY`` / ``WAYLAND_DISPLAY``
+come from the user's systemd manager first, see ``ubuntu_tweaks.graphical_env``.
 """
 
 from __future__ import annotations
@@ -29,8 +33,9 @@ from ubuntu_tweaks.commands._support import apply_command, has_gi, rerun_command
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.finish import ExitReport, Probe, Shell, Step
+from ubuntu_tweaks.graphical_env import with_graphical_session
 from ubuntu_tweaks.manifest import FinishStep, module_defaults, parse_finish_tables
-from ubuntu_tweaks.process import run_streamed
+from ubuntu_tweaks.process import Process, run_streamed
 from ubuntu_tweaks.identity import MODULE_CONFIG_ENV
 from ubuntu_tweaks.profile import module_config_json, read_toml
 
@@ -171,6 +176,9 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         raise ConfigError("finish takes no --only: use --step ID for one step (and the steps it requires)")
 
     applied: list[float] = []  # when each `apply` of this walk was started: a journal older than that is another run's
+    # a shell started before the graphical login (a boot-time tmux server) has no display, the user's systemd manager
+    # does; our own environment gets it, so the step commands and the child `apply` (run_streamed) inherit it alike
+    os.environ.update(with_graphical_session(os.environ, Process()))
 
     def current_steps() -> list[Step]:
         """Collected again after every attempt: `apply` may have cloned the profile, which holds more steps."""

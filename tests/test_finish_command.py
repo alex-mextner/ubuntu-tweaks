@@ -21,7 +21,9 @@ from ubuntu_tweaks.commands._support import has_gi
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.finish import Probe, State, SubprocessShell
+from ubuntu_tweaks.graphical_env import SHOW_ENVIRONMENT
 from ubuntu_tweaks.journal import Entry, Run, action_key
+from ubuntu_tweaks.process import CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Profile
 
 MODULE = """
@@ -413,6 +415,13 @@ class ApplyProbeTests(unittest.TestCase):
 
 
 class CommandLineTests(FinishCommandCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.systemd = FakeProcess()  # the user's systemd manager: nothing known unless a test says so
+        patcher = mock.patch.object(finish_command, "Process", lambda: self.systemd)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def run_finish(self, *, dry_run: bool = True, step: str | None = None, yes: bool = False, lang: str = "en"):
         ui.configure(color="never", plain=True, lang=lang)
         args = argparse.Namespace(dry_run=dry_run, step=step, yes=yes)
@@ -462,6 +471,65 @@ class CommandLineTests(FinishCommandCase):
         self.assertEqual(code, 3)
         self.assertIn("needs a terminal", out)
         self.assertFalse((directory / "a-step.done").exists())
+
+    def walk_logging_display(self, environ: dict[str, str]) -> str:
+        """A real walk of one step whose command writes the display it was given; ``environ`` replaces the caller's."""
+        directory = self.module("a", "a-step")
+        write(
+            directory / "probe",
+            PROBE.replace(
+                "touch",
+                'echo "display=${DISPLAY:-none} wayland=${WAYLAND_DISPLAY:-none}" >> "$(dirname "$0")/display"; touch',
+            ),
+        )
+        out = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, environ, clear=True),
+            mock.patch.object(finish_command, "_apply_probe", Plans(True)),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            mock.patch("builtins.input", return_value=""),
+            contextlib.redirect_stdout(out),
+        ):
+            code = finish_command.run(self.context(), argparse.Namespace(dry_run=False, step=None, yes=False))
+        self.assertEqual(code, 0)
+        return (directory / "display").read_text()
+
+    def test_a_caller_without_a_display_hands_the_steps_the_one_of_the_users_systemd(self) -> None:
+        # the boot-time tmux case: the window has no DISPLAY, the user's session does
+        self.systemd = FakeProcess({SHOW_ENVIRONMENT: CommandResult(0, "DISPLAY=:0\nWAYLAND_DISPLAY=wayland-0\n")})
+        self.assertEqual(self.walk_logging_display({"PATH": os.environ["PATH"]}), "display=:0 wayland=wayland-0\n")
+
+    def test_the_child_apply_gets_the_display_too(self) -> None:
+        # apply is not a module step: it is started through run_streamed, which inherits our own environment
+        self.systemd = FakeProcess({SHOW_ENVIRONMENT: CommandResult(0, "DISPLAY=:42\n")})
+        seen: list[str | None] = []
+
+        def streamed(argv: list[str]) -> int:
+            seen.append(os.environ.get("DISPLAY"))
+            return 0
+
+        ui.configure(color="never", plain=True, lang="en")
+        with (
+            mock.patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+            mock.patch.object(finish_command, "_apply_probe", Plans(False, True)),
+            mock.patch.object(finish_command, "run_streamed", side_effect=streamed),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            mock.patch("builtins.input", return_value=""),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = finish_command.run(self.context(), argparse.Namespace(dry_run=False, step=None, yes=False))
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [":42"])
+
+    def test_a_caller_with_a_display_keeps_it_and_systemd_is_not_asked(self) -> None:
+        self.systemd = FakeProcess({SHOW_ENVIRONMENT: CommandResult(0, "DISPLAY=:0\nWAYLAND_DISPLAY=wayland-0\n")})
+        logged = self.walk_logging_display({"PATH": os.environ["PATH"], "DISPLAY": ":9"})
+        self.assertEqual(logged, "display=:9 wayland=none\n")
+        self.assertEqual(self.systemd.queries, [])
+
+    def test_a_failing_systemctl_leaves_the_steps_without_a_display(self) -> None:
+        self.systemd = FakeProcess({SHOW_ENVIRONMENT: CommandResult(1, "", "Failed to connect to bus")})
+        self.assertEqual(self.walk_logging_display({"PATH": os.environ["PATH"]}), "display=none wayland=none\n")
 
     def test_only_is_refused_with_a_pointer_to_step(self) -> None:
         code, _, err = run_main("finish", "--only", "passwords-app")
