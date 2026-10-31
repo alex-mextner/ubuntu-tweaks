@@ -798,6 +798,14 @@ are written by the module author in `title` / `title_ru` and so on; the missing 
 command never prints a secret (the session log masks the usual ones anyway). `check` and `gate` run without a terminal
 and within 60 seconds; `prepare` and `run` own the terminal, have no time limit and show their output as it comes.
 
+A command inherits `finish`'s own environment. A shell that was started before the graphical login (a tmux server started
+at boot, SSH, cron) has no `DISPLAY` / `WAYLAND_DISPLAY`, so a step that opens a browser or a login window would fail
+there, sometimes silently. When the inherited environment has neither, `finish` fills `DISPLAY`, `WAYLAND_DISPLAY`,
+`XAUTHORITY`, `XDG_SESSION_TYPE` and `XDG_RUNTIME_DIR` (where the Wayland socket is) from `systemctl --user show-environment` (the user's systemd manager knows the
+session): only the ones that are not set already, nothing at all when the manager has no display or `systemctl` fails
+(`ubuntu_tweaks/graphical_env.py`), values that systemd quotes (`$'...'`, a path with a space) decoded. `finish` puts them
+into its own environment, so every step command and the child `apply` get them: no module has to import the session itself.
+
 State of a step, decided by the commands alone: **done** (`check` exits 0), **pending** (it does not), **wait** (a
 `gate` printed something: it says plainly `WAIT` and why, and the step is not run), **blocked** (a `requires` step
 has not finished, see below) and, after a run, **failed** (the `prepare` or `run` command failed, or `check` still
