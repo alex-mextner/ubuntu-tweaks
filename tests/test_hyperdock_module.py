@@ -68,6 +68,16 @@ class HyperdockModuleTests(TempDirCase):
         self.assertEqual({action.target.full for action in actions}, {DIRECTORY + name for name in self.preset})
         self.assertEqual(settings_planner.warnings(self.ctx, self.backend), [])
 
+    def test_the_preset_keeps_twenty_recent_apps_and_a_reset_to_three_drifts(self) -> None:
+        self.assertEqual(self.preset["recent-apps-count"], "20")
+        self.backend.set_user(SCHEMA, DIRECTORY, "recent-apps-count", "3")
+
+        actions = settings_planner.build(self.ctx, self.backend)
+        (recents,) = [action for action in actions if action.target.full == DIRECTORY + "recent-apps-count"]
+
+        self.assertFalse(recents.check())
+        self.assertIn("recent-apps-count = 20", recents.describe())
+
     def test_the_screenshots_stack_seed_resolves_to_the_hyperdock_schema(self) -> None:
         (seed,) = seeds.build(self.ctx, self.backend, home=self.tmp / "home", env={})
 
