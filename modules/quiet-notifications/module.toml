@@ -1,4 +1,4 @@
-description = "Notifications show as a banner and vanish; the date menu keeps no list, so it never freezes"
+description = "Notifications show as a banner and vanish; the date menu keeps no list of app notifications, so it never freezes"
 
 [source]
 kind = "local"
