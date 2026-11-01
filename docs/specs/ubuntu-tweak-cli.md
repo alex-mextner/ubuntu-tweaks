@@ -121,7 +121,7 @@ Request 7 is answered by splitting the system in two:
 
 - **Engine = this repo** (`alex-mextner/ubuntu-tweaks`, public open source): the `ubuntu-tweak` CLI, the
   generic modules (base tools, zsh, clipboard, git and gh, Homebrew, ssh server, memguard, apple-hid-battery,
-  and the bundled extensions hyperdock and english-in-overview), the modules that integrate tools published by
+  and the bundled extensions hyperdock, english-in-overview and quiet-notifications), the modules that integrate tools published by
   the project author (*Author-published tool modules*) and the machinery that applies a profile.
   There is no second tool.
 - **Profile = a directory of personal data**, the `ubuntu/` subdirectory of the user's own dotfiles repository
@@ -374,7 +374,7 @@ that is absolute or contains `..` are invalid config (exit 2).
   - `submodule`: a git submodule; uuid, schema id and schema dir are read from its
     `metadata.json`, never hardcoded, so the module keeps working across the hyperdock
     rename.
-  - `local`: an extension directory inside this repo (`english-in-overview@ultra`).
+  - `local`: an extension directory inside this repo (`english-in-overview@ultra`, `quiet-notifications@ubuntu-tweaks`, `allowlockedremotedesktop@kamens.us`).
   - `builtin`: no code, only settings for GNOME's own schemas (e.g. the app grid, the
     keyboard, the color scheme from #20).
   - `system`: root-level code installed outside `$HOME` (memguard's units and polkit rule, the
@@ -918,6 +918,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 |---|---|---|
 | `hyperdock` | submodule `gnome-extensions/hyperdock` → `alex-mextner/hyperdock`, branch `mac-tahoe` | from today's `install.sh`: symlink, schemas, enable, Ubuntu Dock conflict, Magic Lamp retire, `dock.ini` (enforce), Screenshots stack seed, migration from `dash2dock-lite` |
 | `english-in-overview` | local `gnome-extensions/english-in-overview@ultra` | symlink, enable |
+| `quiet-notifications` | local `gnome-extensions/quiet-notifications@ubuntu-tweaks` | symlink, enable; on by default; app notifications (freedesktop and GTK daemon sources) are destroyed by an idle sweep as soon as they are neither the banner on screen nor queued, which includes ones that never get a banner (do-not-disturb, low urgency, the app's banners off, banner queue full); the calendar menu's message view ignores those sources; the Shell's own notifications keep the stock list; a banner the lock screen closes is queued again for after unlock and nothing is swept while locked; the first run after login purges the backlog in bulk; disabling restores the stock methods. Turning it off takes `enabled = false` plus disabling the extension |
 | `memguard` | `system` | `modules/memguard/` already ships `install.sh`, the `swap-drain` units and the polkit rule; its manifest needs `install.sh --check`; per-machine (`enabled = false` on machines that do not want it). The desktop user is detected from `SUDO_USER` (else `PKEXEC_UID`), never a default name, and the installer writes it into the installed `/etc/memguard/memguard.toml`; the heavy-run options `heavy_gate`, `heavy_hook` and `heavy_locks` default to empty (off) |
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |

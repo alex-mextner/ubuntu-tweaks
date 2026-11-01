@@ -1,0 +1,5 @@
+description = "Notifications show as a banner and vanish; the date menu keeps no list of app notifications, so it never freezes"
+
+[source]
+kind = "local"
+path = "gnome-extensions/quiet-notifications@ubuntu-tweaks"
