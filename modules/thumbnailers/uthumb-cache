@@ -1,0 +1,17 @@
+#!/usr/bin/python3 -B
+"""uthumb-cache FILE...: put previews of 3D and web-development files into ~/.cache/thumbnails (what the dock reads).
+
+Outside the thumbnailer sandbox, so it also works from a systemd path unit or the dock itself. Exits 0 when at
+least one file got (or already had) an entry, 1 when none could be drawn.
+"""
+
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from uthumb.cache import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
