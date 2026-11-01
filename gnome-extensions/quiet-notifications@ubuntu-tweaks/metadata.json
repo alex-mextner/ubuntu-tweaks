@@ -1,0 +1,7 @@
+{
+  "uuid": "quiet-notifications@ubuntu-tweaks",
+  "name": "Quiet Notifications",
+  "description": "Notifications pop up as a banner and are gone afterwards; the calendar menu keeps no notification list, so it opens and clears instantly.",
+  "shell-version": ["50"],
+  "session-modes": ["user", "unlock-dialog"]
+}

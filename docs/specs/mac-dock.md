@@ -140,7 +140,7 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 | 15 | Attention bounce for urgent windows, reveals hidden dock | works | `urgent-bounce` |
 | 16 | Unity LauncherEntry badges | works | `launcher-api`; accepted spec risk: any session-bus client may update any app (as in Ubuntu Dock/Plasma). Unknown app ids are ignored, counts clamped to non-negative integers, updates rate-limited to one per 100 ms per app |
 | 17 | Progress bar on the icon | works | `launcher-api`; badge style None hides count and progress |
-| 18 | Red numbered notification badge | works | `notification-badge-style=6` |
+| 18 | Red numbered notification badge | works | `notification-badge-style=6`; with the `quiet-notifications` module (on by default) it counts only an app's notification that is on screen or waiting for its banner, plus the Shell's own window-attention ones |
 | 19 | Hide toggle shortcut (⌥⌘D) | works | `toggle-autohide-shortcut` = Super+Alt+D |
 | 20 | Dock background menu (hiding, magnification, position, settings) | works | `background-menu` |
 | 21 | Recent apps section | works | `recent-apps-count=3` |
