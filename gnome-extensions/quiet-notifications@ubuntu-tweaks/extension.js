@@ -23,6 +23,8 @@
 // after unlock, and nothing is destroyed while locked. metadata.json keeps the extension on
 // while locked, so the unlock does not run the purge.
 // disable() restores the stock methods and rebuilds the groups for the sources still alive.
+// enable() first checks that every private Shell member it patches exists; when a Shell
+// release renamed one it logs a single error naming it and patches nothing.
 import GLib from 'gi://GLib';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -32,11 +34,64 @@ import {FdoNotificationDaemonSource, GtkNotificationDaemonAppSource} from 'resou
 
 const {NotificationDestroyedReason} = MessageTray;
 
-const isAppSource = source =>
+const isDaemonSource = source =>
     source instanceof FdoNotificationDaemonSource || source instanceof GtkNotificationDaemonAppSource;
+
+// A daemon source the extension can manage: one without the notifications list it reads stays stock.
+const isAppSource = source => isDaemonSource(source) && source.notifications instanceof Array;
 
 function messageView() {
     return Main.panel.statusArea.dateMenu._messageList._messageView;
+}
+
+// The private Shell members this extension reads or patches, by the name a Shell release
+// would have to rename. Checked on enable(): a missing one would leave the patch half
+// working (notifications piling up again) with nothing saying why.
+function missingShellMembers() {
+    const missing = [];
+    const expect = (name, present) => {
+        if (!present)
+            missing.push(name);
+    };
+
+    const tray = Main.messageTray;
+    expect('MessageTray._notificationQueue', Array.isArray(tray?._notificationQueue));
+    expect('MessageTray._notification', tray !== undefined && '_notification' in tray);
+    expect('MessageTray._notificationRemoved', tray !== undefined && '_notificationRemoved' in tray);
+    for (const method of ['_hideNotification', '_hideNotificationCompleted'])
+        expect(`MessageTray.${method}()`, typeof MessageTray.MessageTray?.prototype?.[method] === 'function');
+    expect('MessageTray.NotificationDestroyedReason.EXPIRED', NotificationDestroyedReason?.EXPIRED !== undefined);
+    for (const property of ['isTransient', 'acknowledged'])
+        expect(`Notification.${property}`, property in (MessageTray.Notification?.prototype ?? {}));
+    // `notifications` is a field of the daemon sources, so it can only be read off the ones alive.
+    expect('Source.notifications', Main.messageTray?.getSources().every(source =>
+        !isDaemonSource(source) || isAppSource(source)));
+    expect('SessionMode.hasNotifications', 'hasNotifications' in (Main.sessionMode ?? {}));
+
+    for (const method of ['_addNotificationSource', '_removeNotificationSource'])
+        expect(`MessageView.${method}()`, typeof MessageList.MessageView?.prototype?.[method] === 'function');
+    const view = Main.panel?.statusArea?.dateMenu?._messageList?._messageView;
+    expect('dateMenu._messageList._messageView', view !== undefined);
+    if (view !== undefined) {
+        const groups = view._notificationSourceToGroup;
+        expect('MessageView._notificationSourceToGroup', groups instanceof Map);
+        // Stock sets _expandedGroup only when a group is first expanded, so it can be checked only
+        // then: the expandedGroup accessor must return what _expandedGroup holds.
+        expect('MessageView.expandedGroup', 'expandedGroup' in (MessageList.MessageView?.prototype ?? {}));
+        expect('MessageView._expandedGroup', view.expandedGroup == null || view._expandedGroup === view.expandedGroup);
+        expect('MessageView._overlay', typeof view._overlay?.hide === 'function');
+        expect('MessageView._nUrgent', typeof view._nUrgent === 'number');
+        expect('MessageView highlight effect', view.get_effect?.('highlight') != null);
+        if (groups instanceof Map)
+            expect('NotificationGroup.hasUrgent', [...groups.values()].every(group => 'hasUrgent' in group));
+    }
+    return missing;
+}
+
+function reportMissing(uuid, missing) {
+    console.error(`${uuid}: not enabled, stock notification behaviour is untouched. ` +
+        `This Shell lacks what the extension patches: ${missing.join(', ')}. ` +
+        'The Shell was probably upgraded and renamed them; the extension needs an update.');
 }
 
 // The tray decides synchronously inside the banner request whether a notification gets a
@@ -85,9 +140,16 @@ function dropAppNotificationGroups(view) {
 
 export default class QuietNotifications extends Extension {
     enable() {
-        this._injections = new InjectionManager();
+        this._injections = null;
         this._sweepId = 0;
         this._closedByLock = false;
+
+        const missing = missingShellMembers();
+        if (missing.length > 0) {
+            reportMissing(this.uuid, missing);
+            return;
+        }
+        this._injections = new InjectionManager();
 
         try {
             this._install();
@@ -165,8 +227,16 @@ export default class QuietNotifications extends Extension {
     // A source that rejoins the tray (its app's notifications were switched off and on) comes
     // with the notifications it collected meanwhile: nothing would ever show or clear them.
     _watch(source) {
-        if (!isAppSource(source))
+        if (!isAppSource(source)) {
+            // Born after enable(), so not part of its check: the source stays entirely stock
+            // (isAppSource() leaves it out of every patched path) and is reported once.
+            if (isDaemonSource(source) && !this._reportedLateSource) {
+                this._reportedLateSource = true;
+                console.error(`${this.uuid}: a notification source has no Source.notifications list; ` +
+                    'it keeps stock behaviour. The Shell was probably upgraded; the extension needs an update.');
+            }
             return;
+        }
         source.connectObject('notification-request-banner', () => this._scheduleSweep(), this);
         this._scheduleSweep();
     }
@@ -184,6 +254,9 @@ export default class QuietNotifications extends Extension {
     }
 
     disable() {
+        // enable() found a renamed Shell member and patched nothing.
+        if (!this._injections)
+            return;
         this._injections.clear();
         this._injections = null;
         if (this._sweepId)
