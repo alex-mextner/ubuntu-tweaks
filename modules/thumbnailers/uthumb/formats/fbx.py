@@ -95,7 +95,7 @@ def _property(data: bytes, cursor: int, budget: list[int]):
             raise Unsupported("FBX arrays exceed the memory budget")
         if encoding == 1:
             inflater = zlib.decompressobj()
-            raw = inflater.decompress(data[cursor : cursor + compressed], expected)  # never more than declared
+            raw = inflater.decompress(data[cursor : cursor + compressed], max(expected, 1))  # 0 would mean unlimited
             if inflater.unconsumed_tail or len(raw) != expected:
                 raise Unsupported("FBX array does not match its declared size")
             cursor += compressed

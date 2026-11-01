@@ -49,7 +49,10 @@ def _preview(stream: BinaryIO) -> Image.Image | None:
     if not head.startswith(b"BLENDER"):
         raise Unsupported("not a .blend file")
     if head[7:9].isdigit():  # BLENDER17-01v0502: 17-byte header, 32-byte block headers, little endian
-        stream.read(int(head[7:9]) - 12)
+        header_size = int(head[7:9])
+        if not 12 <= header_size <= 64:
+            raise Unsupported("bad .blend header size")
+        stream.read(header_size - 12)
         layout = struct.Struct("<4sIQqq")
     else:
         pointer_8 = head[7:8] == b"-"

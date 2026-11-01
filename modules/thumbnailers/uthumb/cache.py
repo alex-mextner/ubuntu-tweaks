@@ -16,7 +16,6 @@ from urllib.parse import quote
 from PIL import Image, PngImagePlugin
 
 from . import cli
-from .errors import Unsupported
 from .registry import kind_for
 
 SIZES = {"normal": 128, "large": 256, "x-large": 512}
@@ -53,14 +52,18 @@ def fill(path: str | Path, size_name: str = "large", root: Path | None = None) -
     entry = entry_path(uri, size_name, root)
     if is_current(entry, source):
         return entry
+    before = source.stat()
     try:
         image = cli.build(str(source), SIZES[size_name])
-    except Unsupported:
+    except Exception:  # one unreadable or hostile file must not stop a batch; the sandbox CLI does the same
         return None
+    after = source.stat()
+    if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+        return None  # changed while it was drawn: the picture may be of either version, so keep nothing
     info = PngImagePlugin.PngInfo()
     info.add_text("Thumb::URI", uri)
-    info.add_text("Thumb::MTime", str(int(source.stat().st_mtime)))
-    info.add_text("Thumb::Size", str(source.stat().st_size))
+    info.add_text("Thumb::MTime", str(int(before.st_mtime)))
+    info.add_text("Thumb::Size", str(before.st_size))
     info.add_text("Software", SOFTWARE)
     entry.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = entry.with_suffix(f".{os.getpid()}.tmp")

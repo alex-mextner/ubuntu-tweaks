@@ -258,6 +258,32 @@ class Rendering(unittest.TestCase):
         (self.directory / "photo.png").write_bytes(fixtures.png())
         self.assertIsNone(cache.fill(self.directory / "photo.png", "large", root), "other types are Files' business")
 
+    def test_cache_skips_a_file_that_changes_while_it_is_drawn_and_survives_a_bad_file(self):
+        from uthumb import cache, cli
+
+        root = self.directory / "cache"
+        source = self.directory / "moving.stl"
+        source.write_bytes(fixtures.stl_binary())
+        real_build = cli.build
+
+        def build_and_touch(path, size, mime=""):
+            image = real_build(path, size, mime)
+            os.utime(path, (1_800_000_000, 1_800_000_000))  # the file is replaced after the render
+            return image
+
+        cli.build = build_and_touch
+        try:
+            self.assertIsNone(cache.fill(source, "large", root))
+        finally:
+            cli.build = real_build
+        self.assertFalse(list(root.glob("*/*.png")))
+        bad = self.directory / "bad.ipynb"
+        bad.write_text("[]")
+        good = self.directory / "good.stl"
+        good.write_bytes(fixtures.stl_binary())
+        self.assertIsNone(cache.fill(bad, "large", root))
+        self.assertIsNotNone(cache.fill(good, "large", root))
+
     def test_large_mesh_is_sampled_not_refused(self):
         import struct
 
@@ -315,6 +341,24 @@ class HostileInput(unittest.TestCase):
         data = b"i" + struct.pack("<III", 1, 1, len(bomb)) + bomb
         with self.assertRaises(Unsupported):
             self.bounded(lambda: fbx._property(data, 0, [10, 1 << 30]))
+
+    def test_fbx_zero_length_array_with_compressed_payload_is_refused(self):
+        import struct
+        import zlib
+
+        from uthumb.formats import fbx
+
+        payload = zlib.compress(b"\x00" * (4 * 1024 * 1024))
+        data = b"i" + struct.pack("<III", 0, 1, len(payload)) + payload
+        with self.assertRaises(Unsupported):
+            self.bounded(lambda: fbx._property(data, 0, [10, 1 << 30]))
+
+    def test_blend_header_length_below_twelve_is_refused(self):
+        import gzip
+
+        for header in (b"BLENDER11abc", b"BLENDER00-01v"):
+            with self.subTest(header=header), self.assertRaises(Unsupported):
+                self.thumbnail("odd.blend", gzip.compress(header + b"\x00" * 4_000_000))
 
     def test_fbx_arrays_share_a_memory_budget(self):
         import struct
