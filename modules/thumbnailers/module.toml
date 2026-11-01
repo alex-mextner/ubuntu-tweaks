@@ -1,0 +1,22 @@
+description = "Previews in Files, the file chooser and the dock for 3D models (STL, OBJ, 3MF, glTF, STEP, G-code, Blender, ...) and web-development files (TS/TSX/Vue/CSS/JSON/YAML/HTML/Dockerfile, WOFF2, notebooks)"
+enabled = true
+order = 86   # after quicklook (85): the same Files integration; user level, no root
+
+# GNOME runs every thumbnailer in a bubblewrap sandbox that sees only /usr and the one input file, so a binary under
+# ~/.local cannot run there. The renderers are one pure-Python package that travels inside the Exec= line of
+# ~/.local/share/thumbnailers/ubuntu-tweaks-previews.thumbnailer and runs on the system python3 with Pillow and Pygments
+# (spec: Thumbnailers). Nothing to download, nothing outside $HOME.
+[source]
+kind = "system"
+root = false
+install = "thumbnailers install"
+check = "thumbnailers check"
+preview = "thumbnailers plan"
+
+[deps]
+apt = ["python3-pil", "python3-pygments", "shared-mime-info", "gnome-font-viewer"]
+
+[[coverage]]
+match = ["file:~/.local/share/thumbnailers/ubuntu-tweaks-*", "file:~/.local/share/mime/packages/ubuntu-tweaks-previews.xml"]
+class = "tracked"
+reason = "written by modules/thumbnailers"

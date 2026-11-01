@@ -461,6 +461,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 7 | Firefox integration: extension, policy, auto-login with passwords-app credentials, phone-QR passkeys | `firefox` (70), `firefox-policy` (71), `firefox-autologin` (72), `firefox-passkey-qr` (73, opt-in) |
 | 8 | dock | `hyperdock` (80) |
 | 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
+| 8c | thumbnails in Files, the file chooser and the dock for 3D and web-development files | `thumbnailers` (86) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -495,6 +496,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `firefox-passkey-qr` | 73 | `system` | off |
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
 | `quicklook` | 85 | `packages` | on |
+| `thumbnailers` | 86 | `system` (user level, no root) | on |
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
@@ -640,6 +642,13 @@ backup that was searched), so the module installs the GNOME solution instead of 
 `[modules.quicklook] enabled = false` in `machine.toml` switches it off. It needs root only for the apt batch, which
 `apply --commit` already runs under the one sudo prompt. The bus name is activated on demand from the service file
 the package ships, so neither Files nor the session has to restart: press Space on a file after the apt run.
+
+### Thumbnailers (`thumbnailers`)
+
+Pictures in Files, the file chooser and the dock for 3D models (STL, OBJ, 3MF, glTF, STEP, G-code, Blender, ...) and web-development
+files (TS, TSX, Vue, CSS, JSON, YAML, HTML, Dockerfile, notebooks, WOFF2): a user-level `system` module (`root = false`, order 86, ticket #166)
+that writes a thumbnailer entry, MIME definitions and nothing outside `$HOME`. GNOME's bubblewrap sandbox shows a thumbnailer only `/usr`, so
+the renderers are one pure-Python package carried inside the entry's `Exec=` line. Full spec: [thumbnailers.md](thumbnailers.md).
 
 ### Base modules
 

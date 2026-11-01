@@ -1,0 +1,43 @@
+#!/usr/bin/python3 -B
+"""thumbnailers module: previews in Files, the file chooser and the dock for 3D and web-development files.
+
+    thumbnailers check     exit 0 satisfied, 3 unsatisfied (read-only)
+    thumbnailers status    the same facts, one line each
+    thumbnailers plan      what install would change
+    thumbnailers install   as the desktop user: thumbnailer entries, MIME definitions, forget stale failures
+
+STL, OBJ, 3MF, PLY, glTF/GLB, FBX, Collada, 3DS, OFF, AMF, X3D/VRML, STEP/IGES (wireframe), G-code and .bgcode
+(the slicer's embedded picture, else the toolpath), Blender and FreeCAD files (their stored picture), source files
+of the web stack as a syntax-highlighted window, HTML as a title card, notebooks, WOFF2 fonts.
+Spec: docs/specs/ubuntu-tweak-cli.md, *Thumbnailers*.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from thumbnailers_lib import Thumbnailers  # noqa: E402
+
+from ubuntu_tweaks.module_script import ModuleError, invoking_account, main  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+
+def build() -> Thumbnailers:
+    if os.geteuid() == 0:
+        raise ModuleError("thumbnailers installs into the desktop user's home: run it as that user, not as root")
+    return Thumbnailers(invoking_account(os.environ).home, Process())
+
+
+if __name__ == "__main__":
+    try:
+        module = build()
+    except ModuleError as error:
+        sys.stderr.write(f"thumbnailers: {error}\n")
+        sys.exit(1)
+    sys.exit(main(module, sys.argv[1:], out=sys.stdout, err=sys.stderr))
