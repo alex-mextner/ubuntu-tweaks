@@ -17,7 +17,8 @@ Public API:
   ``SymlinkAction``'s ``kind_prefix`` (e.g. ``"cli-"``) keeps a link that is not extension code out of
   the ``link`` / ``link-replace`` kinds that ``reconcile`` treats as extension code.
 - ``replace_with_symlink(dest, source, *, now=utc_now)``: back up what is at ``dest``, then
-  create the symlink (parents are created).
+  create the symlink (parents are created). A ``source`` whose link chain leads back to ``dest`` is refused
+  (``RefusedError``) before anything is touched: the result would be a loop.
 - ``SymlinkAction(dest, source, *, scope=None, now=utc_now)``: an ``Action`` (phase ``LINK``)
   around the three functions above.
 """
@@ -33,7 +34,9 @@ from pathlib import Path
 
 from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.backup import backup
+from ubuntu_tweaks.errors import RefusedError
 from ubuntu_tweaks.extension import tilde
+from ubuntu_tweaks.link_loop import leads_back_to
 
 type Clock = Callable[[], datetime]
 
@@ -89,6 +92,8 @@ def describe_link(dest: Path, source: Path) -> str:
 
 
 def replace_with_symlink(dest: Path, source: Path, *, now: Clock = utc_now) -> None:
+    if leads_back_to(dest.parent / source, dest):  # a relative target is read from dest's directory
+        raise RefusedError(f"refused: {tilde(source)} leads back to {tilde(dest)}; linking would loop")
     dest.parent.mkdir(parents=True, exist_ok=True)
     if os.path.lexists(dest):
         backup(dest, now=now())

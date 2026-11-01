@@ -143,6 +143,19 @@ class ReplaceTests(FilesCase):
         failed = plan.execute().failed
         self.assertRegex(failed[0].message, "not a directory")
 
+    def test_a_profile_file_that_links_back_to_the_destination_is_refused_and_nothing_is_touched(self) -> None:
+        destination = write(self.home / ".config/monitors.xml", "<monitors/>")
+        source = self.profile_root / "files/.config/monitors.xml"
+        source.parent.mkdir(parents=True)
+        source.symlink_to(destination)  # what a half-finished adopt leaves behind
+
+        plan = self.plan()
+
+        self.assertIn("REFUSED", plan.actions[0].describe())
+        self.assertIn("leads back to ~/.config/monitors.xml", plan.actions[0].describe())
+        self.assertRegex(plan.execute().failed[0].message, "leads back")
+        self.assertFalse(destination.is_symlink())  # still the plain file, no ELOOP
+
     def test_a_directory_symlink_into_the_profile_is_not_reported_as_an_orphan(self) -> None:
         self.shared(".config/nvim/init.lua")
         (self.home / ".config").mkdir()

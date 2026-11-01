@@ -1759,6 +1759,14 @@ match), `bundles` (a table, bundle name → list of globs: where new keys go), `
 the built-in `secret`/`identity`/`hardware` exclusions: they are evaluated before anything the
 profile adds, and `include` never lifts them.
 
+A file link is refused when the profile file is itself a symlink whose chain leads back to the destination
+(shown as `REFUSED` in the preview; at `apply --commit` the action fails and the destination stays untouched, exit 7):
+the result would be a loop and every reader gets `ELOOP`.
+A *working* link to a profile file (`~/.config/monitors.xml -> .../machines/<machine>/files/.config/monitors.xml`) is
+not a loop, but apport opens the files it attaches to a crash report with `O_NOFOLLOW` and reports
+`monitors.xml: Error: [Errno 40] Too many levels of symbolic links` for any symlinked `monitors.xml`; the message
+does not mean the link is broken (check with `cat`).
+
 ### show
 
 `ubuntu-tweak show` answers the first sentence of request 9: a readable Russian overview of **all
