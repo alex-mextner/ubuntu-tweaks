@@ -143,7 +143,7 @@ Checklist from the parity audit (macOS Dock + Ubuntu Dock behaviours), final sta
 | 18 | Red numbered notification badge | works | `notification-badge-style=6`; with the `quiet-notifications` module (on by default) it counts only an app's notification that is on screen or waiting for its banner, plus the Shell's own window-attention ones |
 | 19 | Hide toggle shortcut (⌥⌘D) | works | `toggle-autohide-shortcut` = Super+Alt+D |
 | 20 | Dock background menu (hiding, magnification, position, settings) | works | `background-menu` |
-| 21 | Recent apps section | works | `recent-apps-count=3` |
+| 21 | Recents stack | works | `recent-apps-count=20` |
 | 22 | Minimize into the app icon | configurable | `minimize-to-icon` with `minimized-window-tiles` off |
 | 23 | Genie minimize effect | works | `minimize-effect=1` (own GPU effect), into the tile or the app icon |
 | 24 | Minimized windows as tiles before Trash | works | `minimized-window-tiles` (on in the preset, macOS default) |
