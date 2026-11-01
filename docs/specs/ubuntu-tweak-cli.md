@@ -112,6 +112,10 @@ as any behavior change.
     stops making progress must be seen, named and, where that is safe, resumed by the engine itself, never silent:
     a watchdog on every streamed command, a visible heartbeat, and one shared non-interactive `apt-get` for the root
     module scripts (*Stalled steps*).
+26. (1 Nov 2026, ticket #177) «Не тупи, все должно быть через Ubuntu-tweaks cli! По реконцилляции. Просто добавляй
+    туда все новые патчи. Запиши в agents md» — every change to the system or the home directory is a declarative
+    module or profile patch applied by `ubuntu-tweak apply`, never a hand-made change; the rule is recorded in the
+    repository's `AGENTS.md` (`CLAUDE.md` links to it).
 
 ## Requirements
 
