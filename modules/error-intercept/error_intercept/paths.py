@@ -7,7 +7,7 @@ Public API:
 - ``Paths.from_env(env, home)``: state ``$XDG_STATE_HOME/error-intercept`` (``~/.local/state`` by default),
   config ``$XDG_CONFIG_HOME/error-intercept``, crash directory ``/var/crash``.
 - the derived files: ``archive``, ``spool``, ``pending``, ``audit``, ``disabled`` (the stop switch),
-  ``seen`` (root-owned reports already reported), ``lock``, ``config_file`` and ``spool_archive``.
+  ``seen`` (root-owned reports already reported), ``lock`` and ``spool_lock``, ``config_file`` and ``spool_archive``.
 - ``ORIGINAL_NOTIFIER``: the stock apport dialog launcher the stop switch hands control back to.
 - ``ensure_private_dir(path)``: create a directory readable by the owner only.
 """
@@ -69,6 +69,10 @@ class Paths:
     @property
     def lock(self) -> Path:
         return self.state / "ingest.lock"
+
+    @property
+    def spool_lock(self) -> Path:
+        return self.state / "spool.lock"
 
     @property
     def config_file(self) -> Path:

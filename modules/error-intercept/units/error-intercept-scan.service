@@ -1,0 +1,17 @@
+# Managed by ubuntu-tweaks (module error-intercept).
+# Once per graphical session: publish the crash reports that arrived while nobody was logged in, and the shell
+# extension's spool files left over from the last session (update-notifier-crash.path only reacts to changes).
+[Unit]
+Description=error-intercept: publish crash reports and spooled error windows found at login
+After=graphical-session.target
+PartOf=graphical-session.target
+# the stop switch: `error-intercept disable` must not make a login run the stock apport dialog
+ConditionPathExists=!%S/error-intercept/DISABLED
+
+[Service]
+Type=oneshot
+ExecStart=@MODULE@/error-intercept ingest
+ExecStart=@MODULE@/error-intercept ingest-spool
+
+[Install]
+WantedBy=graphical-session.target

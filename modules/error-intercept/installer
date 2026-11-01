@@ -1,0 +1,436 @@
+#!/usr/bin/python3 -B
+"""error-intercept module: crash reports go to the agent subscribed to errors instead of an apport dialog.
+
+    installer check     exit 0 satisfied, 3 unsatisfied (read-only)
+    installer status    the same facts, one line each (read-only)
+    installer plan      what install would change (read-only)
+    installer install   as the desktop user (no root): write, link, register, enable
+
+Everything is under $HOME and the user's systemd (``root = false``): a drop-in that replaces the ExecStart of
+``update-notifier-crash.service`` with ``error-intercept ingest``, the scan/spool/journal user units, the
+``~/.local/bin`` links for ``error-intercept`` and ``agent-sub``, and the ``errors`` topic of agent-sub (role and
+instructions of the agent that is started when nobody subscribed). It never restarts the desktop. The shell
+extension that hides other error windows is the separate ``error-intercept-shell`` module.
+
+``ERROR_INTERCEPT_ROOT=DIR`` stages everything under DIR (tests): DIR is the home, no ``systemctl`` is run, and
+agent-sub is pointed at DIR too. Options (``[modules.error-intercept]``): ``agent_tools_dir``, where the
+``agent-sub`` launcher is looked for when it is not on PATH. Spec: docs/specs/error-intercept.md.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TextIO
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE))
+
+from error_intercept.paths import Paths  # noqa: E402
+from error_intercept.publisher import CHECKOUT_GUESSES, LAUNCHER  # noqa: E402
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    environment,
+    invoking_account,
+    main,
+    module_config,
+    read_text_or_none,
+    unified_diff_lines,
+    write_file,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+ROOT_ENV = "ERROR_INTERCEPT_ROOT"
+OPTIONS = {"agent_tools_dir"}
+TOPIC = "errors"
+ESCALATE = ["tg", "--tag", "problem"]
+SPAWN_MIN_SEVERITY = "warning"
+NOTIFIER = "update-notifier-crash.service"
+DROP_IN = "update-notifier-crash.service.d/10-error-intercept.conf"
+SCAN_UNIT = "error-intercept-scan.service"
+SPOOL_UNIT = "error-intercept-spool.path"
+DRAIN_TIMER = "error-intercept-drain.timer"
+JOURNAL_UNIT = "error-intercept-journal.service"
+STATE_DIRS = ("archive", "spool", "pending")
+Check = Callable[[], Finding]
+
+
+@dataclass
+class Fact:
+    """One verified fact: ``check`` reads, ``fix`` (None: only a human can) makes it true, ``preview`` says how."""
+
+    check: Check
+    fix: Callable[[], None] | None
+    preview: Callable[[], list[str]]
+    derived: bool = False  # follows from other facts (a reload): never listed in the plan on its own
+
+
+class ErrorIntercept(Module):
+    name = "error-intercept"
+
+    def __init__(
+        self,
+        process: Process,
+        home: Path,
+        env: Mapping[str, str],
+        options: dict[str, object],
+        *,
+        is_root: bool,
+        staged: bool = False,
+        module_dir: Path = HERE,
+        has_bus: bool = True,
+        which: Callable[[str], str | None] = shutil.which,
+        out: TextIO = sys.stdout,
+    ) -> None:
+        unknown = sorted(set(options) - OPTIONS)
+        if unknown:
+            raise ModuleError(f"[modules.error-intercept] unknown option(s): {', '.join(unknown)}")
+        tools = options.get("agent_tools_dir")
+        if tools is not None and (not isinstance(tools, str) or not tools):
+            raise ModuleError("[modules.error-intercept] agent_tools_dir must be a non-empty string")
+        if any(ch.isspace() for ch in str(module_dir)):
+            raise ModuleError(f"{module_dir} has whitespace in its path: systemd cannot run units from it")
+        self._process = process
+        self._home = home
+        self._env = {} if staged else dict(env)
+        self._is_root = is_root
+        self._staged = staged
+        self._module = module_dir
+        self._bus = has_bus and not staged
+        self._which = which
+        self._out = out
+        self._tools = None if tools is None else Path(str(tools)).expanduser()
+        self._paths = Paths.from_env(self._env, home)
+        self._units = self._paths.config.parent / "systemd/user"
+        self._bin = home / ".local/bin"
+        self._journal_unit = (module_dir / "units" / JOURNAL_UNIT).is_file()
+
+    # -- desired state -----------------------------------------------------------------------------
+
+    def _render(self, path: Path) -> str:
+        return path.read_text(encoding="utf-8").replace("@MODULE@", str(self._module))
+
+    def _unit_files(self) -> dict[Path, str]:
+        wanted = {self._units / DROP_IN: self._render(self._module / "units" / DROP_IN)}
+        for unit in sorted((self._module / "units").iterdir()):
+            if unit.suffix in (".service", ".path", ".timer"):
+                wanted[self._units / unit.name] = self._render(unit)
+        return wanted
+
+    def _enabled_units(self) -> list[tuple[str, bool]]:
+        """(unit, must be running): the scan service only runs at login, the path, timer and journal units run now."""
+        units = [(SCAN_UNIT, False), (SPOOL_UNIT, True), (DRAIN_TIMER, True)]
+        return units + ([(JOURNAL_UNIT, True)] if self._journal_unit else [])
+
+    def _agent_sub_env(self) -> dict[str, str]:
+        if not self._staged:
+            return {}
+        config, state = self._paths.config.parent / "agent-sub", self._paths.state.parent / "agent-sub"
+        return {"AGENT_SUB_CONFIG_DIR": str(config), "AGENT_SUB_STATE_DIR": str(state)}
+
+    def _launcher(self) -> str | None:
+        link = self._bin / "agent-sub"
+        if link.exists():
+            return str(link)
+        found = self._which("agent-sub")
+        tools = self._tools_launcher()
+        return found or (str(tools) if tools else None)
+
+    def _tools_launcher(self) -> Path | None:
+        roots = [self._tools] if self._tools else [self._home / guess for guess in CHECKOUT_GUESSES]
+        return next((root / LAUNCHER for root in roots if root and (root / LAUNCHER).is_file()), None)
+
+    def _topic_args(self) -> list[str]:
+        data = self._module / "data"
+        return [
+            "--role-file",
+            str(data / "errors-role.md"),
+            "--instructions-file",
+            str(data / "errors-instructions.md"),
+            "--spawn-min-severity",
+            SPAWN_MIN_SEVERITY,
+            "--escalate",
+            *ESCALATE,
+        ]
+
+    # -- facts -------------------------------------------------------------------------------------
+
+    def _facts(self) -> list[Fact]:
+        facts = [self._checkout_fact(), *self._state_dir_facts()]
+        facts += [self._file_fact(path, text) for path, text in self._unit_files().items()]
+        facts += [self._link_fact(self._bin / "error-intercept", self._module / "error-intercept")]
+        facts += [self._agent_sub_link_fact(), self._topic_fact()]
+        if self._bus or not self._staged:
+            facts += [self._reload_fact(), self._effective_exec_fact()]
+            facts += [self._unit_fact(unit, running) for unit, running in self._enabled_units()]
+        return facts
+
+    def _checkout_fact(self) -> Fact:
+        def check() -> Finding:
+            worktree = (self._module.parents[1] / ".git").is_file() and not self._staged
+            return Finding(
+                not worktree,
+                f"modules run from the stable checkout ({self._module})",
+                "a git worktree" if worktree else "",
+            )
+
+        def fix() -> None:
+            raise ModuleError(
+                f"{self._module} is inside a git worktree, which may be removed: run `UBUNTU_TWEAKS_DIR=<stable checkout> "
+                "ubuntu-tweak apply --commit`"
+            )
+
+        return Fact(check, fix, lambda: [])
+
+    def _state_dir_facts(self) -> list[Fact]:
+        facts = []
+        for name in STATE_DIRS:
+            path = self._paths.state / name
+
+            def check(path: Path = path) -> Finding:
+                ok = path.is_dir() and path.stat().st_mode & 0o077 == 0
+                return Finding(ok, f"private directory {path}")
+
+            def fix(path: Path = path) -> None:
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+                path.chmod(0o700)
+                path.parent.chmod(0o700)
+
+            facts.append(Fact(check, fix, lambda path=path: [f"mkdir -m 700 {path}"]))
+        return facts
+
+    def _file_fact(self, path: Path, text: str) -> Fact:
+        def check() -> Finding:
+            return Finding(read_text_or_none(path) == text, f"file {path}")
+
+        def fix() -> None:
+            write_file(path, text, 0o644)
+
+        def preview() -> list[str]:
+            return [f"write {path}", *unified_diff_lines(str(path), read_text_or_none(path), text)]
+
+        return Fact(check, fix, preview)
+
+    def _link_fact(self, link: Path, target: Path) -> Fact:
+        def check() -> Finding:
+            ok = link.is_symlink() and os.readlink(link) == str(target)
+            return Finding(ok, f"link {link} -> {target}")
+
+        return Fact(check, lambda: self._make_link(link, target), lambda: [f"link {link} -> {target}"])
+
+    @staticmethod
+    def _make_link(link: Path, target: Path) -> None:
+        if link.exists() and not link.is_symlink():
+            raise ModuleError(f"{link} exists and is not a link: left alone")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.unlink(missing_ok=True)
+        link.symlink_to(target)
+
+    def _agent_sub_link_fact(self) -> Fact:
+        link = self._bin / "agent-sub"
+
+        def check() -> Finding:
+            found = link.exists() or self._which("agent-sub") is not None
+            if found:
+                return Finding(True, "agent-sub on PATH or in ~/.local/bin")
+            hint = (
+                "agent-tools with lib/agenttools_subscriptions not found: set [modules.error-intercept] agent_tools_dir"
+            )
+            return Finding(
+                False,
+                "agent-sub on PATH or in ~/.local/bin",
+                "" if self._tools_launcher() else hint,
+                manual=self._tools_launcher() is None,
+            )
+
+        def fix() -> None:
+            launcher = self._tools_launcher()
+            if launcher is None:
+                raise NeedsManual(
+                    "agent-sub is not installed: install agent-tools or set [modules.error-intercept] agent_tools_dir"
+                )
+            self._make_link(link, launcher)
+
+        return Fact(
+            check, fix, lambda: [f"link {link} -> {self._tools_launcher() or '<agent-tools launcher, not found>'}"]
+        )
+
+    def _run_agent_sub(self, *arguments: str, execute: bool) -> tuple[int, str]:
+        launcher = self._launcher()
+        if launcher is None:
+            return 127, ""
+        argv = [launcher, *arguments]
+        with environment(**self._agent_sub_env()):
+            if execute:
+                self._process.execute(argv)
+                return 0, ""
+            result = self._process.query(argv, timeout=60)
+        return result.returncode, result.stdout or ""
+
+    def _topic_fact(self) -> Fact:
+        data = self._module / "data"
+        role = (data / "errors-role.md").read_text(encoding="utf-8")
+        instructions = (data / "errors-instructions.md").read_text(encoding="utf-8")
+        subject = (
+            f"agent-sub topic {TOPIC} registered (role, instructions, spawn from {SPAWN_MIN_SEVERITY}, escalate tg)"
+        )
+
+        def check() -> Finding:
+            if self._launcher() is None:
+                return Finding(False, subject, "agent-sub is not installed", manual=True)
+            code, out = self._run_agent_sub("topic", "show", TOPIC, execute=False)
+            if code != 0:
+                return Finding(False, subject, "agent-sub is not available or does not answer")
+            try:
+                topic = json.loads(out)
+            except ValueError:
+                return Finding(False, subject, "agent-sub topic show printed no JSON")
+            same = (
+                topic.get("role") == role
+                and topic.get("instructions") == instructions
+                and topic.get("spawn_min_severity") == SPAWN_MIN_SEVERITY
+                and topic.get("escalate") == ESCALATE
+            )
+            return Finding(same, subject)
+
+        def fix() -> None:
+            code, _ = self._run_agent_sub("topic", "set", TOPIC, *self._topic_args(), execute=True)
+            if code != 0:
+                raise ModuleError("agent-sub topic set failed")
+
+        return Fact(
+            check,
+            fix,
+            lambda: [
+                f"{'' if self._launcher() else '(needs agent-sub first) '}agent-sub topic set {TOPIC} {' '.join(self._topic_args())}"
+            ],
+        )
+
+    def _systemctl(self, verb: str, *arguments: str) -> str:
+        lines = self._process.query(["systemctl", "--user", verb, *arguments], timeout=30).stdout.strip().splitlines()
+        return lines[0] if lines else ""
+
+    def _bus_fact(
+        self, subject: str, ok: Callable[[], bool], fix: Callable[[], None], preview: str, derived: bool = False
+    ) -> Fact:
+        def check() -> Finding:
+            if not self._bus:
+                return Finding(False, subject, "no user systemd bus (run this from your desktop session)", manual=True)
+            return Finding(ok(), subject)
+
+        return Fact(check, fix, lambda: [preview], derived)
+
+    def _reload_fact(self) -> Fact:
+        return self._bus_fact(
+            "systemd has loaded the current unit files",
+            lambda: self._systemctl("show", "-p", "NeedDaemonReload", "--value", NOTIFIER) != "yes",
+            lambda: self._process.execute(["systemctl", "--user", "daemon-reload"]),
+            "systemctl --user daemon-reload",
+        )
+
+    def _effective_exec_fact(self) -> Fact:
+        wanted = f"{self._module}/error-intercept ingest"
+
+        def fix() -> None:
+            raise ModuleError(
+                f"systemd still runs another ExecStart for {NOTIFIER} after the reload: a later drop-in overrides ours "
+                f"(systemctl --user cat {NOTIFIER})"
+            )
+
+        return self._bus_fact(
+            f"{NOTIFIER} runs the ingester, not the apport dialog",
+            lambda: wanted in self._systemctl("show", "-p", "ExecStart", "--value", NOTIFIER),
+            fix,
+            f"{NOTIFIER} ExecStart is {wanted} (after the reload)",
+            derived=True,
+        )
+
+    def _unit_fact(self, unit: str, running: bool) -> Fact:
+        def ok() -> bool:
+            enabled = self._systemctl("is-enabled", unit) == "enabled"
+            return enabled and (not running or self._systemctl("is-active", unit) == "active")
+
+        def fix() -> None:
+            self._process.execute(["systemctl", "--user", "enable", *(["--now"] if running else []), unit])
+
+        verb = "enable --now" if running else "enable"
+        return self._bus_fact(
+            f"{unit} {'enabled and running' if running else 'enabled'}", ok, fix, f"systemctl --user {verb} {unit}"
+        )
+
+    # -- Module ------------------------------------------------------------------------------------
+
+    def findings(self) -> list[Finding]:
+        return [fact.check() for fact in self._facts()]
+
+    def plan(self) -> list[str]:
+        lines: list[str] = []
+        for fact in self._facts():
+            if not fact.derived and not fact.check().ok and fact.fix is not None:
+                lines += fact.preview()
+        reload = "systemctl --user daemon-reload"
+        if lines and self._bus and reload not in lines:
+            # apply reloads once the files are written and before it enables anything
+            first_enable = next(
+                (i for i, line in enumerate(lines) if line.startswith("systemctl --user enable")), len(lines)
+            )
+            lines.insert(first_enable, reload)
+        return lines or ["nothing to change"]
+
+    def apply(self) -> None:
+        if self._is_root:
+            raise ModuleError("run as the desktop user, not root: everything is installed under $HOME")
+        changed: list[str] = []
+        blocked: list[str] = []
+        for fact in self._facts():
+            finding = fact.check()
+            if finding.ok:
+                continue
+            if finding.manual or fact.fix is None:
+                blocked.append(finding.line())
+                continue
+            try:
+                fact.fix()
+            except NeedsManual as manual:
+                blocked.append(str(manual))
+                continue
+            changed.append(finding.subject)
+        for line in changed:
+            self._out.write(f"changed: {line}\n")
+        self._out.write(f"error-intercept: {len(changed)} changed\n")
+        if blocked:
+            raise NeedsManual("; ".join(blocked))
+
+
+def build(env: Mapping[str, str]) -> ErrorIntercept:
+    staged = env.get(ROOT_ENV)
+    if staged:
+        return ErrorIntercept(Process(), Path(staged), env, module_config(env), is_root=False, staged=True)
+    account = invoking_account(env)
+    has_bus = (
+        bool(env.get("DBUS_SESSION_BUS_ADDRESS")) or (Path(env.get("XDG_RUNTIME_DIR", "/nonexistent")) / "bus").exists()
+    )
+    return ErrorIntercept(Process(), account.home, env, module_config(env), is_root=os.geteuid() == 0, has_bus=has_bus)
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"error-intercept: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

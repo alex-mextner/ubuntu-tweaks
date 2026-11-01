@@ -1,0 +1,13 @@
+# Managed by ubuntu-tweaks (module error-intercept).
+# The shell extension drops one JSON file per hidden error window here; it never forks anything itself.
+[Unit]
+Description=error-intercept: shell extension spool
+
+[Path]
+PathChanged=%S/error-intercept/spool
+MakeDirectory=yes
+DirectoryMode=0700
+Unit=error-intercept-spool.service
+
+[Install]
+WantedBy=default.target

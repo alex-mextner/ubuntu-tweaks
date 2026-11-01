@@ -500,6 +500,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
+| `error-intercept` | 96 | `system` (user level, `root = false`; [`error-intercept.md`](error-intercept.md)) | off |
 | `rig` | 100 | `system` | off |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
@@ -937,6 +938,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
 | `disks` | `system` (root) | the disks the profile declares: driver, `/etc/fstab` block, mount point, systemd automount; plans nothing without `[modules.disks.mounts.*]`, so it is on by default and belongs to no init step (*Disks*) |
+| `error-intercept` | `system`, user (`root = false`) | apport crash dialogs replaced by publishing the sanitized report to the agent subscribed to `errors` (agent-sub): a drop-in for `update-notifier-crash.service`, scan/spool/journal user units, `~/.local/bin` links, the `errors` topic; `enabled = false` by default (opt in per machine); full design, safety and rollback in [`error-intercept.md`](error-intercept.md) |
 | `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
 | `passwords-app-polkit` | `system` (root) | the one root step `install.sh` only prints: the polkit action for unlocking with the login password |
 | `firefox` | `system`, user | build the passwords-app extension and have it signed on AMO (key from the Secret Service) (*Firefox*) |

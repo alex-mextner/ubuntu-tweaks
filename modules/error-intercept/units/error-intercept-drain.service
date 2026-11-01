@@ -1,0 +1,7 @@
+# Managed by ubuntu-tweaks (module error-intercept). Started by error-intercept-drain.timer.
+[Unit]
+Description=error-intercept: retry the events agent-sub still holds
+
+[Service]
+Type=oneshot
+ExecStart=@MODULE@/error-intercept drain
