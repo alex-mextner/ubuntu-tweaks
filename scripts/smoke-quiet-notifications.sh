@@ -48,6 +48,10 @@ export default class Probe extends Extension {
         const tray = Main.messageTray;
         const queue = tray._notificationQueue;
         const mode = GLib.getenv('QN_SMOKE_MODE');
+        tray.connect('source-added', (_tray, added) => {
+            if (added instanceof FdoNotificationDaemonSource)
+                console.log('SMOKE delivered');
+        });
         if (mode === 'late') {
             // An app source whose `notifications` is no longer an Array (as far as instanceof
             // can tell), born after enable(); everything stock does with it still works.
@@ -121,6 +125,8 @@ fail() { echo "smoke: FAIL: $*" >&2; exit 1; }
 errors() { grep -c "$uuid: not enabled" "$work/$1.log" || true; }
 
 run_shell normal
+grep -q 'SMOKE delivered' "$work/normal.log" ||
+  { cat "$work/normal.log" >&2; fail "stock run: the test notification never arrived"; }
 grep -qE 'SMOKE normal source=(true|false) group=false kept=(undefined|0)' "$work/normal.log" ||
   { cat "$work/normal.log" >&2; fail "stock run: the low-urgency notification was not swept"; }
 grep -q 'SMOKE patched=true state=1' "$work/normal.log" ||
@@ -140,6 +146,8 @@ grep "$uuid: not enabled" "$work/break.log"
 run_shell late
 grep -q 'SMOKE patched=true state=1' "$work/late.log" ||
   { cat "$work/late.log" >&2; fail "late run: the extension did not stay enabled and patched"; }
+grep -q 'SMOKE delivered' "$work/late.log" ||
+  { cat "$work/late.log" >&2; fail "late run: the test notification never arrived"; }
 grep -q 'SMOKE late source=true group=true kept=1' "$work/late.log" ||
   { cat "$work/late.log" >&2; fail "late run: the incompatible source did not keep its stock group and notification"; }
 [ "$(grep -c "$uuid: a notification source has no Source.notifications" "$work/late.log" || true)" = 1 ] ||
