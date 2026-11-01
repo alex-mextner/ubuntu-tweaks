@@ -40,6 +40,7 @@ from ubuntu_tweaks.actions import Action, Phase
 from ubuntu_tweaks.backup import backup
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import RefusedError, UbuntuTweakError
+from ubuntu_tweaks.link_loop import leads_back_to
 from ubuntu_tweaks.profile import Profile, ProfileFile
 from ubuntu_tweaks.settings import SettingsBackend
 
@@ -128,7 +129,8 @@ class FileLinkAction(Action):
         return self._entry.source
 
     def _refusal(self) -> str | None:
-        """Why nothing can be linked here: a directory, a non-regular file, or a parent that is not a directory."""
+        """Why nothing can be linked here: a directory, a non-regular file, a parent that is not a directory, or a
+        profile file that is a link back to the destination."""
         destination = self._destination
         where = _tilde(destination, self._home)
         for parent in destination.parents:
@@ -136,6 +138,9 @@ class FileLinkAction(Action):
                 break
             if os.path.lexists(parent) and not os.path.isdir(parent):
                 return f"{_tilde(parent, self._home)} is not a directory"
+        if leads_back_to(Path(os.path.abspath(self._source)), destination):  # the exact target run() writes
+            label = _profile_label(self._profile, self._source)
+            return f"{label} is a link that leads back to {where}; linking would loop"
         if destination.is_symlink() or not os.path.lexists(destination):
             return None
         if destination.is_dir():
