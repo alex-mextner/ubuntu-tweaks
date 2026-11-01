@@ -34,8 +34,11 @@ import {FdoNotificationDaemonSource, GtkNotificationDaemonAppSource} from 'resou
 
 const {NotificationDestroyedReason} = MessageTray;
 
-const isAppSource = source =>
+const isDaemonSource = source =>
     source instanceof FdoNotificationDaemonSource || source instanceof GtkNotificationDaemonAppSource;
+
+// A daemon source the extension can manage: one without the notifications list it reads stays stock.
+const isAppSource = source => isDaemonSource(source) && source.notifications instanceof Array;
 
 function messageView() {
     return Main.panel.statusArea.dateMenu._messageList._messageView;
@@ -62,7 +65,7 @@ function missingShellMembers() {
         expect(`Notification.${property}`, property in (MessageTray.Notification?.prototype ?? {}));
     // `notifications` is a field of the daemon sources, so it can only be read off the ones alive.
     expect('Source.notifications', Main.messageTray?.getSources().every(source =>
-        !isAppSource(source) || Array.isArray(source.notifications)));
+        !isDaemonSource(source) || isAppSource(source)));
     expect('SessionMode.hasNotifications', 'hasNotifications' in (Main.sessionMode ?? {}));
 
     for (const method of ['_addNotificationSource', '_removeNotificationSource'])
@@ -224,12 +227,14 @@ export default class QuietNotifications extends Extension {
     // A source that rejoins the tray (its app's notifications were switched off and on) comes
     // with the notifications it collected meanwhile: nothing would ever show or clear them.
     _watch(source) {
-        if (!isAppSource(source))
-            return;
-        // Sources born after enable() were not part of its check.
-        if (!Array.isArray(source.notifications)) {
-            reportMissing(this.uuid, ['Source.notifications']);
-            this.disable();
+        if (!isAppSource(source)) {
+            // Born after enable(), so not part of its check: the source stays entirely stock
+            // (isAppSource() leaves it out of every patched path) and is reported once.
+            if (isDaemonSource(source) && !this._reportedLateSource) {
+                this._reportedLateSource = true;
+                console.error(`${this.uuid}: a notification source has no Source.notifications list; ` +
+                    'it keeps stock behaviour. The Shell was probably upgraded; the extension needs an update.');
+            }
             return;
         }
         source.connectObject('notification-request-banner', () => this._scheduleSweep(), this);

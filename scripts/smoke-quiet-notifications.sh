@@ -6,8 +6,8 @@
 #   2. _notificationQueue removed while it is off, then it is enabled again (what a Shell
 #      rename looks like) -> it logs exactly one error naming that member and the tray
 #      stays unpatched;
-#   3. an app source without `notifications` appears after it enabled -> one error, and it
-#      switches itself off, restoring the stock methods.
+#   3. an app source without a notifications list appears after it enabled -> one error, and
+#      that source stays stock (group in the calendar menu, notification kept).
 # A throwaway probe extension does the removing and reports what it sees.
 # Needs gnome-shell and dbus-run-session; not part of scripts/ci.sh (CI has no Shell).
 set -euo pipefail
@@ -49,16 +49,20 @@ export default class Probe extends Extension {
         const queue = tray._notificationQueue;
         const mode = GLib.getenv('QN_SMOKE_MODE');
         if (mode === 'late') {
-            // An app source whose `notifications` field is gone, born after enable().
+            // An app source whose `notifications` is no longer an Array (as far as instanceof
+            // can tell), born after enable(); everything stock does with it still works.
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
-                Object.defineProperty(FdoNotificationDaemonSource.prototype, 'notifications',
-                    {configurable: true, get: () => undefined, set: () => {}});
+                Object.defineProperty(FdoNotificationDaemonSource.prototype, 'notifications', {
+                    configurable: true,
+                    get() { return this._smokeList; },
+                    set(list) { this._smokeList = new Proxy(list, {getPrototypeOf: () => Object.prototype}); },
+                });
                 return GLib.SOURCE_REMOVE;
             });
         }
         if (mode !== 'break')
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
-                GLib.spawn_command_line_async('notify-send smoke-test body');
+                GLib.spawn_command_line_async('notify-send -u low smoke-test body');
                 return GLib.SOURCE_REMOVE;
             });
         if (mode === 'break') {
@@ -76,6 +80,14 @@ export default class Probe extends Extension {
             tray._notificationQueue = queue;
             const state = Main.extensionManager.lookup('quiet-notifications@ubuntu-tweaks')?.state;
             console.log(`SMOKE patched=${patched()} state=${state}`);
+            if (mode !== 'break') {
+                // A low-urgency notification gets no banner, so nothing but the extension's sweep
+                // can remove it: gone when managed, still listed when the source is left stock.
+                const view = Main.panel.statusArea.dateMenu._messageList._messageView;
+                const source = Main.messageTray.getSources().find(s => s instanceof FdoNotificationDaemonSource);
+                console.log(`SMOKE ${mode} source=${source !== undefined} ` +
+                    `group=${view._notificationSourceToGroup.has(source)} kept=${source?.notifications.length}`);
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -109,6 +121,8 @@ fail() { echo "smoke: FAIL: $*" >&2; exit 1; }
 errors() { grep -c "$uuid: not enabled" "$work/$1.log" || true; }
 
 run_shell normal
+grep -qE 'SMOKE normal source=(true|false) group=false kept=(undefined|0)' "$work/normal.log" ||
+  { cat "$work/normal.log" >&2; fail "stock run: the low-urgency notification was not swept"; }
 grep -q 'SMOKE patched=true state=1' "$work/normal.log" ||
   { cat "$work/normal.log" >&2; fail "stock run: extension did not enable and patch the tray"; }
 [ "$(errors normal)" = 0 ] || fail "stock run: unexpected not-enabled error"
@@ -124,7 +138,11 @@ echo "smoke: renamed _notificationQueue: one error naming it, tray left untouche
 grep "$uuid: not enabled" "$work/break.log"
 
 run_shell late
-grep -q 'SMOKE patched=false' "$work/late.log" ||
-  { cat "$work/late.log" >&2; fail "late run: the tray stayed patched after a source without notifications appeared"; }
-[ "$(errors late)" = 1 ] || { cat "$work/late.log" >&2; fail "late run: expected exactly one error"; }
-echo "smoke: app source without notifications after enable: one error, stock behaviour restored"
+grep -q 'SMOKE patched=true state=1' "$work/late.log" ||
+  { cat "$work/late.log" >&2; fail "late run: the extension did not stay enabled and patched"; }
+grep -q 'SMOKE late source=true group=true kept=1' "$work/late.log" ||
+  { cat "$work/late.log" >&2; fail "late run: the incompatible source did not keep its stock group and notification"; }
+[ "$(grep -c "$uuid: a notification source has no Source.notifications" "$work/late.log" || true)" = 1 ] ||
+  { cat "$work/late.log" >&2; fail "late run: expected exactly one error"; }
+grep -qE 'TypeError|JS ERROR' "$work/late.log" && { cat "$work/late.log" >&2; fail "late run: a JavaScript error"; }
+echo "smoke: source without notifications after enable: one error, the source stays stock"
