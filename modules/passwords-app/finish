@@ -3,7 +3,7 @@
 
     finish check     exit 0 once passwords-app is signed in to iCloud (read-only, never starts a sign-in)
     finish prepare   the machine part: the installed venv must carry the Apple client-identity fix, else it is
-                     reinstalled from the checkout and the daemon restarted
+                     reinstalled from the checkout (unless it already is that code) and the daemon restarted
     finish run       `passwords-app signin`, with the Apple ID prefilled from [modules.passwords-app] apple_id
 
 The probe asks through the anisette server the sync service itself uses: PASSWORDS_APP_ANISETTE_URL as the running
@@ -43,6 +43,7 @@ FIXED_CODE = "-20970"
 REFUSED_CODE = "-80045"
 DEFAULT_CHECKOUT = "~/dev/passwords-app"
 UNIT = "passwords-appd.service"
+PACKAGE = "passwords_app"
 ANISETTE_URL_VARIABLE = "PASSWORDS_APP_ANISETTE_URL"
 PROBE_URL_VARIABLE = "FINISH_PROBE_ANISETTE_URL"
 PROBE_TIMEOUT = 45
@@ -199,6 +200,42 @@ def probe(runner: Runner, venv_python: Path, anisette_url: str) -> str:
     return text.splitlines()[-1] if text else f"the probe exited {code} without output"
 
 
+def package_files(root: Path) -> dict[str, bytes]:
+    """The files of a package directory by relative path (bytecode caches left out: they are not what was installed)."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def installed_is_checkout(venv: Path, checkout: Path) -> bool:
+    """True when every copy of the package installed in ``venv`` (one per Python version it has lived under) has exactly
+    the files of the checkout's working tree: a reinstall would change nothing, whatever the checkout's commit is or
+    whether it carries uncommitted edits."""
+    source = checkout / "src" / PACKAGE
+    installed = sorted(venv.glob(f"lib/python*/site-packages/{PACKAGE}"))
+    if not installed or not source.is_dir():
+        return False
+    try:
+        wanted = package_files(source)
+        return all(package_files(copy) == wanted for copy in installed)
+    except OSError:  # an unreadable or vanished file: no proof that nothing changes, so the reinstall goes ahead
+        return False
+
+
+def refused(checkout: Path, where: str) -> int:
+    """-80045 that a reinstall cannot or did not cure: Apple refuses the data of the anisette server."""
+    print(
+        f"the probe says ec={REFUSED_CODE} through {where}: {checkout} is what runs now, so it either "
+        f"predates the client-identity fix (git -C {checkout} pull) or Apple refuses the data of that "
+        "anisette server (the Android-based dadoum/anisette-v3-server is refused since 2026-10-12, "
+        "Dadoum/anisette-v3-server#61, passwords-app#144; Windows or macOS ADI is accepted). Every sign-in step "
+        "that asks Apple's GrandSlam for a token fails until the server serves data Apple accepts"
+    )
+    return 1
+
+
 def prepare(
     runner: Runner, env: Mapping[str, str], home: Path, options: Mapping[str, object], *, sleep=time.sleep
 ) -> int:
@@ -217,6 +254,9 @@ def prepare(
         print(f"the Apple probe gave no usable answer: {answer}")
         return 1
     checkout = checkout_dir(options, home)
+    if installed_is_checkout(venv, checkout):
+        print(f"the installed venv already has exactly the files of {checkout}: a reinstall would change nothing")
+        return refused(checkout, where)
     print(f"the installed venv still answers ec={REFUSED_CODE}: reinstalling it from {checkout}")
     code, text = runner.capture(
         ["uv", "pip", "install", "-q", "--python", str(python), "--reinstall-package", "passwords-app", str(checkout)],
@@ -234,14 +274,7 @@ def prepare(
     where = shown(url)
     answer = probe(runner, python, url)
     if answer == REFUSED_CODE:
-        print(
-            f"after the reinstall the probe still says ec={REFUSED_CODE} through {where}: {checkout} is what runs now, so "
-            f"it either predates the client-identity fix (git -C {checkout} pull) or Apple refuses the data of that "
-            "anisette server (the Android-based dadoum/anisette-v3-server is refused since 2026-10-12, "
-            "Dadoum/anisette-v3-server#61, passwords-app#144; Windows or macOS ADI is accepted). Every sign-in step "
-            "that asks Apple's GrandSlam for a token fails until the server serves data Apple accepts"
-        )
-        return 1
+        return refused(checkout, where)
     if answer != FIXED_CODE:
         print(f"after the reinstall the Apple probe gave no usable answer: {answer}")
         return 1

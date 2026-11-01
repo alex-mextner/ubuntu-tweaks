@@ -23,8 +23,9 @@ Public API:
   ``use_root_prefix(prefix)`` / ``root_prefix()`` (the session's prefix; ``None`` outside a session) and
   ``run(argv, *, cwd=None, capture=False, timeout=None) -> str`` (raises ``CommandError``; the
   helper behind ``git``/``apt``/``glib-compile-schemas`` calls in the commands and submodule planners) and
-  ``run_streamed(argv, *, cwd=None, input_text=None, timeout=None, stderr_tail=None) -> int`` (the child's exit status; its output
-  is copied through the pipes described above; ``OSError`` when it cannot start, ``TimeoutExpired``).
+  ``run_streamed(argv, *, cwd=None, env=None, input_text=None, timeout=None, stderr_tail=None, last_line=None) -> int``
+  (the child's exit status; its output is copied through the pipes described above; ``OSError`` when it cannot
+  start, ``TimeoutExpired``).
 - ``FakeProcess(responses, effects)``: records ``queries`` and ``executed``; ``responses`` maps an
   argv tuple to a ``CommandResult`` (anything else answers 127); ``effects`` is called with
   ``(argv, input_text)`` on every ``execute`` so a test can change the fake machine state.
@@ -49,9 +50,11 @@ from typing import IO
 
 from ubuntu_tweaks import watchdog
 from ubuntu_tweaks.errors import UbuntuTweakError
+from ubuntu_tweaks.sessionlog import LineMasker
 
 _CHUNK = 65536
 _TAIL = 2000  # characters of a child's stderr kept for the error message of a failure
+_LINE = 2000  # characters of the last line of a child's output kept for the reason of a failure (after masking)
 _DETAIL = 400  # ... of which the last three non-empty lines are shown on one line, clipped to this many
 _DRAIN_GRACE = 2.0  # seconds to wait for output left in the pipes once the child has exited
 _INTERRUPT_GRACE = 0.25  # seconds a child gets to react to the Ctrl-C it received too, before it is stopped
@@ -156,15 +159,47 @@ def watching(
         _watch = previous
 
 
+class _LastLine:
+    """The last non-blank line of a child's output, exactly as the session log shows it (``sessionlog.LineMasker``:
+    plain text, secrets masked, a long line cut the same way). Fed with the chunks of ONE pipe, so the order is the
+    child's own. Blank lines, however many or however long, never push a diagnostic out."""
+
+    def __init__(self, target: list[str]) -> None:
+        self._target = target
+        self._lines = LineMasker()
+        self._lock = threading.Lock()
+        self._done = False
+
+    def feed(self, text: str) -> None:
+        with self._lock:
+            if not self._done:
+                self._keep(self._lines.feed(text))
+
+    def flush(self) -> None:
+        """The child ended: an unfinished last line counts too (a prompt, a message without a newline). Nothing is
+        kept afterwards: a grandchild that holds the pipe open and writes later is not the reason the child failed."""
+        with self._lock:
+            if not self._done:
+                self._keep(self._lines.rest())
+            self._done = True
+
+    def _keep(self, shown: list[tuple[str, str]]) -> None:
+        for _raw, masked in shown:
+            if masked.strip():
+                self._target[:] = [masked.strip()[-_LINE:]]
+
+
 def _pump(
     pipe: IO[bytes],
     stream_name: str,
     abandoned: threading.Event,
     monitor: watchdog.Watchdog | None,
     tail: list[str] | None = None,
+    lines: _LastLine | None = None,
 ) -> None:
     """Copy ``pipe`` to ``sys.<stream_name>`` chunk by chunk (not by line, so a prompt without a newline shows).
-    ``tail``, when given, keeps the last ``_TAIL`` characters of what was read (the reason a failure shows).
+    ``tail``, when given, keeps the last ``_TAIL`` characters of what was read (the reason a failure shows);
+    ``lines`` keeps the last non-blank line instead.
     Every chunk tells the watchdog (``None`` outside a ``watching`` block) that the child is alive; the heartbeat
     line is erased before it is shown and never drawn over a line the child left unfinished.
 
@@ -181,6 +216,8 @@ def _pump(
         text = decoder.decode(chunk, final=not chunk)
         if text and tail is not None:
             tail[:] = ["".join(tail + [text])[-_TAIL:]]
+        if text and lines is not None:
+            lines.feed(text)
         if text and not abandoned.is_set():
             with monitor.lock if monitor is not None else contextlib.nullcontext():
                 if monitor is not None:
@@ -198,6 +235,8 @@ def _pump(
                         shown = False
         if not chunk:
             break
+    if lines is not None:
+        lines.flush()
     pipe.close()  # an abandoned pipe is released as soon as the last writer lets go of it
 
 
@@ -235,16 +274,22 @@ def run_streamed(
     argv: Sequence[str],
     *,
     cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
     input_text: str | None = None,
     timeout: float | None = None,
     stderr_tail: list[str] | None = None,
+    last_line: list[str] | None = None,
 ) -> int:
     """Run ``argv`` (never through a shell) and return its exit status, showing its output as it arrives.
 
     stdout and stderr are pipes that reader threads copy to ``sys.stdout`` / ``sys.stderr`` (which may be the
     session log's tees); stdin is the terminal, or ``input_text`` when given. ``OSError`` when the program cannot
     start and ``subprocess.TimeoutExpired`` (the child is stopped first) propagate as ``subprocess.run`` raises them.
-    ``stderr_tail`` (a list) ends up holding one string: the last characters the child wrote to stderr.
+    ``env`` is the child's whole environment (default: ours). ``stderr_tail`` (a list) ends up holding one string:
+    the last characters the child wrote to stderr. ``last_line`` (a list) ends up holding the last non-blank line the
+    child wrote, secrets masked and escape sequences removed (nothing when it wrote none); asking for it merges stderr
+    into the stdout pipe, so the order of the lines is exactly the child's and one pump sees them all (the screen and
+    the session log then show the child's stderr lines as stdout lines).
 
     Inside a ``watching`` block (one per action) a watchdog looks at the child and every descendant once a second
     (``watchdog``): a stopped one is continued and reported, a step with no output and no CPU for the stall time is
@@ -253,15 +298,16 @@ def run_streamed(
     Nothing is ever killed for being slow.
     """
     # A Python child on a pipe would hold its prompts back and mix its two streams: ask it not to buffer.
-    environment = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    environment = {**(os.environ if env is None else env), "PYTHONUNBUFFERED": "1"}
     process = subprocess.Popen(
         list(argv),
         cwd=cwd,
         stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT if last_line is not None else subprocess.PIPE,
         env=environment,
     )
+    lines = _LastLine(last_line) if last_line is not None else None
     watch = _watch
     monitor = _watchdog_for(process.pid, watch, argv) if watch is not None else None
     stop = threading.Event()
@@ -270,7 +316,7 @@ def run_streamed(
         (
             threading.Thread(
                 target=_pump,
-                args=(pipe, name, abandoned, monitor, stderr_tail if name == "stderr" else None),
+                args=(pipe, name, abandoned, monitor, stderr_tail if name == "stderr" else None, lines),
                 daemon=True,
             ),
             pipe,
@@ -317,6 +363,8 @@ def run_streamed(
                 continue
             if reader.is_alive():  # a grandchild still holds the pipe open
                 abandoned.set()  # its pump stops writing to the terminal: it may outlive the interpreter's streams
+                if lines is not None:
+                    lines.flush()  # the child is gone: what the pump has not read yet is not coming
                 _abandoned.append(pipe)
             else:
                 pipe.close()
