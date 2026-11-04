@@ -80,11 +80,22 @@ For every `*.crash` in `/var/crash` (`--crash-dir` and `ERROR_INTERCEPT_CRASH_DI
   data at most 6 KB (agent-sub itself cuts at 2 KB / 8 KB). The monitors.xml symlink loop (`[Errno 40]`) appears in every
   shell report and says nothing about the crash: all such lines are removed and replaced by ONE fact,
   *"monitors.xml is unreadable: symlink loop (Errno 40)"*.
-* **Classification** (`classify.py`), first match wins: a nested test shell (`--headless`, `--virtual-monitor` or `--nested` in
-  `ProcCmdline`) is `info` with the tag `nested-test-shell`: it goes to subscribed agents and **never starts one**;
-  gnome-shell, mutter, Xwayland, gnome-session or gdm crashing is `critical`; everything else is `warning`. The dedup key is
+* **Classification** (`classify.py`), first match wins: gnome-shell, mutter, Xwayland, gnome-session or gdm crashing is
+  `critical`; everything else is `warning`. A nested test shell (`--headless`, `--virtual-monitor` or `--nested` in
+  `ProcCmdline`) is **not downgraded**: it keeps that severity (a nested gnome-shell SIGSEGV is `critical`) and is only
+  tagged `nested-test-shell`, context for the agent, who decides real bug versus test artefact. The dedup key is
   `<executable>|<signal>|<top frame function>` (no pid, address or time); nested shells get `|nested` appended so that
-  their quiet `info` event can never swallow a later crash of the real session shell.
+  their event never merges with a crash of the real session shell.
+* **Rules data** (`data/intercept-rules.json`, user override `$XDG_CONFIG_HOME/error-intercept/intercept-rules.json`, merged
+  field by field, the user's value wins): `{"version": 1, "nested_test_shell": {"exempt": false, "mode": "drop", "note": "..."}}`.
+  `exempt` is **off by default**: nested-shell crashes spawn/notify agents like any crash. The owner MAY turn it on
+  (`"exempt": true` in the override file): such a crash is then recorded in `audit.jsonl` with the decision `exempt-nested`
+  (severity, key and the sanitized event included), **not published**, and the report is still archived, so apport never
+  shows it. Reasoning for the switch: the nested-shell isolation helper of hyperdock (issue 44) already keeps those crashes
+  from reaching the desktop, so the exemption is only a way to silence test noise; loop protection never depends on it, it is
+  dedup, the rate limit, spawn caps and backoff in agent-sub. A wrong value (not JSON, wrong version, `exempt` not a
+  boolean, unknown `mode`) falls back to off and is listed by `error-intercept status` (`rules problem: ...`, also in `--json`
+  as `rules_problems`). The journal source reads the same key from the same file; this module owns the file.
 * **The report is claimed before it is touched**: it is renamed into the private directory `.ei-claims` inside `/var/crash` (the sticky
   bit lets the owner create it), gzipped into the archive, the file and then the archive directory are `fsync`ed, and only then the claimed
   file is removed. If apport writes a NEW report under the same name meanwhile, only the claimed inode is deleted; after any failure the
@@ -147,9 +158,8 @@ instructions; **never restart, reload or kill the user's gnome-shell, never log 
 user units, extensions or `~/.local/bin`**; ask via `tg` before anything destructive or needing sudo; nested test shells run
 under `prlimit --core=0 --` with a temporary `HOME` and XDG directories, with `WAYLAND_DISPLAY`/`DISPLAY`/`XAUTHORITY` unset
 and their own D-Bus session, and afterwards no stray `gnome-shell --headless` / `dbus-run-session` / `nautilus` of the
-agent's may remain; a nested-shell crash is judged (real bug: ticket; test artefact: say what); every event ends with
-`agent-sub ack <id> --note ...`. `warning` and `critical` events start an agent when nobody subscribed; `info` (nested
-shells) only reaches agents that did.
+agent's may remain; a nested-shell crash (tag `nested-test-shell`, normal severity) is judged (real bug: ticket; test artefact: say what); every event ends with
+`agent-sub ack <id> --note ...`. `warning` and `critical` events (nested shells included, unless the owner turned the exemption on) start an agent when nobody subscribed; `info` only reaches agents that did.
 
 ## The installer
 
@@ -173,7 +183,7 @@ pointed at DIR as well): that is how the tests run. Option: `[modules.error-inte
 | apport crash dialog, user processes (gnome-shell, apps, packages) | yes | this module's `ingest` |
 | apport "package problem" / `recoverable_problem` reports | yes | same (`.crash` path) |
 | "System program problem detected" (root-owned reports) | partly | dialog suppressed + metadata event; content unreadable without root (not in the `whoopsie` group); the file stays |
-| nested test-shell crashes | yes, quiet | severity `info`, never spawn |
+| nested test-shell crashes | yes | normal severity, tagged `nested-test-shell`; optional switch `nested_test_shell.exempt` drops them to the audit log |
 | other error windows (software/update-notifier/app crash windows by class/title) | yes after re-login | the `error-intercept-shell` extension; Wayland loads extension code only at login |
 | mutter "not responding" dialog | observe only | hiding it removes the user's Force Quit; a rule flip makes it `intercept` |
 | gnome-shell `JS ERROR`, extension load errors | yes | journal source (#168) |
@@ -263,5 +273,5 @@ no environment, maps, token or home path; classify; archive; apport-checkreports
 publisher and spool, the CLI, the installer against a fake `systemctl --user` / `agent-sub` (staged and live-style), and the
 end-to-end demo (`test_end_to_end_demo.py`) that runs the ingester against the **real** `agenttools_subscriptions` library with its
 fake tmux/omp machine: no subscriber + dry run prints the exact tmux command that would start; a critical crash starts exactly
-one agent, a nested shell none; a subscribed agent receives the sanitized event with a receipt and acks it. It skips when no
+one agent, a nested shell one by default and none with the exemption on; a subscribed agent receives the sanitized event with a receipt and acks it. It skips when no
 agent-tools checkout has the library (`AGENT_TOOLS_DIR`).

@@ -188,9 +188,9 @@ class ClassifyTest(Case):
     def classified(self, **kwargs):
         return classify(parse_report(self.write_crash(text=crash_text(**kwargs))).fields)
 
-    def test_nested_test_shell_is_info_and_tagged(self):
+    def test_nested_test_shell_keeps_its_severity_and_is_tagged(self):
         result = self.classified()
-        self.assertEqual((result.severity, result.nested), ("info", True))
+        self.assertEqual((result.severity, result.nested), ("critical", True))
         self.assertIn("nested-test-shell", result.tags)
         self.assertEqual(result.key, "gnome-shell|SIGSEGV|mtk_anonymous_file_open_fd|nested")
         self.assertEqual((result.kind, result.source), ("crash", "gnome-shell"))
@@ -215,7 +215,7 @@ class ClassifyTest(Case):
         padding = "--x=" + "a" * 420
         result = self.classified(cmdline=f"gnome-shell {padding} --nested")
         self.assertTrue(result.nested)
-        self.assertEqual(result.severity, "info")
+        self.assertIn("nested-test-shell", result.tags)
 
     def test_an_escaped_space_keeps_a_flag_inside_one_argument_from_counting(self):
         self.assertFalse(self.classified(cmdline=r"gnome-shell --session session\ --nested").nested)

@@ -228,6 +228,15 @@ class ListReplayStatusTest(CliCase):
         _, out, _ = self.run_cli("status")
         self.assertIn("OFF", out)
 
+    def test_status_reports_a_bad_rules_file_and_the_default_off(self):
+        self.paths.config.mkdir(parents=True, exist_ok=True)
+        (self.paths.config / "intercept-rules.json").write_text('{"version": 1, "nested_test_shell": {"exempt": 1}}')
+        _, out, _ = self.run_cli("status")
+        self.assertIn("routed like any crash", out)
+        self.assertIn("rules problem: user rules: nested_test_shell.exempt must be true or false", out)
+        _, raw, _ = self.run_cli("status", "--json")
+        self.assertEqual(json.loads(raw)["nested_test_shell_exempt"], False)
+
     def test_archive_list(self):
         _, out, _ = self.run_cli("archive", "list")
         self.assertIn("_usr_bin_gnome-shell.1000.crash.", out)

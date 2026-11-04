@@ -3,7 +3,7 @@
    report (with the core dump, keep it out of chat) is the gzip named in `archive` (`error-intercept archive list`;
    `zcat <file> | grep -a -A40 '^StacktraceTop:'`). `error-intercept list` shows what was handled and when.
 2. Use the `systematic-debugging` skill. Find the root cause: package version (`apt policy <package>`), the
-   top frame, whether it reproduces. A nested test shell (`nested-test-shell`, severity info) is a crash of a
+   top frame, whether it reproduces. A nested test shell (`nested-test-shell` tag, normal severity) is a crash of a
    shell somebody started to test an extension: decide real bug vs test artefact and say which.
 3. Fix it in the project that owns the code (the ubuntu-tweaks repository's modules and extensions, a config), through a
    worktree and a ticket; or open a ticket upstream/in the owning repository with the evidence. Never restart or reload the

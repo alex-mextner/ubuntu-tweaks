@@ -35,7 +35,7 @@ class PublishAndArchiveTest(IngestCase):
         (event,) = publish.events
         self.assertEqual(
             (event["topic"], event["kind"], event["severity"], event["source"]),
-            ("errors", "crash", "info", "gnome-shell"),
+            ("errors", "crash", "critical", "gnome-shell"),
         )
         self.assertEqual(event["key"], "gnome-shell|SIGSEGV|mtk_anonymous_file_open_fd|nested")
         self.assertIn("nested-test-shell", event["data"]["tags"])

@@ -15,9 +15,9 @@ not to make the message go away.
 - Decide per event: **real bug** (fix it, or open a ticket with the evidence in the project that owns the code),
   **already fixed upstream** (say which package version, then ack), **noise** (say why, then ack). Writing
   "acked, noise" without looking is a failure.
-- Nested test shells (`nested-test-shell` tag, severity `info`) come from people and agents testing the
+- Nested test shells (`nested-test-shell` tag; normal severity, they are routed like any crash) come from people and agents testing the
   shell extensions. Decide whether the crash points at a real bug in code in the ubuntu-tweaks repository (its modules and
-  extensions) or in mutter/gnome-shell (open a ticket) or is an artefact of the test setup (say what). They are quiet by design.
+  extensions) or in mutter/gnome-shell (open a ticket) or is an artefact of the test setup (say what). Never ack one as noise without that look.
 
 ## Hard limits (the user's live desktop is not yours)
 

@@ -10,6 +10,8 @@ For every ``*.crash`` in the directory:
   publisher keeps a failed event in its pending queue), so the report never stays where apport lists it.
   Backlog: an unseen report (apport's test ``atime <= mtime``) younger than 24 h gets an event; a seen or older one
   is archived with an audit line and no event.
+  Optional rule ``nested_test_shell.exempt`` (``rules.py``, default off): a nested test shell crash is then archived
+  with the audit decision ``exempt-nested`` and no event.
 * **anyone else's** (root-owned system crashes: unreadable and not removable by the user): a metadata-only event
   from the file name and mtime, once per report (``seen.json``), and the file stays.
 
@@ -38,6 +40,7 @@ from error_intercept.classify import Classification, classify
 from error_intercept.crash_report import ReportError, parse_report
 from error_intercept.paths import Paths, ensure_private_dir
 from error_intercept.publisher import LOCAL_PREFIX, TOPIC, Publish
+from error_intercept.rules import Rules, load_rules
 from error_intercept.sanitize import SafeReport, clean_line, clip, mask, printable, sanitize_report
 
 BACKLOG_S = 24 * 3600
@@ -54,6 +57,7 @@ class Outcome:
     published: int = 0
     archived: int = 0
     metadata_only: int = 0
+    exempt: int = 0
 
     def note(self, line: str) -> None:
         self.lines.append(line)
@@ -82,7 +86,7 @@ def _signal_text(safe: SafeReport, cls: Classification) -> str:
 def _summary(safe: SafeReport, cls: Classification, archived: str) -> str:
     fields = safe.fields
     title = fields.get("Title") or f"{cls.source} {cls.kind} ({cls.signal})"
-    lines = [title + (" [nested test shell: no agent is started for it]" if cls.nested else "")]
+    lines = [title + (" [nested test shell]" if cls.nested else "")]
     lines.append(f"Signal: {_signal_text(safe, cls)}; top frame: {cls.function}")
     if fields.get("Package"):
         lines.append(f"Package: {fields['Package']}")
@@ -191,6 +195,7 @@ class Ingester:
         uid: int | None = None,
         dry_run: bool = False,
         quiet_s: float = QUIET_S,
+        rules: Rules | None = None,
     ) -> None:
         self._paths = paths
         self._publish = publish
@@ -200,6 +205,7 @@ class Ingester:
         self._uid = os.geteuid() if uid is None else uid
         self._dry_run = dry_run
         self._quiet_s = quiet_s
+        self._rules = load_rules(paths) if rules is None else rules
         self._seen = self._load_seen()
 
     def _load_seen(self) -> dict[str, int]:
@@ -282,6 +288,9 @@ class Ingester:
         archived = printable(self._paths.tilde(planned))
         event = build_event(printable(path.name), safe, cls, archived)
         outcome.note(f"{printable(path.name)}: {cls.severity} {cls.kind} {cls.key}")
+        if cls.nested and self._rules.nested_exempt:
+            self._exempt(path, info, event, cls, outcome, planned)
+            return
         if self._dry_run:
             outcome.note("  would publish: " + event["text"].replace("\n", "\n    "))
             outcome.note(f"  would archive to {archived} and remove {path}")
@@ -298,6 +307,24 @@ class Ingester:
             event=event,
         )
         outcome.published += 1
+        self._archive(path, info, outcome, planned)
+
+    def _exempt(
+        self, path: Path, info: os.stat_result, event: Event, cls: Classification, outcome: Outcome, planned: Path
+    ) -> None:
+        """The owner turned the nested-test-shell exemption on: audit log only, no event; the report is still archived."""
+        outcome.note("  exempt (nested_test_shell.exempt): audit log only, not published")
+        if self._dry_run:
+            outcome.note(f"  would archive to {event['data']['archive']} and remove {path}")
+            return
+        self._audit.append(
+            decision="exempt-nested",
+            report=printable(path.name),
+            severity=cls.severity,
+            key=cls.key,
+            event=event,
+        )
+        outcome.exempt += 1
         self._archive(path, info, outcome, planned)
 
     def _backlog(self, path: Path, info: os.stat_result, why: str, outcome: Outcome) -> None:
