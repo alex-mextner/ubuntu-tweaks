@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "nested_test_shell": {
+    "exempt": false,
+    "mode": "drop",
+    "note": "Default OFF: a crash of a nested test shell (gnome-shell or mutter started with --headless, --virtual-monitor or --nested) is routed like any other crash at its normal severity and is tagged nested-test-shell for the agent's context. Set exempt to true in the user override file to drop those crashes to the audit log only (no event, no agent). The nested-shell isolation helper of hyperdock (issue 44) already keeps these crashes away from the desktop; loop protection is dedup, rate limit, spawn caps and backoff in agent-sub."
+  }
+}

@@ -140,12 +140,22 @@ class EndToEndDemo(Case):
         self.assertIn("top frame: mtk_anonymous_file_open_fd", " ".join(started))
         self.assertEqual(self.audit.records()[0]["status"], "published")
 
-    def test_a_nested_test_shell_crash_is_quiet(self):
+    def test_a_nested_test_shell_crash_starts_an_agent_by_default(self):
         self.write_crash()  # the nested --headless shell of crash_text()
         self.ingest(self.router)
-        self.assertEqual(self.machine.new_sessions(), [])
+        self.assertEqual(len(self.machine.new_sessions()), 1)
         (event,) = self.events()
-        self.assertEqual((event["state"], event["event"]["severity"]), ("pending", "info"))
+        self.assertEqual(event["event"]["severity"], "critical")
+
+    def test_a_nested_test_shell_crash_is_audit_only_when_the_owner_exempts_it(self):
+        self.paths.config.mkdir(parents=True)
+        (self.paths.config / "intercept-rules.json").write_text(
+            '{"version": 1, "nested_test_shell": {"exempt": true}}', encoding="utf-8"
+        )
+        self.write_crash()
+        self.ingest(self.router)
+        self.assertEqual(self.machine.new_sessions(), [])
+        self.assertEqual(self.events(), [])
 
     def test_a_subscribed_agent_receives_the_sanitized_event_and_acks_it(self):
         self.machine.add_host("sess-1", cwd="/work")

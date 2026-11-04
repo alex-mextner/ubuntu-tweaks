@@ -36,6 +36,7 @@ from error_intercept import apport_source, spool
 from error_intercept.archive import list_archive
 from error_intercept.audit import Audit
 from error_intercept.paths import ORIGINAL_NOTIFIER, Paths, ensure_private_dir
+from error_intercept.rules import load_rules
 from error_intercept.publisher import LOCAL_PREFIX, AgentSubPublisher, DurablePublisher, PublishError, locate_agent_sub
 
 Execv = Callable[[str, list[str]], Any]
@@ -124,6 +125,7 @@ def _ingest(ctx: Context, args: argparse.Namespace) -> int:
     ctx.say(
         f"{'would handle' if args.dry_run else 'handled'}: {outcome.published} published, "
         f"{outcome.archived} archived, {outcome.metadata_only} metadata-only"
+        + (f", {outcome.exempt} exempt (audit log only)" if outcome.exempt else "")
     )
     if not args.dry_run:
         _drain_quietly(ctx)
@@ -219,8 +221,11 @@ def _status_facts(ctx: Context) -> dict[str, Any]:
     waiting = apport_source.Ingester(paths, ctx.publisher, ctx.audit, clock=ctx.clock, uid=ctx.uid, dry_run=True).run()
     archived = list_archive(paths.archive)
     records = [r for r in ctx.audit.records() if r.get("event_id")]
+    rules = load_rules(paths)
     return {
         "enabled": not paths.disabled.exists(),
+        "nested_test_shell_exempt": rules.nested_exempt,
+        "rules_problems": list(rules.problems),
         "agent_sub": locate_agent_sub(paths, ctx.env),
         "crash_dir": str(paths.crash_dir),
         "crash_reports_waiting": sum(1 for line in waiting.lines if not line.startswith(" ")),
@@ -240,6 +245,16 @@ def _status(ctx: Context, args: argparse.Namespace) -> int:
         return 0
     last = facts["last_event"]
     ctx.say(f"interception: {'on' if facts['enabled'] else 'OFF (DISABLED switch: the stock apport dialog is back)'}")
+    ctx.say(
+        "nested test-shell crashes: "
+        + (
+            "EXEMPT (audit log only, no event)"
+            if facts["nested_test_shell_exempt"]
+            else "routed like any crash (tagged)"
+        )
+    )
+    for problem in facts["rules_problems"]:
+        ctx.say(f"rules problem: {problem} (default applied)")
     ctx.say(f"agent-sub: {facts['agent_sub'] or 'NOT FOUND (events wait in the retry queue)'}")
     ctx.say(f"crash reports waiting to be ingested in {facts['crash_dir']}: {facts['crash_reports_waiting']}")
     ctx.say(f"events waiting for agent-sub (retry queue): {facts['pending_retry']}")

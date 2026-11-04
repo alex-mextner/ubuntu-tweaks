@@ -4,15 +4,15 @@ Accessed via: ``apport_source`` after ``sanitize``; the tests.
 
 Rules, first match wins:
 
-1. a nested test shell (gnome-shell or mutter with ``--headless``, ``--virtual-monitor`` or ``--nested`` as a whole
-   argument of ProcCmdline): ``info`` with the tag
-   ``nested-test-shell``. It is delivered to agents that already subscribed and never starts one;
-2. a crash of the desktop itself (gnome-shell, mutter, Xwayland, gnome-session, gdm): ``critical``;
-3. any other crash, and every report that has only an ``UnreportableReason`` or a package problem: ``warning``.
+1. a crash of the desktop itself (gnome-shell, mutter, Xwayland, gnome-session, gdm): ``critical``;
+2. any other crash, and every report that has only an ``UnreportableReason`` or a package problem: ``warning``.
 
 The key is ``<executable>|<signal>|<top frame function>``: no pid, no address, no time, so that the library's
-dedup folds the same crash into one event. A nested test shell gets ``|nested`` appended: its quiet ``info``
-event must never absorb (and hide) a later crash of the real session shell.
+dedup folds the same crash into one event. A nested test shell (gnome-shell or mutter with ``--headless``, ``--virtual-monitor`` or ``--nested`` as a whole
+argument of ProcCmdline) is NOT downgraded: it keeps the severity above, gets the tag ``nested-test-shell`` (context for
+the agent only) and ``|nested`` appended to the key, so its event never absorbs a crash of the real session shell.
+Dropping nested shells to the audit log is the optional ``nested_test_shell.exempt`` rule (``rules.py``), applied by
+``apport_source``, not here.
 
 Public API: ``Classification(kind, severity, source, key, signal, function, tags, nested)`` and
 ``classify(fields) -> Classification`` (the PARSED fields: routing must not depend on how much the sanitizer clips); ``NESTED_FLAGS``, ``NESTED_CAPABLE``, ``DESKTOP_PROCESSES``.
@@ -90,9 +90,7 @@ def classify(fields: dict[str, str]) -> Classification:
     function = _ADDRESS.sub("", first_function(fields.get("StacktraceTop", ""))).strip() or "unknown"
     nested = is_nested(exe, fields.get("ProcCmdline", ""))
     crashed = name != "none"
-    if nested:
-        severity = "info"
-    elif crashed and exe in DESKTOP_PROCESSES:
+    if crashed and exe in DESKTOP_PROCESSES:
         severity = "critical"
     else:
         severity = "warning"
