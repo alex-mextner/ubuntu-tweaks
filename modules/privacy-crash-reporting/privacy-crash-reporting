@@ -1,0 +1,173 @@
+#!/usr/bin/python3 -B
+"""privacy-crash-reporting module: Ubuntu's crash upload stays off.
+
+    privacy-crash-reporting check     exit 0 satisfied, 3 unsatisfied (read-only, no root)
+    privacy-crash-reporting status    the same facts, one line each (read-only)
+    privacy-crash-reporting plan      what `install` is going to do (read-only)
+    privacy-crash-reporting install   as root: `systemctl mask --now` of the whoopsie units, apport `enabled=0`
+
+Facts: `whoopsie.path` (the unit that starts whoopsie when a crash report appears) and `whoopsie.service` are
+masked and not running; a unit that does not exist counts as satisfied. A mask, not a plain disable: whoopsie.service
+is `static` (nothing to disable) and `apport-autoreport.service` `Wants=` whoopsie.path, so only a masked unit cannot
+be started again between two applies. With the option `apport = true` the last `enabled=` line of `/etc/default/apport`
+is `enabled=0`. PRIVACY_CRASH_REPORTING_ROOT=DIR prefixes /etc/default/apport (tests); `systemctl` is found on PATH.
+Spec: docs/specs/privacy-crash-reporting.md.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    main,
+    module_config,
+    read_text_or_none,
+    unified_diff_lines,
+    write_file,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+ROOT_ENV = "PRIVACY_CRASH_REPORTING_ROOT"
+UNITS = ("whoopsie.path", "whoopsie.service")
+APPORT_DEFAULTS = "etc/default/apport"
+OPTIONS = {"apport"}
+# `is-enabled` words systemd gives. Only a persistent mask (or a unit that does not exist) is the wanted state: anything
+# else, `masked-runtime` included (it vanishes on reboot), is drift. An `alias` is refused (exit 1) and so is any
+# other answer: the enablement lives on the canonical unit, which this module does not resolve.
+# `not-found` is what current systemd prints (exit 4) for a unit that does not exist.
+SATISFIED = {"masked", "not-found"}
+KNOWN = SATISFIED | {
+    "enabled",
+    "enabled-runtime",
+    "linked",
+    "linked-runtime",
+    "masked-runtime",
+    "disabled",
+    "static",
+    "indirect",
+    "generated",
+    "transient",
+}
+IDLE = {"inactive", "failed", "deactivating", "maintenance"}
+RUNNING = {"active", "activating", "reloading", "refreshing"}
+ENABLED_LINE = re.compile(r"^\s*enabled\s*=")
+
+
+def options_from(env: Mapping[str, str]) -> bool:
+    options = module_config(env)
+    unknown = sorted(set(options) - OPTIONS - {"enabled"})
+    if unknown:
+        raise ModuleError(f"[modules.privacy-crash-reporting] unknown option(s): {', '.join(unknown)}")
+    apport = options.get("apport", False)
+    if not isinstance(apport, bool):
+        raise ModuleError("[modules.privacy-crash-reporting] apport must be true or false")
+    return apport
+
+
+def disable_apport(text: str | None) -> str:
+    """The file with its last `enabled=` line replaced by `enabled=0` (appended when there is none)."""
+    lines = (text or "").splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if ENABLED_LINE.match(lines[index]):
+            lines[index] = "enabled=0"
+            return "\n".join(lines) + "\n"
+    return "\n".join([*lines, "enabled=0"]) + "\n"
+
+
+def apport_is_disabled(text: str | None) -> bool:
+    for line in reversed((text or "").splitlines()):
+        if ENABLED_LINE.match(line):
+            return line.split("=", 1)[1].strip() == "0"
+    return False
+
+
+class CrashReporting(Module):
+    name = "privacy-crash-reporting"
+
+    def __init__(self, process: Process, root: Path, *, apport: bool) -> None:
+        self.process = process
+        self.root = root
+        self.apport = apport
+
+    def unit_state(self, unit: str) -> tuple[str, str]:
+        """(is-enabled word, is-active word). A word systemd does not give is an error, never a guess: a failed query
+        (no systemctl, a timeout, a refused call) must not read as "disabled and stopped"."""
+        enabled = self.process.query(["systemctl", "is-enabled", unit])
+        word = enabled.stdout.strip()
+        if word not in KNOWN:
+            if word == "" and "No such file or directory" in enabled.stderr:
+                word = "not-found"  # older systemd: the unit does not exist
+            else:
+                raise ModuleError(f"systemctl is-enabled {unit}: {self.failure(enabled.returncode, word, enabled.stderr)}")
+        active = self.process.query(["systemctl", "is-active", unit])
+        running = active.stdout.strip()
+        if running not in IDLE | RUNNING:
+            raise ModuleError(f"systemctl is-active {unit}: {self.failure(active.returncode, running, active.stderr)}")
+        return word, running
+
+    @staticmethod
+    def failure(returncode: int, word: str, stderr: str) -> str:
+        first = stderr.strip().splitlines()[0] if stderr.strip() else ""
+        detail = first or (f"unexpected answer {word!r}" if word else "no answer")
+        return f"exit {returncode}: {detail}"
+
+    def unit_findings(self, unit: str) -> list[Finding]:
+        enabled, active = self.unit_state(unit)
+        masked = enabled in SATISFIED
+        return [
+            Finding(masked, f"{unit} is masked", "" if masked else f"is-enabled says {enabled}"),
+            Finding(active not in RUNNING, f"{unit} is not running", "" if active not in RUNNING else active),
+        ]
+
+    def findings(self) -> list[Finding]:
+        found = [finding for unit in UNITS for finding in self.unit_findings(unit)]
+        if self.apport:
+            text = read_text_or_none(self.root / APPORT_DEFAULTS)
+            found.append(Finding(apport_is_disabled(text), "/etc/default/apport has enabled=0"))
+        return found
+
+    def pending_units(self) -> list[str]:
+        return [unit for unit in UNITS if not all(f.ok for f in self.unit_findings(unit))]
+
+    def plan(self) -> list[str]:
+        lines = [f"systemctl mask --now {unit}" for unit in self.pending_units()]
+        if self.apport:
+            path = self.root / APPORT_DEFAULTS
+            old = read_text_or_none(path)
+            if not apport_is_disabled(old):
+                lines.append(f"write /{APPORT_DEFAULTS}: enabled=0")
+                lines.extend(unified_diff_lines(f"/{APPORT_DEFAULTS}", old, disable_apport(old)))
+        return lines
+
+    def apply(self) -> None:
+        # `mask --now` leaves any enablement link beneath the mask, so unmasking later restores the earlier state
+        for unit in self.pending_units():
+            self.process.execute(["systemctl", "mask", "--now", unit])
+        if self.apport:
+            path = self.root / APPORT_DEFAULTS
+            old = read_text_or_none(path)
+            if not apport_is_disabled(old):
+                write_file(path, disable_apport(old), 0o644)
+
+
+def build(env: Mapping[str, str]) -> CrashReporting:
+    return CrashReporting(Process(), Path(env.get(ROOT_ENV) or "/"), apport=options_from(env))
+
+
+if __name__ == "__main__":
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"privacy-crash-reporting: {error}\n")
+        sys.exit(1)
+    sys.exit(main(module, sys.argv[1:], out=sys.stdout, err=sys.stderr))
