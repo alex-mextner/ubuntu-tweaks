@@ -1,0 +1,15 @@
+description = "no stray ~/.config/glib-2.0/settings/keyfile (the GKeyfile store Homebrew's gsettings writes); backed up, then removed (opt-in)"
+enabled = false   # a machine opts in with [modules.stray-gsettings-keyfile] enabled = true
+
+# Spec: docs/specs/stray-gsettings-keyfile.md.
+[source]
+kind = "system"
+root = false
+install = "stray-gsettings-keyfile install"
+check = "stray-gsettings-keyfile check"
+preview = "stray-gsettings-keyfile plan"
+
+[[coverage]]
+match = ["file:~/.config/glib-2.0/settings/keyfile", "file:~/.local/state/ubuntu-tweaks/backups/glib-keyfile-*"]
+class = "tracked"
+reason = "modules/stray-gsettings-keyfile keeps the store absent and backs it up before removal"

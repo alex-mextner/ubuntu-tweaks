@@ -15,9 +15,10 @@ profile's ``include`` claims the key) -> auto (same exemptions) -> no schema -> 
 absolute path in the value says so) -> destination bundle: the bundle that already holds the key (never
 moved), else a ``[capture.bundles]`` match, else the panel's own bundle.
 
-The keyfile override (``~/.config/glib-2.0/settings/keyfile``) can make the effective value differ
-from dconf. It is never frozen into the profile; keys it changes are reported as ``Override``s
-and captured entries it also touches carry the ``override`` flag.
+The keyfile override (``~/.config/glib-2.0/settings/keyfile``, the store of the GKeyfile backend, honoured only by
+keyfile-backend processes) can make the effective value differ from dconf in such a process. It is never
+frozen into the profile; keys it changes are reported as ``Override``s and captured entries it also touches
+carry the ``override`` flag.
 
 Public API: ``scan_settings(...) -> SettingsResult`` and the result dataclasses.
 """
