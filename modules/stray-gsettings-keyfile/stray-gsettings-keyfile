@@ -62,17 +62,36 @@ class StrayKeyfile(Module):
         return found
 
     def plan(self) -> list[str]:
-        if not self.present():
-            return []
-        return [
-            f"cp {self.keyfile} {self.backup_path()}   # mode 0600",
-            f"rm {self.keyfile}",
-            f"rmdir {self.keyfile.parent}   # only when empty",
-        ]
+        lines = []
+        for directory in self.leftovers():
+            lines.append(f"cp {directory / self.keyfile.name} {self.backup_path()}   # mode 0600; left by an interrupted run")
+            lines.append(f"rm {directory / self.keyfile.name}")
+        if self.present():
+            lines.append(f"cp {self.keyfile} {self.backup_path()}   # mode 0600")
+            lines.append(f"rm {self.keyfile}")
+        if lines:
+            lines.append(f"rmdir {self.keyfile.parent}   # only when empty")
+        return lines
 
     def apply(self) -> None:
         for directory in self.leftovers():
             self.finish(directory / self.keyfile.name, directory)
+        self.remove_empty_staging()
+        self.move_and_remove_keyfile()
+        try:
+            self.keyfile.parent.rmdir()
+        except OSError:
+            pass  # not empty (another file lives there), or already gone: nothing to tidy
+
+    def remove_empty_staging(self) -> None:
+        """An empty staging directory (an interrupted run, after the file was deleted) holds nothing: drop it."""
+        for directory in self.keyfile.parent.glob(f"{self.keyfile.name}.removing-*"):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass  # still holds something: leftovers() owns it
+
+    def move_and_remove_keyfile(self) -> None:
         if not self.present():
             return
         mode = self.keyfile.lstat().st_mode
@@ -92,10 +111,6 @@ class StrayKeyfile(Module):
             staging.rmdir()
             raise ModuleError(f"cannot move {self.keyfile} aside: {error.strerror or error}") from error
         self.finish(aside, staging)
-        try:
-            self.keyfile.parent.rmdir()
-        except OSError:
-            pass  # not empty (another file lives there), or already gone: nothing to tidy
 
     def finish(self, aside: Path, staging: Path) -> None:
         """Back the moved file up, then delete it; on any failure or interruption put it back (or say where it is)."""

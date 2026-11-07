@@ -181,6 +181,19 @@ class StrayKeyfileTests(unittest.TestCase):
 
         self.assertEqual(self.run_module("check").returncode, 0)
         self.assertEqual([p.read_text() for p in self.backups.iterdir()], ["only copy of an interrupted run"])
+        self.assertFalse(self.settings.exists())
+
+    def test_plan_lists_the_work_for_a_leftover_and_an_empty_staging_directory_is_dropped(self) -> None:
+        script = load_script()
+        self.settings.mkdir(parents=True)
+        (self.settings / "keyfile.removing-abc").mkdir()
+        (self.settings / "keyfile.removing-abc/keyfile").write_text("x")
+        self.assertTrue(any("left by an interrupted run" in line for line in self.stray(script).plan()))
+        (self.settings / "keyfile.removing-abc/keyfile").unlink()
+
+        self.stray(script).apply()
+
+        self.assertFalse(self.settings.exists())
 
     def test_an_interrupt_during_the_backup_puts_the_file_back(self) -> None:
         script = load_script()
