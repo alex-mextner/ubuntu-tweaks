@@ -2403,6 +2403,17 @@ check = "ssh-server check"
 | `plan` | Optional, read-only: what `install` is going to do, one line each (`firefox-passkey-qr` prints its installer's `--dry-run` listing). Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
 | `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 75 = failed only for a network / lock cause (`TempFail` in `module_script`, which the engine turns into its `Transient` and retries with backoff), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
 
+**Scaffold for a module that writes under `/`** (`apt-sources`, `docker-daemon`; ticket #105). A new root module
+copies nothing: it subclasses `module_script.RootedModule(root, backup_dir="var/backups/ubuntu-tweaks/<name>",
+is_root=..., clock=None)` and gets `_p(relative)` (path under the root), `_shown(path)` (the `/`-rooted display
+form), `_backup(path)` (copy into `<backup_dir>/<UTC stamp>/`, nothing for a missing file; one stamp per run) and
+`_require_root()` (first line of `apply`). The entry point is `build(env)` plus
+`cli(argv) = run_cli("<name>", build, argv)`, where `build` reads the root with
+`staged_root(env, "<NAME>_ROOT")`: the variable stages every path below a directory (tests, no root needed;
+`is_root` is then true), unset means `/` and `euid == 0`. `apt-sources` and `docker-daemon` define none of these themselves; the other modules keep their own entry points until they move over.
+
+**Root installers on a real root** (ticket #26): `scripts/root-container-check.sh <module>` runs `modules/<module>/install.sh` as root twice and `--check` as an unprivileged user inside a disposable `docker run --rm` container (repository mounted read-only, no host system path, never `--privileged`; `--apt`, `--stub`, `--show` add packages, stubbed commands (a `systemctl` that remembers `enable`/`start`, so a forgotten `enable` fails the check), and files to print; `--installer`, `--install-args`, `--check-args` run a `module_script` program as `--installer apt-sources --install-args install --check-args check`). The second run must change nothing: a `--show` file that differs, or anything under `/etc`, `/usr/local`, `/opt`, `/srv` newer than the second run's start, fails the check with exit 4. `--user root` is refused. A kernel module can be built there against the headers package of the host kernel, but not loaded: `modprobe` is refused without privilege, which is the intended limit.
+
 Options come from `[modules.<name>]` in `profile.toml` / `machine.toml` (merged as everywhere):
 the engine passes the table minus `enabled` as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` to both
 commands (unset = no options); a script rejects an unknown option or a wrong type with exit 1.

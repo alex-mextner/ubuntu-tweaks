@@ -8,6 +8,7 @@ import re
 import stat
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -328,6 +329,46 @@ class AptGet(unittest.TestCase):
             if re.search(r"\b(?:execute|_run|run)\(\s*\[?\s*[\"']apt(?:-get)?[\"']", text):
                 offenders.append(f"{path.parent.name}/{path.name}")
         self.assertEqual(offenders, [])
+
+
+class RootedScaffoldTest(unittest.TestCase):
+    def module(self, root, is_root=True):
+        class Probe(kit.RootedModule):
+            name = "probe"
+
+            def findings(self):
+                return []
+
+            def apply(self):
+                self._require_root()
+
+        clock = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        return Probe(Path(root), backup_dir="var/backups/ubuntu-tweaks/probe", is_root=is_root, clock=clock)
+
+    def test_paths_backup_and_root_rule(self):
+        with tempfile.TemporaryDirectory() as raw:
+            module = self.module(raw)
+            target = module._p("etc/x.conf")
+            target.parent.mkdir(parents=True)
+            target.write_text("old")
+            module._backup(target)
+            module._backup(module._p("etc/missing"))
+            saved = Path(raw) / "var/backups/ubuntu-tweaks/probe/20260102T030405Z/x.conf"
+            self.assertEqual(saved.read_text(), "old")
+            self.assertEqual(module._shown(target), "/etc/x.conf")
+            self.assertEqual(module._shown(Path("/elsewhere")), "/elsewhere")
+            with self.assertRaises(kit.ModuleError):
+                self.module(raw, is_root=False).apply()
+
+    def test_staged_root_needs_no_root_and_run_cli_reports_a_build_failure(self):
+        self.assertEqual(kit.staged_root({"X_ROOT": "/tmp/r"}, "X_ROOT"), (Path("/tmp/r"), True))
+
+        def build(env):
+            raise kit.ModuleError("bad options")
+
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.assertEqual(kit.run_cli("probe", build, ["check"]), kit.EXIT_FAILED)
+        self.assertEqual(err.getvalue(), "probe: bad options\n")
 
 
 if __name__ == "__main__":

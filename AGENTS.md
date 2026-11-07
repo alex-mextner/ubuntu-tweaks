@@ -61,4 +61,5 @@ and have the owner run the privileged part. A hand fix is not done until the eng
 
 - Ticket first (`task new`), own worktree (`rig worktree create <name>`), small conventional commits, PR, `gh ship <PR>`.
 - `gnome-extensions/hyperdock` is a submodule with its own repository; change it there, not through this one.
+- A root installer (`install.sh`) is exercised on a real root, never on this machine: `scripts/root-container-check.sh <module> [--apt PKG] [--stub systemctl] [--show FILE]` runs it twice and `--check` as an unprivileged user in a disposable docker container (repo read-only, no host paths, not privileged).
 - Checks: `scripts/ci.sh` (shellcheck, ruff, every unittest suite, JS syntax, JSON).

@@ -40,6 +40,14 @@ Public API:
 - ``main(module, argv, *, out, err) -> int``: the ``check`` / ``status`` / ``plan`` / ``install`` dispatcher
   (``--check`` and ``--dry-run`` are accepted as ``check`` and ``plan``);
   ``Module.plan()`` (default: nothing) is the read-only preview of what ``install`` will do.
+- ``RootedModule(root, *, backup_dir, is_root, clock=None)``: ``Module`` subclass for a module that writes under a
+  root that tests stage in a directory: ``_p(relative)``, ``_shown(path)`` (the ``/``-rooted display form),
+  ``_backup(path)`` (copy to ``<backup_dir>/<UTC stamp>/``, silently nothing for a missing file) and
+  ``_require_root()`` (``ModuleError`` unless root; call first in ``apply``). Attributes ``_root``, ``_stamp``.
+- ``staged_root(env, variable) -> (Path, bool)``: the root directory and the is-root rule (a staged root needs no
+  root, the real ``/`` needs ``euid 0``).
+- ``run_cli(name, build, argv) -> int``: the ``cli`` entry point (``build(os.environ)`` failing with ``ModuleError``
+  prints ``<name>: ...`` and exits 1, else ``main`` on stdout/stderr).
 - ``TempFail(message)``: raised by ``apply()`` when it failed only for a network, lock or busy cause; ``main``
   exits ``EXIT_TEMPFAIL`` (75), which the engine retries with backoff.
 """
@@ -50,12 +58,15 @@ import difflib
 import json
 import os
 import pwd
+import shutil
 import stat
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
@@ -128,6 +139,50 @@ class Module(ABC):
     def plan(self) -> list[str]:
         """What ``install`` is going to do, one line each; read-only. Default: nothing to add to the action line."""
         return []
+
+
+class RootedModule(Module):
+    """A module whose files live under ``root`` (``/`` for real, a temp directory in tests)."""
+
+    def __init__(self, root: Path, *, backup_dir: str, is_root: bool, clock: datetime | None = None) -> None:
+        self._root = root
+        self._backup_dir = backup_dir
+        self._is_root = is_root
+        self._stamp = (clock or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+
+    def _p(self, relative: str) -> Path:
+        return self._root / relative
+
+    def _shown(self, path: Path) -> str:
+        try:
+            return "/" + str(path.relative_to(self._root))
+        except ValueError:
+            return str(path)
+
+    def _backup(self, path: Path) -> None:
+        if not path.exists():
+            return
+        target = self._p(f"{self._backup_dir}/{self._stamp}")
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target / path.name)
+
+    def _require_root(self) -> None:
+        if not self._is_root:
+            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+
+
+def staged_root(env: Mapping[str, str], variable: str) -> tuple[Path, bool]:
+    staged = env.get(variable)
+    return (Path(staged), True) if staged else (Path("/"), os.geteuid() == 0)
+
+
+def run_cli(name: str, build: Callable[[Mapping[str, str]], Module], argv: Sequence[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"{name}: {error}\n")
+        return EXIT_FAILED
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
 
 
 def module_config(env: Mapping[str, str]) -> dict[str, object]:
