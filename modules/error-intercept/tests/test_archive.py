@@ -151,6 +151,14 @@ class ArchiveTest(Case):
         self.assertEqual(path.read_text(), "ProblemType: Crash\nnew\n")
         self.assertEqual(target.name, "_usr_bin_app.1000.r1.crash")
 
+    def test_a_release_that_died_after_linking_is_completed_not_duplicated(self):
+        path = self.report()
+        claimed = claim(path, UID)
+        os.link(claimed, path)  # the state a kill between link and unlink leaves
+        self.assertEqual(release(claimed, path), path)
+        self.assertEqual(self.reports(), [path.name])
+        self.assertEqual(os.listdir(self.claims()), [])
+
     def test_a_leftover_claim_does_not_block_the_next_archive_of_the_same_name(self):
         path = self.report()
         (claim_dir(self.crash, UID) / path.name).write_text("leftover")

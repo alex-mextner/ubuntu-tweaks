@@ -23,7 +23,6 @@ Public API: ``PublishError``, ``AgentSubPublisher``, ``DurablePublisher``, ``loc
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import hashlib
 import json
@@ -140,7 +139,7 @@ class AgentSubPublisher:
         except ValueError as error:  # the child could not be built from these arguments: retrying cannot help
             raise PublishError(f"agent-sub could not run: {error}", permanent=True) from error
         except OSError as error:
-            raise PublishError(f"agent-sub could not run: {error}", permanent=error.errno == errno.E2BIG) from error
+            raise PublishError(f"agent-sub could not run: {error}") from error  # E2BIG too: one argument is bounded above, so it is the environment
         except subprocess.SubprocessError as error:
             raise PublishError(f"agent-sub could not run: {error}") from error
         if done.returncode != 0:

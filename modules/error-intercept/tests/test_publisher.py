@@ -102,12 +102,11 @@ class AgentSubPublisherTest(Case):
         runner = Runner()
         self.assertEqual(self.publisher(runner)({**EVENT, "text": "x" * 90_000}), "ev-7")
 
-    def test_the_kernel_refusing_the_argument_list_or_a_value_error_is_permanent_too(self):
-        too_big = OSError(errno.E2BIG, "Argument list too long")
-        for failure in (too_big, ValueError("embedded null byte")):
+    def test_a_value_error_is_permanent_but_the_kernel_refusing_the_environment_is_retried(self):
+        for failure, permanent in ((ValueError("embedded null byte"), True), (OSError(errno.E2BIG, "too long"), False)):
             with self.assertRaises(PublishError) as raised:
                 self.publisher(Runner(raises=failure))(EVENT)
-            self.assertTrue(raised.exception.permanent, failure)
+            self.assertEqual(raised.exception.permanent, permanent, failure)
 
     def test_output_that_is_not_utf8_is_retried_not_refused(self):
         failure = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")  # raised after the child ran
