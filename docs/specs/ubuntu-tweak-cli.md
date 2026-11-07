@@ -462,6 +462,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 8 | dock | `hyperdock` (80) |
 | 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
 | 8c | thumbnails in Files, the file chooser and the dock for 3D and web-development files | `thumbnailers` (86) |
+| 8d | cursor lag under load: the shell never swaps and wins CPU contention | `session-priority` (87) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -497,6 +498,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
 | `quicklook` | 85 | `packages` | on |
 | `thumbnailers` | 86 | `system` (user level, no root) | on |
+| `session-priority` | 87 | `system` (user level, no root) | on |
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
@@ -651,6 +653,23 @@ files (TS, TSX, Vue, CSS, JSON, YAML, HTML, Dockerfile, notebooks, WOFF2): a use
 that writes a thumbnailer entry, MIME definitions and nothing outside `$HOME`. GNOME's bubblewrap sandbox shows a thumbnailer only `/usr`, so
 the renderers are one pure-Python package carried inside the entry's `Exec=` line. Full spec: [thumbnailers.md](thumbnailers.md).
 
+### Session priority (`session-priority`)
+
+Cursor lag under load (ticket #204 triage: swap 27/32 GB, gnome-shell partly swapped out, CPU storms from agent processes in
+`omp.slice`). A user-level `system` module (`root = false`, order 87, ticket #210): two systemd user drop-ins
+`50-ubuntu-tweaks-session-priority.conf` under `~/.config/systemd/user` (undo: delete the files, `systemctl --user daemon-reload`):
+`org.gnome.Shell@.service.d` `MemorySwapMax=0` (the real unit on 26.04 is `org.gnome.Shell@ubuntu.service`, in `session.slice`) and
+`session.slice.d` `CPUWeight=300` (sibling slices keep 100). The user manager's `daemon-reload` re-applies cgroup settings to running
+units, so `install` writes the files, reloads and restarts nothing (the shell cannot be restarted on Wayland).
+
+`check` reads the running state back from the kernel (`memory.swap.max` of the shell's cgroup, `cpu.weight` of `session.slice`) as well as
+`systemctl show`, so a value written behind systemd's back is drift. A live value that differs while the file is right is drift that one `install` (a reload) fixes; one that survives the reload (another drop-in,
+a runtime `set-property`) makes `install` stop with `needs manual`. The coverage rule claims the two units, so a hand-written extra drop-in in those directories is also shown as tracked. An
+unreachable user manager (no session bus) is an unmet fact (exit 3) for `check` and `needs manual` (run the reload in the desktop session) for `install`, never a pass. Swap draining stays with `memguard` (swap-drain);
+swappiness and zram are not changed without measurements. A tracker (localsearch) scope module was dropped: the schema's
+`ignored-directories-with-content` (`.git`) already skips repository trees, and the indexer already runs at nice 19 and the idle I/O class.
+Tests: `modules/session-priority/tests`.
+
 ### Base modules
 
 Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
@@ -759,6 +778,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | git identity | `git-gh` | planned from the first source that knows it; only when none does: warned, not an error | set `[git] name` / `email` in `profile.toml`, or `git config --global user.name ...` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
 | `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) every user-level action still runs, the root actions are listed as the root remainder with the command to run from a normal terminal, and the exit code is 6; or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
+| user manager unreachable, or a foreign override of a setting | `session-priority` | the module reloads the user manager and reads the kernel's cgroup files back; without a session bus (ssh without a login session, a sandbox) it cannot, and an override by another drop-in or `set-property` survives a reload | run `systemctl --user daemon-reload` from the desktop session; if a value still differs, `systemctl --user cat session.slice org.gnome.Shell@ubuntu.service` shows the overriding drop-in |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | FileVault volume, or the kernel module under Secure Boot | `disks` | an encrypted APFS volume needs a password no unit can type and the module never stores; a DKMS module needs a signing key enrolled with a reboot | mount it by hand (`apfs-fuse -r <password> <device> <dir>`); or `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`, reboot, confirm; or keep the default `driver = "fuse"` (*Disks*) |
 | `agent-sub` missing | `error-intercept` | the `agent-tools` package that provides `agent-sub` comes from a repository the module does not fetch | install agent-tools, or set `[modules.error-intercept] agent_tools_dir` to its directory (*Error interception*) |

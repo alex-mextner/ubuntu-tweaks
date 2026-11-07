@@ -1,0 +1,42 @@
+#!/usr/bin/python3 -B
+"""session-priority module: the desktop stays responsive while the machine is overloaded.
+
+    session-priority check     exit 0 satisfied, 3 unsatisfied (read-only)
+    session-priority status    the same facts, one line each
+    session-priority plan      what install would change
+    session-priority install   as the desktop user: systemd user drop-ins, applied to the running units without a restart
+
+GNOME Shell never swaps (MemorySwapMax=0), session.slice outweighs the other user slices on the CPU. Spec: docs/specs/ubuntu-tweak-cli.md, *Session priority*.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from session_priority_lib import SessionPriority  # noqa: E402
+
+from ubuntu_tweaks.module_script import ModuleError, invoking_account, main, module_config  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+
+def build() -> SessionPriority:
+    if os.geteuid() == 0:
+        raise ModuleError("session-priority writes the desktop user's systemd units: run it as that user, not as root")
+    if module_config(os.environ):
+        raise ModuleError("session-priority takes no options")
+    return SessionPriority(invoking_account(os.environ).home, Process())
+
+
+if __name__ == "__main__":
+    try:
+        module = build()
+    except ModuleError as error:
+        sys.stderr.write(f"session-priority: {error}\n")
+        sys.exit(1)
+    sys.exit(main(module, sys.argv[1:], out=sys.stdout, err=sys.stderr))
