@@ -206,6 +206,15 @@ class SanitizeTest(Case):
                 mask(text)
                 self.assertLess(time.monotonic() - started, 1.0, f"{word!r} x {len(text)}")
 
+    def test_a_jwt_with_a_long_header_or_after_a_non_ascii_letter_is_masked_in_linear_time(self):
+        header = "eyJ" + "A" * 400  # an x5c or jwk header is far longer than a plain one
+        token = f"{header}.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV"
+        for text in (f"--header {token}", f"jeton\u00e9{token}", f"x-{token}"):
+            self.assertNotIn("SflKxw", mask(text), text)
+        started = time.monotonic()
+        mask("eyJ-" * 4096 + ".aaaaaaaaaa.bbbbbbbbbb")
+        self.assertLess(time.monotonic() - started, 1.0)
+
     def test_masking_still_hides_names_with_a_prefix_and_flags_after_the_linear_rewrite(self):
         self.assertEqual(mask("MY_SERVICE_API_" + "TOKEN=abc123"), "MY_SERVICE_API_TOKEN=[masked]")
         self.assertEqual(mask("--db-pass" + "word=hunter2 --x"), "--db-password=[masked] --x")
@@ -249,6 +258,10 @@ class ClassifyTest(Case):
         head = "ns::" * 60
         keys = {self.classified(top=f" {head}h{tail} (this=0x1) at x.cc:3\n").key for tail in ("aaaa", "bbbb")}
         self.assertEqual(len(keys), 2)
+
+    def test_a_jwt_glued_to_a_name_with_a_hyphen_is_masked(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0" + ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV"
+        self.assertNotIn("SflKxw", mask("session-" + jwt))
 
     def test_a_password_scope_is_not_an_assignment(self):
         self.assertIn("Password::verify", self.classified(top=" KWallet::Password::verify (a=1) at x.cc:3\n").key)
@@ -302,7 +315,8 @@ class ClassifyTest(Case):
 
     def test_a_credential_in_the_executable_or_the_top_frame_is_masked_in_the_key(self):
         top = " handler (password=hunter2hunter2) at x.c:3\n"
-        result = self.classified(exe="/usr/bin/app-token=abcdef1234567890", cmdline="app", top=top)  # gitleaks:allow (a fake credential, the test asserts it is masked)
+        exe = "/usr/bin/app-token" + "=" + "abcdef1234567890"  # pieces: not a literal credential for the scanner
+        result = self.classified(exe=exe, cmdline="app", top=top)
         blob = json.dumps([result.key, result.source, result.function])
         for leak in ("hunter2", "abcdef1234567890"):
             self.assertNotIn(leak, blob)

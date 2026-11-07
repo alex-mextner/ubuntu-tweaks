@@ -34,7 +34,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from error_intercept.archive import claim, free_archive_path, recover_claims, release, remove_upload_stamps, store
+from error_intercept.archive import (
+    ClaimDirError,
+    claim,
+    free_archive_path,
+    recover_claims,
+    release,
+    remove_upload_stamps,
+    store,
+)
 from error_intercept.audit import Audit
 from error_intercept.classify import Classification, classify
 from error_intercept.crash_report import ReportError, parse_report
@@ -140,7 +148,7 @@ def build_event(name: str, safe: SafeReport, cls: Classification, archived: str)
 
 REASONS = {
     "root-owned": "but only root can read it; no details are available. The apport window for it is suppressed.",
-    "claim-failed": "but it could not be claimed (its claim directory is not private to this user), so it was left in place; no details are read.",
+    "claim-failed": "but it could not be claimed, so it was left in place and not read.",
     "unparsable": "but it could not be read as an apport report. The report is archived and the window suppressed.",
 }
 
@@ -245,7 +253,8 @@ class Ingester:
             for restored in recover_claims(self._paths.crash_dir, self._uid):
                 self._audit.append(decision="claim-recovered", report=printable(restored.name))
                 names.append(restored.name)
-            self._scan(sorted(names), outcome)
+            names = sorted(set(names))  # a recovered report may be back under a name the scan already holds
+            self._scan(names, outcome)
             self._save_seen(set(names))
         return outcome
 
@@ -279,7 +288,12 @@ class Ingester:
         except FileNotFoundError:
             raise
         except OSError as error:  # a planted claim directory must not hide the crash: report it by metadata
-            self._foreign(path, info, outcome, "claim-failed", f"cannot be claimed ({error})")
+            cause = (
+                "its claim directory is not private to this user"
+                if isinstance(error, ClaimDirError)
+                else clean_line(str(error), 120)
+            )
+            self._foreign(path, info, outcome, "claim-failed", f"cannot be claimed: {cause}")
             return
         try:
             wait_until_written(claimed, self._quiet_s, self._clock, self._sleep)
@@ -379,23 +393,28 @@ class Ingester:
         self, source: Path, path: Path, info: os.stat_result, outcome: Outcome, target: Path | None = None
     ) -> None:
         """Gzip the claimed ``source`` into the archive and drop the stamps; on failure it stays claimed and ``_own`` puts it back."""
+        # named after the report, not after its claim (a claim can have taken an ``.rN`` name)
+        planned = target or free_archive_path(self._paths.archive, path, info.st_mtime)
         try:
-            # named after the report, not after its claim (a claim can have taken an ``.rN`` name)
-            target = store(source, self._paths.archive, info.st_mtime, target or free_archive_path(self._paths.archive, path, info.st_mtime))
+            final = store(source, self._paths.archive, info.st_mtime, planned)
         except OSError as error:
             self._audit.append(decision="archive-failed", report=printable(path.name), error=str(error))
             outcome.note(f"{printable(path.name)}: archive failed ({error}); it stays in the crash directory")
             return
-        try:  # the report is archived and gone: a stamp whoopsie owns (sticky directory) is not an archive failure
-            stamps = remove_upload_stamps(path)
-        except OSError as error:
-            stamps = []
-            self._audit.append(decision="stamp-removal-failed", report=printable(path.name), error=str(error))
-            outcome.note(f"{printable(path.name)}: archived, but an upload stamp stayed ({error})")
+        # the report is archived: a stamp that stays is not an archive failure
+        stamps, stuck = remove_upload_stamps(path)
+        for stamp, error in stuck:
+            self._audit.append(
+                decision="stamp-removal-failed",
+                report=printable(path.name),
+                stamp=printable(stamp.name),
+                error=str(error),
+            )
+            outcome.note(f"{printable(path.name)}: archived, but {printable(stamp.name)} stayed ({error})")
         self._audit.append(
             decision="archived",
             report=printable(path.name),
-            archive=printable(self._paths.tilde(target)),
+            archive=printable(self._paths.tilde(final)),
             stamps=[printable(s.name) for s in stamps],
         )
         outcome.archived += 1
@@ -425,10 +444,17 @@ class Ingester:
             )
         else:
             event = metadata_event(printable(name), info.st_mtime, info.st_uid, self._paths.home, reason)
+            if reason == "claim-failed":
+                event["text"] += f" Detail: {why}."
             event_id = self._publish(event)
             status = "pending-local" if event_id.startswith(LOCAL_PREFIX) else "published"
             self._audit.append(
-                decision="metadata-only" if reason == "root-owned" else reason, event_id=event_id, report=printable(name), status=status, event=event, why=why
+                decision="metadata-only" if reason == "root-owned" else reason,
+                event_id=event_id,
+                report=printable(name),
+                status=status,
+                event=event,
+                why=why,
             )
             outcome.metadata_only += 1
         self._seen[name] = info.st_mtime_ns

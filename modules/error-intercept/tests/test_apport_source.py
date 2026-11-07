@@ -1,9 +1,11 @@
 """The crash-directory scan: publish, archive, backlog, root-owned reports, failures, idempotence."""
 
+import errno
 import gzip
 import json
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from ei_fixtures import FAKE_TOKEN, USER_HOME, Case, FailingPublish, FakePublish, crash_text
@@ -174,9 +176,26 @@ class ClaimBeforeInspectTest(IngestCase):
         self.assertIn("claim-failed", self.audit_decisions())
         self.assertTrue(any("claim" in line for line in outcome.lines))
         self.assertIn("could not be claimed", publish.events[0]["text"])
-        self.assertNotIn("root", publish.events[0]["text"])
+        self.assertIn("not private", publish.events[0]["text"])
+        self.assertNotIn("only root", publish.events[0]["text"])
         self.ingester(publish).run()  # the next trigger does not repeat the event for the same report
         self.assertEqual(len(publish.events), 1)
+
+    def test_a_stamp_that_cannot_be_removed_does_not_turn_an_archived_report_into_a_failure(self):
+        path = self.write_crash()
+        path.with_suffix(".uploaded").write_text("")
+        real_unlink = Path.unlink
+
+        def whoopsie_owns_it(self, *args, **kwargs):
+            if self.name.endswith(".uploaded"):
+                raise PermissionError(errno.EPERM, "not yours")
+            return real_unlink(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", whoopsie_owns_it):
+            outcome = self.ingester(FakePublish()).run()
+        self.assertEqual(outcome.archived, 1)
+        self.assertIn("stamp-removal-failed", self.audit_decisions())
+        self.assertNotIn("archive-failed", self.audit_decisions())
 
     def test_a_dry_run_makes_no_claim_directory(self):
         self.write_crash()
