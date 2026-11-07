@@ -1,0 +1,14 @@
+description = "fs.inotify.max_user_instances raised from Ubuntu's 128 to 2048 through /etc/sysctl.d/60-inotify.conf (root)"
+enabled = true
+
+[source]
+kind = "system"
+root = true
+install = "inotify-limits install"
+check = "inotify-limits check"
+preview = "inotify-limits plan"
+
+[[coverage]]
+match = ["etc:/etc/sysctl.d/60-inotify.conf"]
+class = "tracked"
+reason = "rendered from [modules.inotify-limits] by modules/inotify-limits"

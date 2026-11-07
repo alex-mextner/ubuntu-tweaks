@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -B
+"""inotify-limits module: /etc/sysctl.d/60-inotify.conf with fs.inotify.max_user_instances, applied with sysctl.
+
+    inotify-limits check|status|plan|install     install as root (sudo)
+
+Option (`[modules.inotify-limits]`): `max_user_instances` (integer, default 2048). Ubuntu's default is 128, which
+several dev servers, file watchers and test runs of one user exhaust (EMFILE from inotify_init). The module owns the
+drop-in, applies it with `sysctl --system` when the file changed or the running kernel does not carry the value
+(the kernel value is a fact of `check`, so a file that was edited back and a boot that did not read it both show).
+`INOTIFY_LIMITS_ROOT=DIR` stages the file and the proc value below DIR (tests; needs no root, runs no sysctl).
+Spec: docs/specs/inotify-limits.md.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.managed_files import MARKER, ManagedFile, ManagedFiles  # noqa: E402
+from ubuntu_tweaks.module_script import Finding, ModuleError, main, module_config  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+ROOT_ENV = "INOTIFY_LIMITS_ROOT"
+DROP_IN = "etc/sysctl.d/60-inotify.conf"
+LIVE_VALUE = "proc/sys/fs/inotify/max_user_instances"
+DEFAULT_INSTANCES = 2048
+LARGEST_INSTANCES = 2**31 - 1
+
+
+def parse_instances(options: Mapping[str, object]) -> int:
+    unknown = sorted(set(options) - {"max_user_instances"})
+    if unknown:
+        raise ModuleError(f"[modules.inotify-limits] unknown option(s): {', '.join(unknown)}")
+    value = options.get("max_user_instances", DEFAULT_INSTANCES)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= LARGEST_INSTANCES:
+        raise ModuleError(
+            f"[modules.inotify-limits] max_user_instances must be an integer from 1 to {LARGEST_INSTANCES}"
+        )
+    return value
+
+
+def render(instances: int) -> str:
+    return (
+        f"{MARKER} (inotify-limits): change [modules.inotify-limits] in the profile instead.\n"
+        "# Ubuntu's default of 128 inotify instances per user runs out with a few dev servers, watchers and test runs\n"
+        "# (EMFILE from inotify_init, hyper-saas gh-ship tests).\n"
+        f"fs.inotify.max_user_instances={instances}\n"
+    )
+
+
+class InotifyLimits(ManagedFiles):
+    name = "inotify-limits"
+
+    def __init__(self, root: Path, instances: int, process: Process, *, is_root: bool, staged: bool) -> None:
+        super().__init__(root, [ManagedFile(root / DROP_IN, render(instances))], is_root=is_root)
+        self._instances = instances
+        self._process = process
+        self._staged = staged  # a staged root has no kernel to ask: the proc file below it is the stand-in
+
+    def _live(self) -> int | None:
+        try:
+            return int((self._root / LIVE_VALUE).read_text().strip())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def extra_findings(self) -> list[Finding]:
+        live = self._live()
+        return [
+            Finding(
+                live == self._instances,
+                f"the kernel allows {self._instances} inotify instances per user",
+                "" if live == self._instances else f"now {live if live is not None else 'unreadable'}",
+            )
+        ]
+
+    def needs_converge(self) -> bool:
+        return self._live() != self._instances
+
+    def extra_plan(self, changed: bool) -> list[str]:
+        return ["  sysctl --system"]
+
+    def converge(self, changed: bool) -> None:
+        if self._staged:
+            return
+        self._process.execute(["sysctl", "--system"])
+        live = self._live()
+        if live != self._instances:
+            raise ModuleError(
+                f"sysctl --system ran, but {LIVE_VALUE} is {live}, not {self._instances}: "
+                "a later file in /etc/sysctl.d or /usr/lib/sysctl.d sets it again (sysctl --system --pattern inotify)"
+            )
+        sys.stdout.write(f"fs.inotify.max_user_instances is now {live}\n")
+
+
+def build(env: Mapping[str, str]) -> InotifyLimits:
+    instances = parse_instances(module_config(env))
+    staged = env.get(ROOT_ENV)
+    return InotifyLimits(
+        Path(staged) if staged else Path("/"),
+        instances,
+        Process(),
+        is_root=bool(staged) or os.geteuid() == 0,
+        staged=bool(staged),
+    )
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"inotify-limits: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))
