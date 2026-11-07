@@ -1,0 +1,17 @@
+#!/usr/bin/python3 -B
+"""error-intercept: crash reports and error windows become events for the agent subscribed to ``errors``.
+
+Run ``error-intercept --help``; the commands are documented in error_intercept/cli.py and
+docs/specs/error-intercept.md. The script resolves its own location, so a link in ~/.local/bin works.
+"""
+
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from error_intercept.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

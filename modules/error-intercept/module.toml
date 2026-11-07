@@ -1,0 +1,13 @@
+description = "Crash reports and error windows go to the agent subscribed to errors instead of an apport dialog"
+# opt in: [modules.error-intercept] enabled = true   (it changes the live desktop: the apport dialog is replaced)
+enabled = false
+order = 96   # after autoheal (95); user level, needs agent-tools (agent-sub) from the machine
+
+manual = "install agent-tools (it provides agent-sub) or set [modules.error-intercept] agent_tools_dir to its directory, then run apply again"
+
+[source]
+kind = "system"
+root = false
+install = "installer install"
+check = "installer check"
+preview = "installer plan"
