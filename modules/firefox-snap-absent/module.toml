@@ -1,0 +1,24 @@
+description = "the Firefox snap is not installed (snap remove firefox, snapshot kept) and its stale user launcher is gone (opt-in)"
+enabled = false   # a machine that runs the Mozilla deb opts in with [modules.firefox-snap-absent] enabled = true
+
+# Standalone: firefox-passkey-qr replaces the snap by Mozilla's deb inside its own installer and never reports "snap absent"
+# as a fact of its own. The module never touches /usr/bin/firefox, /usr/lib/firefox or ~/.config/mimeapps.list.
+# Spec: docs/specs/firefox-snap-absent.md.
+manual = "run `ubuntu-tweak apply --only firefox-snap-absent --commit` as your normal user (it asks for sudo itself and keeps a snapshot: `snap saved`, `snap restore <id>`)"
+[source]
+kind = "system"
+root = true
+install = "firefox-snap-absent install"
+check = "firefox-snap-absent check"
+preview = "firefox-snap-absent plan"
+
+# No root: only the user's launcher goes; the snap itself stays a `needs manual` step (exit 10).
+[[fallback]]
+install = "firefox-snap-absent install"
+root = false
+description = "the stale ~/.local/share/applications/firefox_firefox.desktop removed without root; `snap remove firefox` stays for a root run"
+
+[[coverage]]
+match = ["file:~/.local/share/applications/firefox_firefox.desktop"]
+class = "tracked"
+reason = "the snap's stale launcher; modules/firefox-snap-absent removes it"

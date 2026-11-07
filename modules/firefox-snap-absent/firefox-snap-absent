@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -B
+"""firefox-snap-absent module: the Firefox snap is not installed and its stale user launcher is gone.
+
+    firefox-snap-absent check     exit 0 satisfied, 3 unsatisfied (read-only, no root)
+    firefox-snap-absent status    the same facts, one line each (read-only)
+    firefox-snap-absent plan      what `install` is going to do (read-only)
+    firefox-snap-absent install   as root: `snap remove firefox`; removes ~/.local/share/applications/firefox_firefox.desktop
+
+`snap list firefox` failing (or no `snap` at all) is the satisfied state. The removal keeps the automatic snapshot
+(no `--purge`): the profile comes back with `snap saved` and `snap restore <set-id>`. Only the snap named `firefox`
+and the one launcher `firefox_firefox.desktop` of the desktop user are touched; the Mozilla deb
+(/usr/bin/firefox, /usr/lib/firefox), its launcher and ~/.config/mimeapps.list are never read or written.
+Without root `install` removes the launcher and stops with `needs manual` (exit 10) for the snap.
+FIREFOX_SNAP_ABSENT_HOME=DIR replaces the desktop user's home (tests); `snap` is found on PATH.
+Spec: docs/specs/firefox-snap-absent.md.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    invoking_account,
+    main,
+    module_config,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+HOME_ENV = "FIREFOX_SNAP_ABSENT_HOME"
+LAUNCHER = ".local/share/applications/firefox_firefox.desktop"
+
+
+class FirefoxSnapAbsent(Module):
+    name = "firefox-snap-absent"
+
+    def __init__(self, process: Process, home: Path, *, is_root: bool) -> None:
+        self.process = process
+        self.launcher = home / LAUNCHER
+        self.is_root = is_root
+
+    def snap_installed(self) -> bool:
+        """True when `snap list firefox` lists it. Absent is only what snap says (`no matching snaps installed`) or no
+        `snap` at all; an unreachable snapd, a timeout or a refused call is an error, never "not installed"."""
+        result = self.process.query(["env", "LC_ALL=C", "snap", "list", "firefox"])  # fixed locale: the absence message is matched in English
+        if result.returncode == 0:
+            return True
+        if result.returncode == 127 or "no matching snaps installed" in result.stderr:
+            return False
+        first = result.stderr.strip().splitlines()[0] if result.stderr.strip() else "no answer"
+        raise ModuleError(f"snap list firefox: exit {result.returncode}: {first}")
+
+    def launcher_present(self) -> bool:
+        return self.launcher.is_symlink() or self.launcher.exists()
+
+    def findings(self) -> list[Finding]:
+        return [
+            Finding(not self.snap_installed(), "the firefox snap is not installed"),
+            Finding(not self.launcher_present(), f"{self.launcher} is absent"),
+        ]
+
+    def plan(self) -> list[str]:
+        lines = []
+        if self.snap_installed():
+            # snapshots.automatic.retention needs admin rights to read, so the unprivileged preview states the rule
+            lines.append("snap save firefox   # only when snapshots.automatic.retention=no (read as root at run time)")
+            lines.append("snap remove firefox   # keeps the automatic snapshot (no --purge); `snap saved`, `snap restore <set-id>`")
+        if self.launcher_present():
+            lines.append(f"rm {self.launcher}")
+        return lines
+
+    def apply(self) -> None:
+        installed = self.snap_installed()  # asked first: an error must leave the launcher alone too
+        if self.launcher_present():
+            self.launcher.unlink()
+        if not installed:
+            return
+        if not self.is_root:
+            raise NeedsManual(
+                "run `ubuntu-tweak apply --only firefox-snap-absent --commit` as your normal user (it asks for sudo itself); "
+                "the launcher is already gone"
+            )
+        if self.automatic_snapshots_off():
+            self.process.execute(["snap", "save", "firefox"])  # the removal would keep no snapshot of its own
+        self.process.execute(["snap", "remove", "firefox"])
+
+    def automatic_snapshots_off(self) -> bool:
+        """`snapshots.automatic.retention=no` makes `snap remove` skip its snapshot; an unset option is the default."""
+        result = self.process.query(["snap", "get", "system", "snapshots.automatic.retention"])
+        if result.returncode == 0:
+            return result.stdout.strip() == "no"
+        if "has no" in result.stderr and "configuration option" in result.stderr:
+            return False  # never set: snapd's default keeps the automatic snapshot
+        first = result.stderr.strip().splitlines()[0] if result.stderr.strip() else "no answer"
+        raise ModuleError(f"snap get system snapshots.automatic.retention: exit {result.returncode}: {first}")
+
+
+def build(env: Mapping[str, str]) -> FirefoxSnapAbsent:
+    options = module_config(env)
+    unknown = sorted(set(options) - {"enabled"})
+    if unknown:
+        raise ModuleError(f"[modules.firefox-snap-absent] unknown option(s): {', '.join(unknown)}")
+    home = Path(env[HOME_ENV]) if env.get(HOME_ENV) else invoking_account(env).home
+    return FirefoxSnapAbsent(Process(), home, is_root=os.geteuid() == 0)
+
+
+if __name__ == "__main__":
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"firefox-snap-absent: {error}\n")
+        sys.exit(1)
+    sys.exit(main(module, sys.argv[1:], out=sys.stdout, err=sys.stderr))
