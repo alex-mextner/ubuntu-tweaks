@@ -103,6 +103,24 @@ class IngestCommandTest(CliCase):
         self.assertEqual(code, 1)
         self.assertIn("agent-sub drain failed", err)
 
+    def test_the_drain_run_retries_the_local_pending_queue_first(self):
+        self.write_crash()
+        self.run_cli("ingest", runner=FakeAgentSub(fail=True))  # agent-sub down: the event waits in the retry queue
+        self.assertEqual(len(list(self.paths.pending.glob("*.json"))), 1)
+        code, out, _ = self.run_cli("drain")
+        self.assertEqual(code, 0)
+        self.assertIn("retried pending event -> ev-1", out)
+        self.assertEqual(list(self.paths.pending.glob("*.json")), [])
+        self.assertEqual([c[1] for c in self.runner.calls][-2:], ["publish", "drain"])
+
+    def test_a_drain_failure_still_retries_the_local_queue(self):
+        self.write_crash()
+        self.run_cli("ingest", runner=FakeAgentSub(fail=True))
+        code, out, err = self.run_cli("drain", runner=FakeAgentSub(drain_fails=True))
+        self.assertEqual(code, 1)
+        self.assertIn("retried pending event", out)
+        self.assertIn("agent-sub drain failed", err)
+
     def test_a_second_run_does_nothing(self):
         self.write_crash()
         self.run_cli("ingest")
@@ -177,6 +195,52 @@ class SpoolCommandTest(CliCase):
         self.assertIn("1.json", out)
         self.assertEqual([c[1] for c in self.runner.calls], ["publish", "drain"])
         self.assertEqual(list(self.paths.spool.iterdir()), [])
+
+
+class DisabledSwitchTest(CliCase):
+    """``DISABLED`` stops EVERY publisher: the ingesters, the drain timer, the spool service and the retry queue."""
+
+    def pending_event(self):
+        self.write_crash()
+        self.run_cli("ingest", runner=FakeAgentSub(fail=True))
+        self.assertEqual(len(list(self.paths.pending.glob("*.json"))), 1)
+        self.run_cli("disable")
+        self.runner.calls.clear()
+
+    def test_drain_does_nothing_while_disabled(self):
+        self.pending_event()
+        code, out, _ = self.run_cli("drain")
+        self.assertEqual((code, self.runner.calls), (0, []))
+        self.assertIn("DISABLED", out)
+        self.assertEqual(len(list(self.paths.pending.glob("*.json"))), 1)
+
+    def test_ingest_spool_neither_retries_nor_drains_while_disabled(self):
+        self.pending_event()
+        self.paths.spool.mkdir(parents=True, exist_ok=True)
+        (self.paths.spool / "1.json").write_text(json.dumps({"rule": "r", "wm_class": "App"}))
+        code, out, _ = self.run_cli("ingest-spool")
+        self.assertEqual((code, self.runner.calls), (0, []))
+        self.assertIn("DISABLED", out)
+        self.assertEqual(len(list(self.paths.pending.glob("*.json"))), 1)
+        self.assertEqual([p.name for p in self.paths.spool.iterdir()], ["1.json"])
+
+    def test_ingest_does_not_retry_while_disabled(self):
+        self.pending_event()
+        self.run_cli("ingest")
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(len(list(self.paths.pending.glob("*.json"))), 1)
+
+    def test_everything_runs_again_after_enable(self):
+        self.pending_event()
+        self.run_cli("enable")
+        code, out, _ = self.run_cli("drain")
+        self.assertEqual(code, 0)
+        self.assertIn("retried pending event", out)
+
+    def test_the_units_that_publish_do_not_start_while_disabled(self):
+        for unit in ("error-intercept-drain.service", "error-intercept-spool.service", "error-intercept-scan.service"):
+            text = (MODULE / "units" / unit).read_text()
+            self.assertIn("ConditionPathExists=!%S/error-intercept/DISABLED", text, unit)
 
 
 class ListReplayStatusTest(CliCase):
@@ -267,6 +331,40 @@ class JournalCommandTest(CliCase):
         self.run_cli("disable")
         self.assertEqual(seen[0][0](event), "disabled")
         self.assertEqual(len(self.runner.calls), 1)
+
+    def test_the_module_in_sys_modules_wins_over_an_already_imported_one(self):
+        # once the real source has been imported anywhere, `from error_intercept import journal_source` would hand
+        # out the attribute of the package: tests (and anything that replaces the module) must still be obeyed
+        decoy = types.ModuleType("error_intercept.journal_source")
+        decoy.main = lambda publish, argv=None: self.fail("the stale attribute of the package was used")
+        fake = types.ModuleType("error_intercept.journal_source")
+        seen = []
+        fake.main = lambda publish, argv=None: seen.append(argv) or 0
+        import error_intercept
+
+        with (
+            mock.patch.object(error_intercept, "journal_source", decoy, create=True),
+            mock.patch.dict(sys.modules, {"error_intercept.journal_source": fake}),
+        ):
+            self.assertEqual(self.run_cli("journal", "--once")[0], 0)
+        self.assertEqual(seen, [["--once"]])
+
+    def test_journal_forwards_every_option_unchanged(self):
+        cases = (
+            ["--since", "-5m"],
+            ["--once", "extra"],
+            ["-h"],
+            ["--dry-run", "--", "--rules", "x.json"],
+            ["--rules=x.json", "--no-kernel"],
+            [],
+        )
+        for options in cases:
+            seen = []
+            fake = types.ModuleType("error_intercept.journal_source")
+            fake.main = lambda publish, argv=None, seen=seen: seen.append(argv) or 0
+            with mock.patch.dict(sys.modules, {"error_intercept.journal_source": fake}):
+                code, _, _ = self.run_cli("journal", *options)
+            self.assertEqual((code, seen), (0, [options]), options)
 
     def test_journal_without_the_source_module_is_a_clear_exit_two(self):
         with mock.patch.dict(sys.modules, {"error_intercept.journal_source": None}):

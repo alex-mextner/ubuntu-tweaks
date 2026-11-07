@@ -5,9 +5,11 @@ import json
 import threading
 import time
 import unittest
+from unittest import mock
 
 from ei_fixtures import Case, FakePublish
 
+from error_intercept import spool as spool_module
 from error_intercept.spool import MAX_FILE_BYTES, event_from_spool, ingest_spool
 
 RECORD = {
@@ -58,6 +60,15 @@ class SpoolTest(Case):
         self.assertIn("left visible", event["text"])
         self.assertEqual(event["key"], "unknown-rule|X")
 
+    def test_a_lone_surrogate_in_a_title_cannot_make_the_event_unsendable(self):
+        # JSON \\ud83d (half of an emoji) decodes to a str that cannot be encoded as UTF-8
+        self.drop("1.json", raw='{"rule": "r", "wm_class": "App\\ud83d", "title": "broken \\ud83d title"}')
+        publish = FakePublish()
+        ingest_spool(self.paths, publish, self.audit)
+        (event,) = publish.events
+        json.dumps(event, ensure_ascii=False).encode("utf-8")
+        self.assertIn("broken", event["text"])
+
     def test_a_symlink_in_the_spool_is_not_followed(self):
         target = self.root / "secret.json"
         target.write_text(json.dumps({"rule": "stolen", "wm_class": "X"}))
@@ -88,6 +99,59 @@ class SpoolTest(Case):
         self.assertEqual(len(list(self.paths.spool_archive.glob("*.gz"))), 3)
         reasons = [r["reason"] for r in self.audit.records()]
         self.assertEqual(reasons, ["not JSON", "not a JSON object", f"larger than {MAX_FILE_BYTES} bytes"])
+
+    def test_odd_json_values_and_absurd_nesting_do_not_block_the_records_behind_them(self):
+        self.drop("a.json", raw=json.dumps({"action": [], "severity": {}, "wm_class": "X"}))  # unhashable values
+        self.drop("b.json", raw="[" * 12_000)  # nesting deeper than the JSON parser's recursion limit
+        self.drop("c.json")
+        publish = FakePublish()
+        ingest_spool(self.paths, publish, self.audit)
+        self.assertEqual([e["source"] for e in publish.events], ["X", "Apport-gtk"])
+        self.assertEqual(list(self.paths.spool.glob("*.json")), [])
+        self.assertEqual(
+            [r["reason"] for r in self.audit.records() if r["decision"] == "spool-malformed"], ["not JSON"]
+        )
+
+    def test_a_record_the_converter_chokes_on_is_archived_as_malformed_and_the_next_is_published(self):
+        self.drop("a.json", record={**RECORD, "key": "bad"})
+        self.drop("b.json", record={**RECORD, "key": "good"})
+        real = spool_module.event_from_spool
+
+        def chokes_on_the_first(record, home):
+            if record["key"] == "bad":
+                raise TypeError("surprise")
+            return real(record, home)
+
+        publish = FakePublish()
+        with mock.patch.object(spool_module, "event_from_spool", chokes_on_the_first):
+            ingest_spool(self.paths, publish, self.audit)
+        self.assertEqual([e["key"] for e in publish.events], ["good"])
+        self.assertEqual(list(self.paths.spool.glob("*.json")), [])
+        self.assertEqual(len(list(self.paths.spool_archive.glob("*.gz"))), 2)
+        (bad,) = [r for r in self.audit.records() if r["decision"] == "spool-malformed"]
+        self.assertIn("TypeError", bad["reason"])
+
+    def test_an_archive_failure_of_one_file_quarantines_it_and_does_not_block_the_next(self):
+        self.drop("a.json", record={**RECORD, "key": "first"})
+        self.drop("b.json", record={**RECORD, "key": "second"})
+        real = spool_module.store
+        calls = []
+
+        def fails_once(path, destination, mtime, target=None):
+            calls.append(path.name)
+            if len(calls) == 1:
+                raise OSError("ENOSPC")
+            return real(path, destination, mtime, target)
+
+        publish = FakePublish()
+        with mock.patch.object(spool_module, "store", fails_once):
+            ingest_spool(self.paths, publish, self.audit)
+        self.assertEqual([e["key"] for e in publish.events], ["first", "second"])
+        self.assertEqual(sorted(p.name for p in self.paths.spool.iterdir()), ["a.json.bad"])
+        self.assertIn("spool-quarantined", self.audit_decisions())
+        again = FakePublish()
+        ingest_spool(self.paths, again, self.audit)
+        self.assertEqual(again.events, [])  # a quarantined file is not retried
 
     def test_disabled_leaves_the_spool_alone(self):
         self.drop("1.json")

@@ -1,6 +1,7 @@
 """Parse -> sanitize -> classify of a synthetic apport report (no file outside a temp dir)."""
 
 import json
+import time
 import unittest
 
 from ei_fixtures import BEARER, FAKE_TOKEN, MONITORS_LINE, NESTED_CMDLINE, REAL_CMDLINE, USER_HOME, Case, crash_text
@@ -179,6 +180,47 @@ class SanitizeTest(Case):
             mask("The Secret Service was already initialized"), "The Secret Service was already initialized"
         )
 
+    def test_pathological_text_is_masked_in_linear_time(self):
+        """16 KB of repeated secret words must not make the regexes backtrack quadratically (a crash report is untrusted)."""
+        words = (
+            "password",
+            "token",
+            "secret_",
+            "--api-key-",
+            "api_key",
+            "credential",
+            "-u",
+            " --user ",
+            "Bearer ",
+            "a-",
+            "sk-",
+            "a://",
+            'password="',
+            "cookie ",
+            "eyJ-",
+        )
+        for word in words:
+            for text in (word * (16_384 // len(word)), word * 4000 + "=", ("x" + word) * 3000):
+                started = time.monotonic()
+                mask(text)
+                self.assertLess(time.monotonic() - started, 1.0, f"{word!r} x {len(text)}")
+
+    def test_masking_still_hides_names_with_a_prefix_and_flags_after_the_linear_rewrite(self):
+        self.assertEqual(mask("MY_SERVICE_API_" + "TOKEN=abc123"), "MY_SERVICE_API_TOKEN=[masked]")
+        self.assertEqual(mask("--db-pass" + "word=hunter2 --x"), "--db-password=[masked] --x")
+        for header in (
+            "x-api-" + "key: tk-value-654321",
+            "X-Api-" + "Key=tk-value-654321",
+            "my-secret-" + "token: tk-value-654321",
+        ):
+            self.assertNotIn("tk-value", mask(header), header)
+        self.assertEqual(mask('x="a password=bar b"'), 'x="a password=[masked] b"')
+
+    def test_lone_surrogates_are_replaced_so_the_text_can_always_be_encoded(self):
+        masked = mask("cut \ud83d here \udc00 and a whole \U0001f600")
+        masked.encode("utf-8")
+        self.assertEqual(masked, "cut \ufffd here \ufffd and a whole \U0001f600")
+
     def test_clip_marks_the_cut(self):
         self.assertEqual(clip("abcdef", 4), "abc…")
         self.assertEqual(clip("abc", 4), "abc")
@@ -194,6 +236,13 @@ class ClassifyTest(Case):
         self.assertIn("nested-test-shell", result.tags)
         self.assertEqual(result.key, "gnome-shell|SIGSEGV|mtk_anonymous_file_open_fd|nested")
         self.assertEqual((result.kind, result.source), ("crash", "gnome-shell"))
+
+    def test_a_namespaced_top_frame_keeps_its_function_in_the_key(self):
+        keys = set()
+        for frame in ("password_manager::PasswordFormManager::Save", "password_manager::LoginDatabase::Init"):
+            keys.add(self.classified(top=f" {frame} (this=0x1) at x.cc:3\n").key)
+        self.assertEqual(len(keys), 2)
+        self.assertIn("PasswordFormManager::Save", "".join(keys))
 
     def test_every_nested_flag_counts(self):
         for flag in ("--headless", "--virtual-monitor 800x600", "--nested"):
@@ -221,6 +270,33 @@ class ClassifyTest(Case):
         self.assertFalse(self.classified(cmdline=r"gnome-shell --session session\ --nested").nested)
         self.assertTrue(self.classified(cmdline=r"gnome-shell --session session\ x --nested").nested)
         self.assertEqual(self.classified(cmdline=r"gnome-shell --session session\ --nested").severity, "critical")
+
+    def test_quotes_in_the_command_line_are_literal_because_apport_escapes_only_backslash_and_space(self):
+        self.assertFalse(self.classified(cmdline="gnome-shell '--nested'").nested)
+        self.assertFalse(self.classified(cmdline='gnome-shell "--headless"').nested)
+        self.assertTrue(self.classified(cmdline="gnome-shell 'a b' --nested").nested)
+
+    def test_an_escaped_backslash_ends_the_escape_before_the_space(self):
+        self.assertTrue(
+            self.classified(cmdline="gnome-shell a\\\\ --nested").nested
+        )  # `a\\ --nested`: backslash, then a separator
+        self.assertFalse(
+            self.classified(cmdline="gnome-shell a\\\\\\ --nested").nested
+        )  # `a\\\ --nested`: one argument
+
+    def test_a_credential_in_the_tags_is_masked_in_every_classification_field(self):
+        jwt = "eyJhbGciOiJI" + ".eyJzdWIiOiIx" + ".SflKxwRJSMeKKF2QT4"
+        result = self.classified(extra=f"Tags: wayland {jwt} api_" + "key=abcdefghijkl tok" + "en: zzz1234567\n")
+        blob = json.dumps([result.tags, result.key, result.source, result.signal, result.function])
+        for leak in (jwt, "abcdefghijkl", "zzz1234567"):
+            self.assertNotIn(leak, blob)
+
+    def test_a_credential_in_the_executable_or_the_top_frame_is_masked_in_the_key(self):
+        top = " handler (password=hunter2hunter2) at x.c:3\n"
+        result = self.classified(exe="/usr/bin/app-token=abcdef1234567890", cmdline="app", top=top)  # gitleaks:allow (a fake credential, the test asserts it is masked)
+        blob = json.dumps([result.key, result.source, result.function])
+        for leak in ("hunter2", "abcdef1234567890"):
+            self.assertNotIn(leak, blob)
 
     def test_an_unbalanced_quote_still_classifies(self):
         self.assertIsInstance(self.classified(cmdline='gnome-shell "unbalanced --nested').nested, bool)

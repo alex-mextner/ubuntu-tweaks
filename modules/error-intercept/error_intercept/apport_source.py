@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from error_intercept.archive import archive_file, free_archive_path, recover_claims, remove_upload_stamps
+from error_intercept.archive import claim, free_archive_path, recover_claims, release, remove_upload_stamps, store
 from error_intercept.audit import Audit
 from error_intercept.classify import Classification, classify
 from error_intercept.crash_report import ReportError, parse_report
@@ -268,19 +268,40 @@ class Ingester:
     # -- reports the user owns ---------------------------------------------------------------------
 
     def _own(self, path: Path, info: os.stat_result, outcome: Outcome) -> None:
-        if not self._dry_run:
-            wait_until_written(path, self._quiet_s, self._clock, self._sleep)
-            info = path.lstat()
+        """Claim the report FIRST, then read, publish and archive that very inode: apport may write a new report under
+        the same name at any moment, and a replacement must never be archived unpublished."""
+        if self._dry_run:
+            self._inspect(path, path, info, outcome)
+            return
+        try:
+            claimed = claim(path, self._uid)
+        except FileNotFoundError:
+            raise
+        except OSError as error:  # a planted claim directory must not hide the crash: report it by metadata
+            self._foreign(path, info, outcome, f"cannot be claimed ({error})", "claim-failed")
+            return
+        try:
+            wait_until_written(claimed, self._quiet_s, self._clock, self._sleep)
+            claimed_info = claimed.lstat()
+            if not stat.S_ISREG(claimed_info.st_mode) or claimed_info.st_uid != self._uid:
+                return  # what was claimed is not what the scan saw: the finally block puts it back
+            self._inspect(claimed, path, claimed_info, outcome)
+        finally:
+            if os.path.lexists(claimed):  # nothing removed it: it goes back, apport lists it again
+                release(claimed, path)
+
+    def _inspect(self, source: Path, path: Path, info: os.stat_result, outcome: Outcome) -> None:
+        """``source`` is the file to read (the claimed inode), ``path`` its name in the crash directory."""
         old = self._clock() - info.st_mtime > BACKLOG_S
         if old or not is_unseen(info):
             why = "older than 24 h" if old else "already seen in apport"
             outcome.note(f"{printable(path.name)}: backlog ({why}): archive without an event")
-            self._backlog(path, info, why, outcome)
+            self._backlog(source, path, info, why, outcome)
             return
         try:
-            report = parse_report(path)
+            report = parse_report(source)
         except (ReportError, OSError) as error:
-            self._unparsable(path, info, error, outcome)
+            self._unparsable(source, path, info, error, outcome)
             return
         safe = sanitize_report(report, self._paths.home)
         cls = classify(report.fields)  # the parsed fields: what the sanitizer clips must not change the routing
@@ -289,7 +310,7 @@ class Ingester:
         event = build_event(printable(path.name), safe, cls, archived)
         outcome.note(f"{printable(path.name)}: {cls.severity} {cls.kind} {cls.key}")
         if cls.nested and self._rules.nested_exempt:
-            self._exempt(path, info, event, cls, outcome, planned)
+            self._exempt(source, path, info, event, cls, outcome, planned)
             return
         if self._dry_run:
             outcome.note("  would publish: " + event["text"].replace("\n", "\n    "))
@@ -307,10 +328,17 @@ class Ingester:
             event=event,
         )
         outcome.published += 1
-        self._archive(path, info, outcome, planned)
+        self._archive(source, path, info, outcome, planned)
 
     def _exempt(
-        self, path: Path, info: os.stat_result, event: Event, cls: Classification, outcome: Outcome, planned: Path
+        self,
+        source: Path,
+        path: Path,
+        info: os.stat_result,
+        event: Event,
+        cls: Classification,
+        outcome: Outcome,
+        planned: Path,
     ) -> None:
         """The owner turned the nested-test-shell exemption on: audit log only, no event; the report is still archived."""
         outcome.note("  exempt (nested_test_shell.exempt): audit log only, not published")
@@ -325,15 +353,15 @@ class Ingester:
             event=event,
         )
         outcome.exempt += 1
-        self._archive(path, info, outcome, planned)
+        self._archive(source, path, info, outcome, planned)
 
-    def _backlog(self, path: Path, info: os.stat_result, why: str, outcome: Outcome) -> None:
+    def _backlog(self, source: Path, path: Path, info: os.stat_result, why: str, outcome: Outcome) -> None:
         if self._dry_run:
             return
         self._audit.append(decision="backlog-archived", report=printable(path.name), reason=why)
-        self._archive(path, info, outcome)
+        self._archive(source, path, info, outcome, free_archive_path(self._paths.archive, path, info.st_mtime))
 
-    def _unparsable(self, path: Path, info: os.stat_result, error: Exception, outcome: Outcome) -> None:
+    def _unparsable(self, source: Path, path: Path, info: os.stat_result, error: Exception, outcome: Outcome) -> None:
         outcome.note(f"{printable(path.name)}: cannot parse ({error}): metadata-only event, report archived")
         if self._dry_run:
             return
@@ -344,11 +372,14 @@ class Ingester:
             decision="parse-failed", event_id=event_id, report=printable(path.name), error=str(error), event=event
         )
         outcome.published += 1
-        self._archive(path, info, outcome)
+        self._archive(source, path, info, outcome, free_archive_path(self._paths.archive, path, info.st_mtime))
 
-    def _archive(self, path: Path, info: os.stat_result, outcome: Outcome, target: Path | None = None) -> None:
+    def _archive(
+        self, source: Path, path: Path, info: os.stat_result, outcome: Outcome, target: Path | None = None
+    ) -> None:
+        """Gzip the claimed ``source`` into the archive and drop the stamps; on failure it stays claimed and ``_own`` puts it back."""
         try:
-            target = archive_file(path, self._paths.archive, info.st_mtime, target)
+            target = store(source, self._paths.archive, info.st_mtime, target)
             stamps = remove_upload_stamps(path)
         except OSError as error:
             self._audit.append(decision="archive-failed", report=printable(path.name), error=str(error))
@@ -364,26 +395,33 @@ class Ingester:
 
     # -- reports that are not ours: left in place ---------------------------------------------------
 
-    def _foreign(self, path: Path, info: os.stat_result, outcome: Outcome) -> None:
+    def _foreign(
+        self,
+        path: Path,
+        info: os.stat_result,
+        outcome: Outcome,
+        why: str = "root-owned or unreadable",
+        audit_decision: str = "metadata-only",
+    ) -> None:
         name = path.name
         if self._seen.get(name) == info.st_mtime_ns:
             return
         old = self._clock() - info.st_mtime > BACKLOG_S
         outcome.note(
-            f"{printable(name)}: root-owned or unreadable: {'no event (older than 24 h)' if old else 'metadata-only event'}, left in place"
+            f"{printable(name)}: {why}: {'no event (older than 24 h)' if old else 'metadata-only event'}, left in place"
         )
         if self._dry_run:
             return
         if old:
             self._audit.append(
-                decision="backlog-left-in-place", report=printable(name), reason="not readable, older than 24 h"
+                decision="backlog-left-in-place", report=printable(name), reason=f"{why}, older than 24 h"
             )
         else:
             event = metadata_event(printable(name), info.st_mtime, info.st_uid, self._paths.home)
             event_id = self._publish(event)
             status = "pending-local" if event_id.startswith(LOCAL_PREFIX) else "published"
             self._audit.append(
-                decision="metadata-only", event_id=event_id, report=printable(name), status=status, event=event
+                decision=audit_decision, event_id=event_id, report=printable(name), status=status, event=event, why=why
             )
             outcome.metadata_only += 1
         self._seen[name] = info.st_mtime_ns

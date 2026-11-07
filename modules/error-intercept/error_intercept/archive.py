@@ -5,9 +5,11 @@ Accessed via: ``apport_source`` (``.crash`` reports), ``spool`` (event files) an
 Moving the file out of ``/var/crash`` is what makes apport unable to show it and ``whoopsie`` unable to upload it
 (the ``.upload`` / ``.uploaded`` stamps next to it are removed too). The order protects the report:
 
-1. **claim** it: rename it into the private subdirectory ``.ei-claims`` of its own directory (same file system, same
-   name, so no name-length limit is touched; the sticky bit lets the owner create it). Apport may write a NEW
-   report under the old name while we compress; only the claimed inode is ever deleted;
+1. **claim** it BEFORE anything reads it: rename it into the user's private directory ``.ei-claims-<uid>`` of its own
+   directory (same file system; ``/var/crash`` is shared and sticky, so there is one directory per user, created 0700
+   and refused when it is a symlink, someone else's or open to others). Apport may write a NEW report under the old
+   name meanwhile; the claimed inode is the one that is parsed, published, archived and removed, so a replacement
+   report is never archived unpublished;
 2. gzip the claimed file to a short temporary name in the archive, ``fsync`` it, link it to its final name (never
    replacing an earlier archive: a second report with the same name and second gets ``.1``, ``.2``, ...) and
    ``fsync`` the archive directory (the crash directory may be on another file system: a power cut must not keep
@@ -15,16 +17,21 @@ Moving the file out of ``/var/crash`` is what makes apport unable to show it and
 3. only then unlink the claimed file.
 
 Any failure before step 3 puts the report back (``release``); when apport already created a new report under the name,
-the old one is put back under ``<stem>.r<N>.crash``, so BOTH reports are ingested. A process that died between the
-steps leaves its claim in ``.ei-claims``; ``recover_claims`` restores such files at the next scan the same way.
+the old one is put back under ``<stem>.r<N>.crash`` (the name is cut so that it stays within 255 bytes), so BOTH reports
+are ingested. A process that died between the steps leaves its claim in the claim directory; ``recover_claims``
+restores such files at the next scan the same way. A second claim of a name already in the claim directory takes
+the next free name there.
 
 Public API:
 
-- ``archive_file(source, archive_dir, mtime, target=None, *, use_claim=True) -> Path`` and ``free_archive_path(archive_dir, source, mtime)``
-  (the name the next ``archive_file`` will use: bounded to 240 bytes whatever the report's name);
+- ``claim(source, uid) -> Path``, ``release(claimed, source) -> Path``, ``claim_dir(directory, uid)`` (validated;
+  ``ClaimDirError`` when it is not the user's private directory), ``CLAIM_PREFIX``;
+- ``store(file, archive_dir, mtime, target=None) -> Path``: gzip into the archive and remove ``file`` (no claim: for a
+  private directory such as the spool, or a file already claimed);
+  ``free_archive_path(archive_dir, source, mtime)`` (the name the next archive will use: bounded to 240 bytes);
 - ``recover_claims(directory, uid) -> list[Path]``: the restored reports;
 - ``remove_upload_stamps(report) -> list[Path]``: delete ``<report>.upload`` and ``.uploaded`` beside a ``.crash``;
-- ``list_archive(archive_dir) -> list[Path]``, newest first; ``CLAIM_DIR``.
+- ``list_archive(archive_dir) -> list[Path]``, newest first.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import gzip
 import hashlib
 import os
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -41,15 +49,16 @@ from error_intercept.durable import fsync_dir, short_temporary
 
 STAMP_SUFFIXES = (".upload", ".uploaded")
 COMPRESS_LEVEL = 3  # a crash report is mostly an already-compressed core dump: speed over ratio
-CLAIM_DIR = ".ei-claims"
-NAME_LIMIT = 240  # bytes of an archive file name (the file system allows 255)
+CLAIM_PREFIX = ".ei-claims-"  # + the uid: one claim directory per user
+ARCHIVE_NAME_BYTES = 240  # an archive file name stays under the file system limit, leaving room for a serial
+FS_NAME_BYTES = 255  # the file system limit of one name
 KEPT_STEM_BYTES = 180
 
 
 def archive_name(source: Path, mtime: float, serial: int = 0) -> str:
     tail = f".{time.strftime('%Y%m%dT%H%M%S', time.gmtime(mtime))}{f'.{serial}' if serial else ''}.gz"
     raw = os.fsencode(source.name)
-    if len(raw) + len(tail) <= NAME_LIMIT:
+    if len(raw) + len(tail) <= ARCHIVE_NAME_BYTES:
         return source.name + tail
     digest = hashlib.sha1(raw).hexdigest()[:10]
     return f"{os.fsdecode(raw[:KEPT_STEM_BYTES])}~{digest}{tail}"
@@ -62,35 +71,60 @@ def free_archive_path(archive_dir: Path, source: Path, mtime: float) -> Path:
     return archive_dir / name
 
 
-def _claim_dir(directory: Path) -> Path:
-    claims = directory / CLAIM_DIR
-    claims.mkdir(mode=0o700, exist_ok=True)
+class ClaimDirError(OSError):
+    """The claim directory is not the private directory of the user that it must be (a symlink, another owner, open to others)."""
+
+
+def claim_dir(directory: Path, uid: int, *, create: bool = True) -> Path:
+    """The claim directory of ``uid`` inside the crash directory, created 0700 and checked on every use.
+
+    One directory per user: ``/var/crash`` is shared and sticky, so another user may create (or pre-create) a name
+    there. A directory that is a symlink, belongs to someone else or is open to group/others is refused, never used.
+    """
+    claims = directory / f"{CLAIM_PREFIX}{uid}"
+    if create:
+        try:
+            os.mkdir(claims, 0o700)
+        except FileExistsError:
+            pass
+    info = os.lstat(claims)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
+        raise ClaimDirError(f"{claims} is not a private directory of uid {uid}: refusing to use it")
     return claims
 
 
-def claim(source: Path) -> Path:
-    claimed = _claim_dir(source.parent) / source.name
-    if os.path.lexists(claimed):
-        raise FileExistsError(f"{claimed} is the claim of an earlier run: recover_claims puts it back first")
+def claim(source: Path, uid: int) -> Path:
+    """Move a report into the claim directory (a free name there); from now on this inode is the report."""
+    claims = claim_dir(source.parent, uid)
+    claimed = _free_name(claims, source.name)
     os.rename(source, claimed)
     return claimed
 
 
-def _restore_name(directory: Path, name: str) -> Path:
-    """``name`` when free, else ``<stem>.r<N>.crash``: a report is never overwritten by its older generation."""
+def _free_name(directory: Path, name: str) -> Path:
+    """``name`` when free, else ``<stem>.r<N>.crash`` (bounded): a report is never overwritten by its older generation."""
     path = directory / name
     stem = name[: -len(".crash")] if name.endswith(".crash") else name
     serial = 0
     while os.path.lexists(path):
         serial += 1
-        path = directory / f"{stem}.r{serial}.crash"
+        tail = f".r{serial}.crash"
+        kept = os.fsencode(stem)[: FS_NAME_BYTES - len(tail)]
+        path = directory / (os.fsdecode(kept) + tail)
     return path
 
 
 def release(claimed: Path, source: Path) -> Path:
     """Undo ``claim``; returns where the report is now (``source``, or an ``.rN`` name when a new report took it)."""
-    target = _restore_name(source.parent, source.name)
-    os.rename(claimed, target)
+    # link, never rename: rename replaces a report apport created under the free name a moment ago
+    while True:
+        target = _free_name(source.parent, source.name)
+        try:
+            os.link(claimed, target)
+            break
+        except FileExistsError:
+            continue  # the name was taken after the check: the next pass finds the next free serial
+    claimed.unlink()
     return target
 
 
@@ -119,30 +153,26 @@ def _publish_archive(partial: Path, target: Path) -> Path:
     return final
 
 
-def archive_file(
-    source: Path, archive_dir: Path, mtime: float, target: Path | None = None, *, use_claim: bool = True
-) -> Path:
+def store(file: Path, archive_dir: Path, mtime: float, target: Path | None = None) -> Path:
+    """Gzip ``file`` into the archive, make that durable, and only then remove ``file``. A failure leaves ``file`` as it was."""
     archive_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    target = target or free_archive_path(archive_dir, source, mtime)
+    target = target or free_archive_path(archive_dir, file, mtime)
     partial = short_temporary(target)
-    claimed = claim(source) if use_claim else source  # a private directory (the spool) has no apport to race with
     try:
-        _compress(claimed, partial)
+        _compress(file, partial)
         final = _publish_archive(partial, target)
         fsync_dir(archive_dir)
     except BaseException:
         partial.unlink(missing_ok=True)
-        if use_claim:
-            release(claimed, source)
         raise
-    claimed.unlink()
+    file.unlink()
     return final
 
 
 def recover_claims(directory: Path, uid: int) -> list[Path]:
     """Restore the reports of ``uid`` that a crashed run had claimed (under an ``.rN`` name when the name is taken)."""
-    claims = directory / CLAIM_DIR
     try:
+        claims = claim_dir(directory, uid, create=False)
         entries = list(os.scandir(claims))
     except OSError:
         return []

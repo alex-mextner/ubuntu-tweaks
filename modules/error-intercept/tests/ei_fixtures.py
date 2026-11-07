@@ -135,8 +135,8 @@ class Case(unittest.TestCase):
         return path
 
     def crash_files(self):
-        """What is left in the crash directory: the reports, not the private ``.ei-claims`` directory."""
-        return sorted(name for name in os.listdir(self.crash) if name != ".ei-claims")
+        """What is left in the crash directory: the reports, not the private ``.ei-claims-<uid>`` directories."""
+        return sorted(name for name in os.listdir(self.crash) if not name.startswith(".ei-claims-"))
 
     def clock(self):
         return self.now

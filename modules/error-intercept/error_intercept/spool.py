@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from error_intercept.archive import archive_file
+from error_intercept.archive import store
 from error_intercept.audit import Audit
 from error_intercept.paths import Paths
 from error_intercept.publisher import LOCAL_PREFIX, TOPIC, Publish
@@ -45,8 +46,10 @@ def event_from_spool(record: dict[str, Any], home: Path) -> dict[str, Any]:
     wm_class = _text(record.get("wm_class"), 80)
     app_id = _text(record.get("app_id"), 80)
     rule = _text(record.get("rule"), 80) or "unknown-rule"
-    action = record.get("action") if record.get("action") in ACTIONS else "observe"
-    severity = record.get("severity") if record.get("severity") in SEVERITIES else "warning"
+    wanted_action = record.get("action")  # any JSON value: only a str can match
+    wanted_severity = record.get("severity")
+    action = wanted_action if isinstance(wanted_action, str) and wanted_action in ACTIONS else "observe"
+    severity = wanted_severity if isinstance(wanted_severity, str) and wanted_severity in SEVERITIES else "warning"
     source = wm_class or app_id or "shell-extension"
     title = _text(record.get("title"), 200)
     verb = ACTIONS[str(action)]
@@ -82,15 +85,25 @@ def _load(path: Path) -> dict[str, Any]:
         raise SpoolError(f"larger than {MAX_FILE_BYTES} bytes")
     try:
         record = json.loads(raw)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:  # RecursionError: ``[[[[...`` nested deeper than the parser allows
         raise SpoolError("not JSON") from error
     if not isinstance(record, dict):
         raise SpoolError("not a JSON object")
     return record
 
 
-def _archive(path: Path, destination: Path) -> None:
-    archive_file(path, destination, path.stat().st_mtime, use_claim=False)
+def _archive(path: Path, destination: Path, audit: Audit) -> None:
+    """Archive a handled file; when that fails the file is set aside as ``<name>.bad`` so that it blocks nobody."""
+    try:
+        store(path, destination, path.stat().st_mtime)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        audit.append(decision="spool-quarantined", report=printable(path.name), error=str(error))
+        try:
+            os.replace(path, path.with_name(path.name + ".bad"))
+        except OSError:
+            pass  # still listed next time; the audit line above says why
 
 
 def _waiting(spool: Path) -> list[Path]:
@@ -132,14 +145,20 @@ def _handle(path: Path, paths: Paths, publish: Publish, audit: Audit, *, dry_run
     except SpoolError as error:
         if not dry_run:
             audit.append(decision="spool-malformed", report=shown, reason=str(error))
-            _archive(path, paths.spool_archive)
+            _archive(path, paths.spool_archive, audit)
         return [f"{shown}: {error}: archived without an event"]
-    event = event_from_spool(record, paths.home)
+    try:
+        event = event_from_spool(record, paths.home)
+    except Exception as error:  # noqa: BLE001 - the record is untrusted JSON: whatever it breaks, it must not block the rest
+        if not dry_run:
+            audit.append(decision="spool-malformed", report=shown, reason=f"{type(error).__name__}: {error}")
+            _archive(path, paths.spool_archive, audit)
+        return [f"{shown}: cannot be converted ({type(error).__name__}): archived without an event"]
     lines = [f"{shown}: {event['severity']} {event['kind']} {event['key']}"]
     if dry_run:
         return [*lines, "  would publish: " + event["text"]]
     event_id = publish(event)
     status = "pending-local" if event_id.startswith(LOCAL_PREFIX) else "published"
     audit.append(decision="spool-published", event_id=event_id, report=shown, status=status, event=event)
-    _archive(path, paths.spool_archive)
+    _archive(path, paths.spool_archive, audit)
     return lines

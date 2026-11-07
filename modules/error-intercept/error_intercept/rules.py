@@ -41,7 +41,7 @@ def _read(path: Path, label: str, problems: list[str]) -> dict[str, object]:
         return {}
     try:
         data = json.loads(text)
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         problems.append(f"{label}: not valid JSON ({error})")
         return {}
     if not isinstance(data, dict):
@@ -65,7 +65,7 @@ def _nested(data: dict[str, object], label: str, problems: list[str]) -> dict[st
             problems.append(f"{label}: nested_test_shell.exempt must be true or false, got {value!r}; using false")
             kept[key] = False
         elif key == "mode" and value not in MODES:
-            problems.append(f"{label}: nested_test_shell.mode must be one of {MODES}, got {value!r}; using drop")
+            problems.append(f"{label}: nested_test_shell.mode must be one of {MODES}, got {value!r}; exemption off")
             kept[key] = MODES[0]
         elif key == "note" and not isinstance(value, str):
             problems.append(f"{label}: nested_test_shell.note must be a string")
@@ -80,5 +80,8 @@ def load_rules(paths: Paths, shipped: Path = SHIPPED) -> Rules:
     problems: list[str] = []
     merged: dict[str, object] = {}
     for label, path in (("shipped rules", shipped), ("user rules", paths.config / RULES_FILE)):
+        before = len(problems)
         merged.update(_nested(_read(path, label, problems), label, problems))
+        if len(problems) > before:
+            merged["exempt"] = False  # any problem in a file, whole-file ones included, leaves the exemption off
     return Rules(nested_exempt=merged.get("exempt") is True, problems=tuple(problems))

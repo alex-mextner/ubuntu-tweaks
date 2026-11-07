@@ -77,14 +77,18 @@ For every `*.crash` in `/var/crash` (`--crash-dir` and `ERROR_INTERCEPT_CRASH_DI
   `Disassembly`, `Stacktrace`, `OpenFds`, ... are never copied; tokens, `Authorization`/`Bearer`, `*_TOKEN=`/`password=` shapes,
   `--token`-style command line flags, JWTs and private keys are masked; `/home/<user>` becomes `~` (the rest of a path stays: it
   is often the point); control characters are removed; every field is bounded; the event text is at most 1.8 KB and the
-  data at most 6 KB (agent-sub itself cuts at 2 KB / 8 KB). The monitors.xml symlink loop (`[Errno 40]`) appears in every
+  data at most 6 KB (agent-sub itself cuts at 2 KB / 8 KB). Masking is linear in the text size (a crash report is untrusted: 16 KB
+  of repeated secret words is masked in milliseconds). The monitors.xml symlink loop (`[Errno 40]`) appears in every
   shell report and says nothing about the crash: all such lines are removed and replaced by ONE fact,
   *"monitors.xml is unreadable: symlink loop (Errno 40)"*.
 * **Classification** (`classify.py`), first match wins: gnome-shell, mutter, Xwayland, gnome-session or gdm crashing is
   `critical`; everything else is `warning`. A nested test shell (`--headless`, `--virtual-monitor` or `--nested` in
   `ProcCmdline`) is **not downgraded**: it keeps that severity (a nested gnome-shell SIGSEGV is `critical`) and is only
   tagged `nested-test-shell`, context for the agent, who decides real bug versus test artefact. The dedup key is
-  `<executable>|<signal>|<top frame function>` (no pid, address or time); nested shells get `|nested` appended so that
+  `<executable>|<signal>|<top frame function>` (no pid, address or time); every classification value that is published
+  (source, key, signal, function, tags) passes the same secret masking as the report fields, a credential in `Tags` included.
+  `ProcCmdline` is split the way apport wrote it (arguments joined by a space, only a backslash and a space escaped with a
+  backslash; quotes are ordinary characters), not by shell rules. Nested shells get `|nested` appended to the key so that
   their event never merges with a crash of the real session shell.
 * **Rules data** (`data/intercept-rules.json`, user override `$XDG_CONFIG_HOME/error-intercept/intercept-rules.json`, merged
   field by field, the user's value wins): `{"version": 1, "nested_test_shell": {"exempt": false, "mode": "drop", "note": "..."}}`.
@@ -96,20 +100,30 @@ For every `*.crash` in `/var/crash` (`--crash-dir` and `ERROR_INTERCEPT_CRASH_DI
   dedup, the rate limit, spawn caps and backoff in agent-sub. A wrong value (not JSON, wrong version, `exempt` not a
   boolean, unknown `mode`) falls back to off and is listed by `error-intercept status` (`rules problem: ...`, also in `--json`
   as `rules_problems`). The journal source reads the same key from the same file; this module owns the file.
-* **The report is claimed before it is touched**: it is renamed into the private directory `.ei-claims` inside `/var/crash` (the sticky
-  bit lets the owner create it), gzipped into the archive, the file and then the archive directory are `fsync`ed, and only then the claimed
-  file is removed. If apport writes a NEW report under the same name meanwhile, only the claimed inode is deleted; after any failure the
-  old report is put back (beside the new one as `<name>.r1.crash`), and a claim left by a crashed run is restored at the next scan. Two
-  reports with the same name and second get distinct archive names (`.1`, `.2`), archive names are bounded to 240 bytes.
+* **The report is claimed before anything reads it**: it is renamed into the user's private directory `.ei-claims-<uid>` inside
+  `/var/crash` (one per user: the directory is shared and sticky; it is created 0700 and refused when it is a symlink, someone else's
+  or open to others, and the report then stays where it is and is reported by a metadata-only event with a `claim-failed` audit line, once per report; a shared `.ei-claims` directory of an earlier unreleased build is not recovered). The claimed inode is the one that is
+  parsed, published, gzipped into the archive (the file and then the archive directory are `fsync`ed) and only then removed, so a new
+  report apport writes under the same name meanwhile is never archived unpublished: it stays and the next scan ingests it. After any
+  failure the claimed report is put back (beside a new one as `<name>.r1.crash`, the name cut to stay within 255 bytes), and a claim
+  left by a crashed run is restored at the next scan. A claim of a name that is already in the claim directory takes the next free name.
+  Two reports with the same name and second get distinct archive names (`.1`, `.2`), archive names are bounded to 240 bytes.
 * **Nothing is uploaded, ever.** Moving the report out of `/var/crash` also ends a pending `whoopsie` upload (the
   `.upload` stamp of a 96 MB report is removed with it).
 * Publishing is `agent-sub publish --topic errors ... --json` (found on PATH, then `~/.local/bin`, then `agent_tools_dir`
   of `~/.config/error-intercept/config.json`, then `~/xp/agent-tools`, `~/dev/agent-tools`). When it fails the event is kept
   as a file in `state/pending/` **and** audited, the report is archived anyway (the event is not lost, the window cannot
-  come back), and every later `ingest` / `ingest-spool` retries the pending files first. **Nothing is silently lost.**
+  come back), and every later `ingest` / `ingest-spool` / `drain` retries the pending files first. An event that can never be
+  published (a NUL byte, an argument over the kernel's 128 KiB limit, agent-sub exit 2) is a permanent refusal: it is kept as
+  `pending-*.rejected` and audited instead of blocking the queue. **Nothing is silently lost.**
 * agent-sub retries pending events (rate-limited, waiting for an agent, not acknowledged) only when asked to `drain`: `ingest` and
   `ingest-spool` run `agent-sub drain` after their work (a failure there only prints a warning) and `error-intercept-drain.timer`
-  runs `error-intercept drain` every 5 minutes (`Persistent=false`).
+  runs `error-intercept drain` every 5 minutes (`Persistent=false`), which first retries the local pending queue and then asks
+  agent-sub to drain.
+* The spool (`ingest-spool`) isolates every file: one that is not JSON (or nested too deeply to parse), is too big, is not an
+  object, or whose values the converter cannot handle is archived with an audit line `spool-malformed` and the reason, and a file
+  that cannot even be archived (disk full) is set aside as `<name>.json.bad` with `spool-quarantined`: none of them is retried
+  for ever or stops the files behind it. A lone surrogate in a title (half of an emoji cut by the extension) is replaced by U+FFFD.
 * Exit status is 0 whatever happened to individual reports (each outcome is in the audit log); an unexpected bug exits 1 with a
   traceback in the journal, still without a window.
 * `--dry-run` prints what would be published and archived, touching nothing (no audit line, no file moved, no atime).
@@ -119,8 +133,8 @@ For every `*.crash` in `/var/crash` (`--crash-dir` and `ERROR_INTERCEPT_CRASH_DI
 ```
 error-intercept ingest [--crash-dir DIR] [--dry-run]   what the units run
 error-intercept ingest-spool [--dry-run]               publish the extension's spool files, archive them
-error-intercept drain                                  agent-sub drain (what the 5-minute timer runs)
-error-intercept journal                                follow the journal (error_intercept/journal_source.py)
+error-intercept drain                                  retry the pending queue, then agent-sub drain (the 5-minute timer)
+error-intercept journal [OPTIONS]                      follow the journal (error_intercept/journal_source.py); OPTIONS go to it unchanged
 error-intercept list [--json] [--limit N]              audited events, newest last
 error-intercept replay ID                              deliver an audited event again (agent-sub replay; a local pending-* id is published again)
 error-intercept status [--json]                        switch, agent-sub, waiting reports, retry queue, archive
@@ -130,8 +144,9 @@ error-intercept archive list [--json]                  archived reports and spoo
 
 **The stop switch** is the file `~/.local/state/error-intercept/DISABLED` (`disable` creates it, `enable` removes it): `ingest`
 `exec`s the original `/usr/lib/update-notifier/update-notifier-crash` (stock behaviour, including the dialog), the login scan
-service does not run, `ingest-spool` leaves its files alone, the journal source publishes nothing and the extension
-stops hiding windows. No unit changes are needed to switch.
+service, the spool service and the drain timer's service do not start (`ConditionPathExists=!%S/error-intercept/DISABLED`), and
+run by hand `ingest-spool` and `drain` do nothing: no publishing, no retry of the pending queue, no `agent-sub drain`. The journal
+source publishes nothing and the extension stops hiding windows. No unit changes are needed to switch.
 
 ### Files
 
