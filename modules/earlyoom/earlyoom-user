@@ -29,9 +29,10 @@ from ubuntu_tweaks.process import Process  # noqa: E402
 
 
 def build(env: Mapping[str, str]) -> Module:
+    options = options_from(env)  # a bad option is the first thing reported, whoever runs the script
     if os.geteuid() == 0:
         raise ModuleError("earlyoom-user is the rootless copy: run it as the desktop user, not as root")
-    return UserEarlyoom(Process(), invoking_account(env).home, options_from(env))
+    return UserEarlyoom(Process(), invoking_account(env).home, options)
 
 
 if __name__ == "__main__":
