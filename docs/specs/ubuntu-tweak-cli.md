@@ -952,6 +952,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `privacy-crash-reporting` | `system` (root), `enabled = false` | whoopsie.path / whoopsie.service masked and stopped, optionally apport `enabled=0`; opt-in, undecided by the owner (*`docs/specs/privacy-crash-reporting.md`*) |
 | `firefox-snap-absent` | `system` (root), rootless fallback, `enabled = false` | the Firefox snap removed (snapshot kept) and its stale user launcher gone; never the deb Firefox or `mimeapps.list` (*`docs/specs/firefox-snap-absent.md`*) |
 | `stray-gsettings-keyfile` | `system`, user, `enabled = false` | `~/.config/glib-2.0/settings/keyfile` (Homebrew gsettings' GKeyfile store) backed up to the state dir, then removed (*`docs/specs/stray-gsettings-keyfile.md`*) |
+| `inotify-limits` | `system` (root) | `/etc/sysctl.d/60-inotify.conf` with `fs.inotify.max_user_instances` (2048), applied with `sysctl --system` (*`docs/specs/inotify-limits.md`*) |
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
