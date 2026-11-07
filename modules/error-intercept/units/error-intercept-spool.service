@@ -1,6 +1,8 @@
 # Managed by ubuntu-tweaks (module error-intercept). Started by error-intercept-spool.path.
 [Unit]
 Description=error-intercept: publish spooled error windows
+# the stop switch: `error-intercept disable` silences every publisher, this path-started one included
+ConditionPathExists=!%S/error-intercept/DISABLED
 
 [Service]
 Type=oneshot

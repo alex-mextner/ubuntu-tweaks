@@ -9,6 +9,7 @@ from unittest import mock
 from ei_fixtures import FAKE_TOKEN, USER_HOME, Case, FailingPublish, FakePublish, crash_text
 
 from error_intercept import apport_source as apport_module
+from error_intercept.archive import claim_dir
 from error_intercept.apport_source import BACKLOG_S, Ingester, apport_can_list, metadata_event
 from error_intercept.publisher import LOCAL_PREFIX, DurablePublisher
 
@@ -61,8 +62,7 @@ class PublishAndArchiveTest(IngestCase):
 
     def test_a_claim_left_by_a_crashed_run_is_restored_and_ingested(self):
         path = self.write_crash()
-        (self.crash / ".ei-claims").mkdir()
-        os.rename(path, self.crash / ".ei-claims" / path.name)  # the previous run died after claiming it
+        os.rename(path, claim_dir(self.crash, os.geteuid()) / path.name)  # the previous run died after claiming it
         publish = FakePublish()
         outcome = self.ingester(publish).run()
         self.assertEqual((outcome.published, outcome.archived, len(publish.events)), (1, 1, 1))
@@ -127,6 +127,73 @@ class PublishAndArchiveTest(IngestCase):
         self.assertIn("Parsing failed", event["text"])
         self.assertEqual(self.audit_decisions(), ["parse-failed", "archived"])
         self.assertEqual(len(list(self.paths.archive.glob("*.gz"))), 1)
+
+
+class ClaimBeforeInspectTest(IngestCase):
+    def test_a_report_apport_replaces_while_it_is_parsed_is_neither_archived_nor_lost(self):
+        path = self.write_crash()
+        real_parse = apport_module.parse_report
+
+        def parse_then_apport_writes_a_new_report(report_path):
+            report = real_parse(report_path)
+            path.write_text(crash_text(exe="/usr/bin/nautilus", cmdline="nautilus"))  # same name: a new crash
+            os.utime(path, (self.now - 65, self.now - 60))
+            return report
+
+        publish = FakePublish()
+        with mock.patch.object(apport_module, "parse_report", parse_then_apport_writes_a_new_report):
+            outcome = self.ingester(publish).run()
+        self.assertEqual((len(publish.events), outcome.archived), (1, 1))
+        (archived,) = self.paths.archive.glob("*.gz")
+        self.assertIn("gnome-shell", gzip.decompress(archived.read_bytes()).decode())  # what was published
+        self.assertIn("nautilus", path.read_text())  # the replacement was never touched: the next run ingests it
+        second = self.ingester(publish).run()
+        self.assertEqual((len(publish.events), second.archived), (2, 1))
+        self.assertEqual(publish.events[1]["source"], "nautilus")
+
+    def test_the_report_is_in_the_claim_directory_while_it_is_parsed(self):
+        path = self.write_crash()
+        seen = []
+        real_parse = apport_module.parse_report
+
+        def spy(report_path):
+            seen.append((report_path.parent.name, path.exists()))
+            return real_parse(report_path)
+
+        with mock.patch.object(apport_module, "parse_report", spy):
+            self.ingester(FakePublish()).run()
+        self.assertEqual(seen, [(f".ei-claims-{os.geteuid()}", False)])
+
+    def test_an_untrusted_claim_directory_leaves_the_report_where_it_is_and_the_run_goes_on(self):
+        path = self.write_crash()
+        (self.crash / f".ei-claims-{os.geteuid()}").symlink_to(self.root)
+        publish = FakePublish()
+        outcome = self.ingester(publish).run()
+        self.assertEqual((len(publish.events), outcome.archived, outcome.metadata_only), (1, 0, 1))
+        self.assertTrue(path.exists())
+        self.assertIn("claim-failed", self.audit_decisions())
+        self.assertTrue(any("claim" in line for line in outcome.lines))
+        self.ingester(publish).run()  # the next trigger does not repeat the event for the same report
+        self.assertEqual(len(publish.events), 1)
+
+    def test_a_dry_run_makes_no_claim_directory(self):
+        self.write_crash()
+        self.ingester(FakePublish(), dry_run=True).run()
+        self.assertEqual(os.listdir(self.crash), ["_usr_bin_gnome-shell.1000.crash"])
+
+
+class TagsAreMaskedTest(IngestCase):
+    def test_a_jwt_in_the_tags_never_reaches_the_publisher_or_the_audit_log(self):
+        jwt = "eyJhbGciOiJI" + ".eyJzdWIiOiIx" + ".SflKxwRJSMeKKF2QT4"
+        self.write_crash(text=crash_text(extra=f"Tags: wayland {jwt} secr" + "et=hunter3hunter3\n"))
+        publish = FakePublish()
+        self.ingester(publish).run()
+        (event,) = publish.events
+        audit = self.paths.audit.read_text()
+        for leak in (jwt, "hunter3"):
+            self.assertNotIn(leak, json.dumps(event))
+            self.assertNotIn(leak, audit)
+        self.assertIn("wayland", event["data"]["tags"])
 
 
 class BacklogTest(IngestCase):

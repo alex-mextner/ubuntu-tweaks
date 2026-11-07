@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import signal as signal_module
 from dataclasses import dataclass
 
 from error_intercept.crash_report import first_function
+from error_intercept.sanitize import clean_line, clip
 
 NESTED_FLAGS = ("--headless", "--virtual-monitor", "--nested")
 NESTED_CAPABLE = frozenset({"gnome-shell", "mutter"})
@@ -64,12 +64,31 @@ def signal_name(fields: dict[str, str]) -> str:
 
 
 def arguments(cmdline: str) -> list[str]:
-    """ProcCmdline as an argument list: apport joins the arguments with spaces and escapes a space inside one with a
-    backslash (``session\\ --nested`` is ONE argument), which is shell quoting."""
-    try:
-        return shlex.split(cmdline)
-    except ValueError:  # an unbalanced quote: the plain words are the best guess
-        return cmdline.split()
+    """ProcCmdline as an argument list, decoded the way apport wrote it: the arguments are joined with a space, and
+    only a backslash and a space inside one are escaped with a backslash (``session\\ --nested`` is ONE argument).
+    Quotes are ordinary characters: this is not shell quoting."""
+    result: list[str] = []
+    current: list[str] = []
+    started = False
+    index = 0
+    while index < len(cmdline):
+        char = cmdline[index]
+        if char == "\\" and cmdline[index + 1 : index + 2] in ("\\", " "):
+            current.append(cmdline[index + 1])
+            started = True
+            index += 2
+            continue
+        if char == " ":
+            if started:
+                result.append("".join(current))
+                current, started = [], False
+        else:
+            current.append(char)
+            started = True
+        index += 1
+    if started:
+        result.append("".join(current))
+    return result
 
 
 def is_nested(exe: str, cmdline: str) -> bool:
@@ -94,7 +113,9 @@ def classify(fields: dict[str, str]) -> Classification:
         severity = "critical"
     else:
         severity = "warning"
-    tags = tuple(tag for tag in (NESTED_TAG if nested else "", *fields.get("Tags", "").split()) if tag)
+    # routing above used the raw values; every value below is published (event, audit log) and so is masked first
+    tags = tuple(tag for tag in (NESTED_TAG if nested else "", *clean_line(fields.get("Tags", ""), 200).split()) if tag)
     kind = KINDS.get(fields.get("ProblemType", ""), "report")
-    key = f"{exe}|{name}|{function}" + ("|nested" if nested else "")
-    return Classification(kind, severity, exe, key, name, function, tags, nested)
+    source, signal_text, function = clean_line(exe, 200), clean_line(name, 200), clean_line(function, 200)
+    key = clip(f"{source}|{signal_text}|{function}", 300) + ("|nested" if nested else "")
+    return Classification(kind, severity, source, key, signal_text, function, tags, nested)

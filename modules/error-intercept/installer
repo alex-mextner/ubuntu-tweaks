@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Mapping
@@ -62,6 +63,8 @@ SPOOL_UNIT = "error-intercept-spool.path"
 DRAIN_TIMER = "error-intercept-drain.timer"
 JOURNAL_UNIT = "error-intercept-journal.service"
 STATE_DIRS = ("archive", "spool", "pending")
+# one ExecStart entry of ``systemctl show -p ExecStart``: ``{ path=... ; argv[]=<argv joined> ; ignore_errors=...``
+EXEC_ARGV = re.compile(r"\{ path=.*? ; argv\[\]=(.*?) ; ignore_errors=")
 Check = Callable[[], Finding]
 
 
@@ -330,13 +333,27 @@ class ErrorIntercept(Module):
 
         return Fact(check, fix, lambda: [preview], derived)
 
+    def _managed_units(self) -> list[str]:
+        """Every unit whose files this module writes: the notifier (its drop-in) and the module's own units."""
+        own = [path.name for path in self._unit_files() if path.name != Path(DROP_IN).name]
+        return [NOTIFIER, *own]
+
     def _reload_fact(self) -> Fact:
+        # asked per unit, as systemd answers per unit: a changed scan or timer unit leaves the notifier untouched
         return self._bus_fact(
             "systemd has loaded the current unit files",
-            lambda: self._systemctl("show", "-p", "NeedDaemonReload", "--value", NOTIFIER) != "yes",
+            lambda: all(
+                self._systemctl("show", "-p", "NeedDaemonReload", "--value", unit) != "yes"
+                for unit in self._managed_units()
+            ),
             lambda: self._process.execute(["systemctl", "--user", "daemon-reload"]),
             "systemctl --user daemon-reload",
         )
+
+    def _effective_exec_starts(self) -> list[str]:
+        """The argv of every ExecStart entry systemd will run for the notifier, in order."""
+        out = self._process.query(["systemctl", "--user", "show", "-p", "ExecStart", "--value", NOTIFIER], timeout=30)
+        return EXEC_ARGV.findall(out.stdout or "")
 
     def _effective_exec_fact(self) -> Fact:
         wanted = f"{self._module}/error-intercept ingest"
@@ -349,7 +366,7 @@ class ErrorIntercept(Module):
 
         return self._bus_fact(
             f"{NOTIFIER} runs the ingester, not the apport dialog",
-            lambda: wanted in self._systemctl("show", "-p", "ExecStart", "--value", NOTIFIER),
+            lambda: self._effective_exec_starts() == [wanted],  # the complete list: ours alone, no other command
             fix,
             f"{NOTIFIER} ExecStart is {wanted} (after the reload)",
             derived=True,

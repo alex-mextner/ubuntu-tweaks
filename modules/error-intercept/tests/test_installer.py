@@ -49,10 +49,14 @@ class FakeMachine(Process):
     def snapshot(self):
         return {str(p.relative_to(self.units_dir)): p.read_text() for p in self.units_dir.rglob("*") if p.is_file()}
 
+    @staticmethod
+    def unit_files(files, unit):
+        return {name: text for name, text in files.items() if name == unit or name.startswith(unit + ".d/")}
+
     def exec_start(self):
         dropin = self.loaded.get("update-notifier-crash.service.d/10-error-intercept.conf", "")
         if "ExecStart=" in dropin:
-            return f"{{ path={self.module}/error-intercept ; argv[]={self.module}/error-intercept ingest ; }}"
+            return f"{{ path={self.module}/error-intercept ; argv[]={self.module}/error-intercept ingest ; ignore_errors=no ; start_time=[n/a] }}"
         return "{ path=/usr/lib/update-notifier/update-notifier-crash ; }"
 
     def query(self, argv, *, timeout=60.0, cwd=None):
@@ -66,7 +70,13 @@ class FakeMachine(Process):
             return CommandResult(127, "", "")
         verb, rest = argv[2], argv[3:]
         if verb == "show" and "NeedDaemonReload" in rest:
-            return CommandResult(0, ("yes" if self.snapshot() != self.loaded else "no") + "\n", "")
+            unit = rest[-1]  # like systemd: a unit needs a reload when ITS fragment or drop-ins changed, not any file
+            return CommandResult(
+                0,
+                ("yes" if self.unit_files(self.snapshot(), unit) != self.unit_files(self.loaded, unit) else "no")
+                + "\n",
+                "",
+            )
         if verb == "show" and "ExecStart" in rest:
             return CommandResult(0, self.exec_start() + "\n", "")
         if verb == "is-enabled":
@@ -221,6 +231,7 @@ class StagedInstallTest(InstallerCase):
         self.assertEqual(self.last_summary(), "error-intercept: 2 changed")
 
     def test_the_journal_unit_is_installed_only_when_the_module_ships_it(self):
+        (self.module / "units/error-intercept-journal.service").unlink(missing_ok=True)  # a module without the source
         self.build().apply()
         self.assertFalse((self.units / "error-intercept-journal.service").exists())
         (self.module / "units/error-intercept-journal.service").write_text(
@@ -308,6 +319,38 @@ class LiveInstallTest(InstallerCase):
         self.machine.exec_start = lambda: "{ path=/other ; argv[]=/other ; }"
         with self.assertRaisesRegex(ModuleError, "overrides ours"):
             self.build(staged=False).apply()
+
+    def test_a_change_of_any_managed_unit_reloads_not_only_the_notifier_drop_in(self):
+        self.build(staged=False).apply()
+        self.assertEqual(self.machine.loaded, self.machine.snapshot())
+        scan = self.units / "error-intercept-scan.service"
+        scan.write_text(scan.read_text() + "# edit\n")  # the notifier and its drop-in are untouched
+        self.assertEqual(self.run_main(self.build(staged=False), "check")[0], EXIT_DRIFT)
+        self.machine.executed.clear()
+        scan.write_text(scan.read_text().replace("# edit\n", ""))  # back to what the module ships ...
+        self.machine.loaded = {**self.machine.loaded, scan.name: "stale"}  # ... but systemd still holds the edited text
+        self.build(staged=False).apply()
+        self.assertIn(("systemctl", "--user", "daemon-reload"), self.machine.executed)
+        self.assertEqual(self.run_main(self.build(staged=False), "check")[0], EXIT_OK)
+
+    def test_the_whole_exec_start_list_must_be_ours(self):
+        self.build(staged=False).apply()
+        ours = f"{self.module}/error-intercept ingest"
+        entry = "{ path=%s ; argv[]=%s ; ignore_errors=no ; start_time=[n/a] }"
+        for effective in (
+            entry % (ours.split()[0], ours) + " " + entry % ("/other", "/other --run"),  # ours AND another command
+            entry % (ours.split()[0], ours + "-spool"),  # a longer command that merely starts with ours
+            entry % ("/other", "/other") + "\n" + entry % (ours.split()[0], ours),  # another one first
+            "",
+        ):
+            self.machine.exec_start = lambda effective=effective: effective
+            with self.assertRaisesRegex(ModuleError, "overrides ours"):
+                self.build(staged=False).apply()
+            self.assertEqual(self.run_main(self.build(staged=False), "check")[0], EXIT_DRIFT)
+
+    def test_exactly_our_exec_start_is_accepted_whatever_follows_the_argv(self):
+        self.build(staged=False).apply()
+        self.assertEqual(self.run_main(self.build(staged=False), "check")[0], EXIT_OK)
 
     def test_no_user_bus_writes_the_files_and_asks_for_the_session(self):
         with self.assertRaises(NeedsManual) as raised:

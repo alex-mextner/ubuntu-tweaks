@@ -8,7 +8,7 @@ user units the installer writes: ``ingest`` is the ``ExecStart`` of ``update-not
     ingest [--crash-dir DIR] [--dry-run]   publish and archive the apport reports (exit 0, no window, ever);
                                             while ``DISABLED`` exists: exec the stock update-notifier-crash
     ingest-spool [--dry-run]               publish the shell extension's spool files
-    drain                                  ``agent-sub drain`` (what error-intercept-drain.timer runs every 5 minutes)
+    drain                                  retry the local pending queue, then ``agent-sub drain`` (error-intercept-drain.timer, every 5 minutes)
     journal [OPTIONS]                      follow the journal (``error_intercept.journal_source.main(publish, argv=OPTIONS)``)
     list [--json] [--limit N]              the audited events, newest last
     replay ID                              deliver an audited event again
@@ -22,6 +22,7 @@ Exit codes: 0 done, 1 not found (``replay``) or an unexpected failure, 2 usage /
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import subprocess
@@ -86,7 +87,22 @@ def _drain_quietly(ctx: Context) -> None:
         ctx.warn(f"agent-sub drain failed: {error}")
 
 
+def _stopped(ctx: Context) -> bool:
+    """The stop switch is set: nothing publishes, retries or drains, whichever unit or timer asked."""
+    if not ctx.paths.disabled.exists():
+        return False
+    ctx.say(f"DISABLED ({ctx.paths.tilde(ctx.paths.disabled)}): nothing is published, retried or drained")
+    return True
+
+
 def _drain(ctx: Context, args: argparse.Namespace) -> int:
+    """What error-intercept-drain.timer runs: our own retry queue first (an event that agent-sub refused or could not
+    be asked), then ``agent-sub drain`` for what agent-sub itself holds."""
+    if _stopped(ctx):
+        return 0
+    ensure_private_dir(ctx.paths.state)
+    for name in ctx.publisher.retry_pending():
+        ctx.say(f"retried pending event -> {name}")
     try:
         for line in ctx.agent_sub.drain().splitlines():
             ctx.say(line)
@@ -133,6 +149,8 @@ def _ingest(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def _ingest_spool(ctx: Context, args: argparse.Namespace) -> int:
+    if _stopped(ctx):
+        return 0
     if not args.dry_run:
         ensure_private_dir(ctx.paths.state)
         ctx.publisher.retry_pending()
@@ -156,7 +174,9 @@ class _SwitchedPublisher:
 
 def _journal(ctx: Context, args: argparse.Namespace) -> int:
     try:
-        from error_intercept import journal_source
+        # import_module reads sys.modules; ``from error_intercept import journal_source`` would take the package's
+        # attribute, which keeps pointing at a module that was imported earlier and since replaced
+        journal_source = importlib.import_module("error_intercept.journal_source")
     except ModuleNotFoundError as error:
         if error.name != "error_intercept.journal_source":
             raise
@@ -307,16 +327,13 @@ def parser() -> argparse.ArgumentParser:
     ingest.add_argument("--dry-run", action="store_true", help="show what would happen; touch nothing")
     ingest.set_defaults(run=_ingest)
     commands.add_parser(
-        "drain", help="agent-sub drain: retry events agent-sub still holds (the 5-minute timer)"
+        "drain", help="retry the local pending queue and agent-sub's own (the 5-minute timer)"
     ).set_defaults(run=_drain)
     ingest_spool = commands.add_parser("ingest-spool", help="publish the shell extension's spool files")
     ingest_spool.add_argument("--dry-run", action="store_true")
     ingest_spool.set_defaults(run=_ingest_spool)
-    journal = commands.add_parser("journal", help="follow the journal and publish matching lines")
-    journal.add_argument(
-        "journal_args", nargs=argparse.REMAINDER, help="options of the journal source (--dry-run, --once ...)"
-    )
-    journal.set_defaults(run=_journal)
+    # ``main`` hands everything after ``journal`` to the journal source untouched; this entry is for ``--help`` only
+    commands.add_parser("journal", help="follow the journal and publish matching lines (options: see the source)")
     listing = commands.add_parser("list", help="audited events")
     listing.add_argument("--json", action="store_true")
     listing.add_argument("--limit", type=int, default=30)
@@ -351,12 +368,12 @@ def main(
     """Run one command. ``seams`` replace the process-level collaborators (runner, execv, clock, sleep, uid, quiet_s)."""
     environment = dict(os.environ if env is None else env)
     where = home or Path(environment.get("HOME") or os.path.expanduser("~"))
-    top = parser()
-    args, extra = top.parse_known_args(list(sys.argv[1:] if argv is None else argv))
-    if args.command == "journal":
-        args.journal_args = extra  # the journal source has its own options (--dry-run, --once, ...)
-    elif extra:
-        top.error(f"unrecognized arguments: {' '.join(extra)}")
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["journal"]:
+        # the journal source has its own options (--dry-run, --once, --since ...): argparse never sees them
+        args = argparse.Namespace(command="journal", run=_journal, journal_args=raw[1:])
+    else:
+        args = parser().parse_args(raw)
     ctx = Context(Paths.from_env(environment, where), environment, out or sys.stdout, err or sys.stderr, **seams)
     try:
         return args.run(ctx, args)

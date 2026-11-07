@@ -23,6 +23,7 @@ Public API: ``PublishError``, ``AgentSubPublisher``, ``DurablePublisher``, ``loc
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -45,6 +46,7 @@ LOCAL_PREFIX = "pending-"
 TOPIC = "errors"
 USAGE_EXIT = 2  # agent-sub: usage error or a value it refuses
 REQUIRED_KEYS = ("kind", "severity", "source", "key", "text")
+MAX_ARGUMENT_BYTES = 120_000  # Linux refuses one argument over 128 KiB (E2BIG): such an event can never be published
 PUBLISH_TIMEOUT_S = 240  # publishing waits (bounded) for a freshly started agent to come up
 FALLBACK_TOOL_DIRS = (".local/bin", ".bun/bin", ".cargo/bin", "go/bin", "n/bin")
 LAUNCHER = Path("lib/agenttools_subscriptions/agent-sub")
@@ -55,7 +57,7 @@ class PublishError(Exception):
     """``agent-sub publish`` did not store the event; the message says why.
 
     ``permanent`` marks a refusal that retrying cannot fix (agent-sub exit 2: bad topic, severity or data; an event
-    without the required keys): such an event is set aside (``.rejected``) instead of blocking the retry queue.
+    without the required keys; a NUL byte or an argument over the kernel's size limit): such an event is set aside (``.rejected``) instead of blocking the retry queue.
     """
 
     def __init__(self, message: str, *, permanent: bool = False) -> None:
@@ -107,15 +109,39 @@ class AgentSubPublisher:
         self._runner = runner
         self._locate = locate or (lambda: locate_agent_sub(paths, env))
 
+    @staticmethod
+    def _refuse_unsendable(arguments: tuple[str, ...]) -> None:
+        """A NUL byte or an argument over the kernel's limit can never be passed to a child: retrying it for ever would
+        block the queue behind it, so it is a permanent refusal (kept under ``.rejected``) before anything is started."""
+        for argument in arguments:
+            if "\0" in argument:
+                raise PublishError("an argument holds a NUL byte, which cannot be passed to agent-sub", permanent=True)
+            try:
+                size = len(os.fsencode(argument))
+            except UnicodeEncodeError as error:
+                raise PublishError(f"an argument is not encodable: {error}", permanent=True) from error
+            if size > MAX_ARGUMENT_BYTES:
+                raise PublishError(
+                    f"an argument is {size} bytes, over the {MAX_ARGUMENT_BYTES} bytes one argument may hold",
+                    permanent=True,
+                )
+
     def _invoke(self, *arguments: str) -> "subprocess.CompletedProcess[str]":
         launcher = self._locate()
         if launcher is None:
             raise PublishError("agent-sub not found (install agent-tools or set agent_tools_dir in the config)")
+        self._refuse_unsendable(arguments)
         try:
             done = self._runner(
                 [launcher, *arguments], capture_output=True, text=True, timeout=PUBLISH_TIMEOUT_S, env=self._env
             )
-        except (OSError, subprocess.SubprocessError) as error:
+        except UnicodeDecodeError as error:  # the child already ran and printed bytes that are not UTF-8: unknown outcome
+            raise PublishError(f"agent-sub output could not be decoded: {error}") from error
+        except ValueError as error:  # the child could not be built from these arguments: retrying cannot help
+            raise PublishError(f"agent-sub could not run: {error}", permanent=True) from error
+        except OSError as error:
+            raise PublishError(f"agent-sub could not run: {error}", permanent=error.errno == errno.E2BIG) from error
+        except subprocess.SubprocessError as error:
             raise PublishError(f"agent-sub could not run: {error}") from error
         if done.returncode != 0:
             last = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or ["no output"]

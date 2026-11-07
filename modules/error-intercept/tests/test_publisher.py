@@ -1,5 +1,6 @@
 """The agent-sub publisher: argv, reply parsing, failures kept pending, retry, where agent-sub is found."""
 
+import errno
 import json
 import os
 import subprocess
@@ -81,6 +82,44 @@ class AgentSubPublisherTest(Case):
             with self.assertRaises(PublishError):
                 self.publisher(runner)(EVENT)
 
+    def test_a_nul_byte_is_a_permanent_refusal_and_agent_sub_is_never_started(self):
+        for field in ("text", "key", "source", "kind"):
+            runner = Runner()
+            with self.assertRaises(PublishError) as raised:
+                self.publisher(runner)({**EVENT, field: "bad\x00byte"})
+            self.assertTrue(raised.exception.permanent, field)
+            self.assertEqual(runner.calls, [], field)
+
+    def test_an_argument_over_the_kernel_limit_is_a_permanent_refusal(self):
+        for text in ("x" * 200_000, "я" * 70_000):  # 140 KB in UTF-8: over what one argument may hold (128 KiB)
+            runner = Runner()
+            with self.assertRaises(PublishError) as raised:
+                self.publisher(runner)({**EVENT, "text": text})
+            self.assertTrue(raised.exception.permanent)
+            self.assertEqual(runner.calls, [])
+
+    def test_an_event_just_under_the_limit_is_published(self):
+        runner = Runner()
+        self.assertEqual(self.publisher(runner)({**EVENT, "text": "x" * 90_000}), "ev-7")
+
+    def test_the_kernel_refusing_the_argument_list_or_a_value_error_is_permanent_too(self):
+        too_big = OSError(errno.E2BIG, "Argument list too long")
+        for failure in (too_big, ValueError("embedded null byte")):
+            with self.assertRaises(PublishError) as raised:
+                self.publisher(Runner(raises=failure))(EVENT)
+            self.assertTrue(raised.exception.permanent, failure)
+
+    def test_output_that_is_not_utf8_is_retried_not_refused(self):
+        failure = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")  # raised after the child ran
+        with self.assertRaises(PublishError) as raised:
+            self.publisher(Runner(raises=failure))(EVENT)
+        self.assertFalse(raised.exception.permanent)
+
+    def test_an_unlaunchable_agent_sub_is_still_retried(self):
+        with self.assertRaises(PublishError) as raised:
+            self.publisher(Runner(raises=FileNotFoundError("agent-sub")))(EVENT)
+        self.assertFalse(raised.exception.permanent)
+
     def test_missing_agent_sub_is_a_publish_error_that_says_what_to_do(self):
         with self.assertRaisesRegex(PublishError, "agent_tools_dir"):
             self.publisher(Runner(), launcher=None)(EVENT)
@@ -150,6 +189,14 @@ class DurablePublisherTest(Case):
         self.assertEqual(self.durable(FakePublish()).retry_pending(), [])
         self.assertEqual(len(list(self.paths.pending.glob("*.rejected"))), 1)
         self.assertEqual(self.audit.records()[0]["status"], "rejected")
+
+    def test_a_refused_event_does_not_block_the_queue_behind_it(self):
+        publisher = self.durable(AgentSubPublisher(self.paths, self.env, Runner(), locate=lambda: "/x/agent-sub"))
+        refused = publisher({**EVENT, "text": "bad\x00byte"})
+        self.assertTrue(refused.startswith(LOCAL_PREFIX))
+        self.assertEqual(publisher({**EVENT, "key": "good"}), "ev-7")
+        self.assertEqual(list(self.paths.pending.glob("*.json")), [])
+        self.assertEqual(len(list(self.paths.pending.glob("*.rejected"))), 1)
 
     def test_an_event_without_required_keys_is_refused_permanently(self):
         with self.assertRaises(PublishError) as raised:

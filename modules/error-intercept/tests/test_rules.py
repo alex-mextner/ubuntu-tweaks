@@ -50,6 +50,15 @@ class LoaderTest(RulesCase):
             self.assertFalse(rules.nested_exempt, text)
             self.assertEqual(len(rules.problems), 1, text)
 
+    def test_a_broken_user_file_turns_a_shipped_on_off(self):
+        shipped = self.root / "shipped.json"
+        shipped.write_text('{"version": 1, "nested_test_shell": {"exempt": true}}')
+        for text in ("not json", "[" * 5000, '{"version": 2, "nested_test_shell": {"exempt": false}}'):
+            self.user_rules(text)
+            rules = load_rules(self.paths, shipped)
+            self.assertFalse(rules.nested_exempt, text[:20])
+            self.assertEqual(len(rules.problems), 1, text[:20])
+
 
 class RoutingTest(RulesCase):
     def test_default_routes_the_nested_crash_at_critical_tagged(self):

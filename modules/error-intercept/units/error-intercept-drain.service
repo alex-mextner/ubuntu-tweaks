@@ -1,6 +1,8 @@
 # Managed by ubuntu-tweaks (module error-intercept). Started by error-intercept-drain.timer.
 [Unit]
-Description=error-intercept: retry the events agent-sub still holds
+Description=error-intercept: retry pending events (local queue and agent-sub)
+# the stop switch: `error-intercept disable` silences every publisher, this timer-started one included
+ConditionPathExists=!%S/error-intercept/DISABLED
 
 [Service]
 Type=oneshot

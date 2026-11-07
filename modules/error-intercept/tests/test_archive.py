@@ -10,7 +10,29 @@ from unittest import mock
 from ei_fixtures import Case
 
 from error_intercept import archive
-from error_intercept.archive import CLAIM_DIR, archive_file, archive_name, free_archive_path, recover_claims
+from error_intercept.archive import (
+    CLAIM_PREFIX,
+    ClaimDirError,
+    archive_name,
+    claim,
+    claim_dir,
+    free_archive_path,
+    recover_claims,
+    release,
+    store,
+)
+
+UID = os.geteuid()
+
+
+def archive_file(source, archive_dir, mtime, target=None):
+    """What the ingester does with one report: claim it, ``store`` it, put it back when that fails."""
+    claimed = claim(source, UID)
+    try:
+        return store(claimed, archive_dir, mtime, target)
+    except BaseException:
+        release(claimed, source)
+        raise
 
 
 class ArchiveTest(Case):
@@ -18,8 +40,11 @@ class ArchiveTest(Case):
         super().setUp()
         self.dest = self.root / "archive"
 
+    def claims(self):
+        return self.crash / f"{CLAIM_PREFIX}{UID}"
+
     def reports(self):
-        return [n for n in os.listdir(self.crash) if n != CLAIM_DIR]
+        return [n for n in os.listdir(self.crash) if not n.startswith(CLAIM_PREFIX)]
 
     def report(self, name="_usr_bin_app.1000.crash", text="ProblemType: Crash\nold\n"):
         path = self.crash / name
@@ -46,7 +71,7 @@ class ArchiveTest(Case):
         self.assertIn("old", gzip.decompress(target.read_bytes()).decode())
         self.assertEqual(path.read_text(), "ProblemType: Crash\nnew report of the same program\n")
         self.assertEqual(self.reports(), [path.name])
-        self.assertEqual(os.listdir(self.crash / CLAIM_DIR), [])  # and no claim is left lying around
+        self.assertEqual(os.listdir(self.claims()), [])  # and no claim is left lying around
 
     def test_a_failed_directory_sync_puts_the_report_back_untouched(self):
         path = self.report()
@@ -82,17 +107,15 @@ class ArchiveTest(Case):
 
     def test_an_interrupted_run_is_recovered_at_the_next_scan(self):
         path = self.report()
-        (self.crash / CLAIM_DIR).mkdir()
-        os.rename(path, self.crash / CLAIM_DIR / path.name)  # what a crashed archive_file leaves
-        restored = recover_claims(self.crash, os.geteuid())
+        os.rename(path, claim_dir(self.crash, UID) / path.name)  # what a crashed run leaves
+        restored = recover_claims(self.crash, UID)
         self.assertEqual(restored, [path])
         self.assertEqual(self.reports(), [path.name])
 
     def test_recovery_never_overwrites_a_new_report_it_restores_beside_it(self):
         path = self.report()
-        (self.crash / CLAIM_DIR).mkdir()
-        (self.crash / CLAIM_DIR / path.name).write_text("old claimed")
-        restored = recover_claims(self.crash, os.geteuid())
+        (claim_dir(self.crash, UID) / path.name).write_text("old claimed")
+        restored = recover_claims(self.crash, UID)
         self.assertEqual([p.name for p in restored], ["_usr_bin_app.1000.r1.crash"])
         self.assertEqual(path.read_text(), "ProblemType: Crash\nold\n")
         self.assertEqual(restored[0].read_text(), "old claimed")
@@ -109,20 +132,78 @@ class ArchiveTest(Case):
             with self.assertRaises(OSError):
                 archive_file(path, self.dest, 1_800_000_000.0)
         self.assertEqual(sorted(self.reports()), ["_usr_bin_app.1000.crash", "_usr_bin_app.1000.r1.crash"])
-        self.assertEqual(os.listdir(self.crash / CLAIM_DIR), [])
+        self.assertEqual(os.listdir(self.claims()), [])
         target = archive_file(path, self.dest, 1_800_000_000.0)  # and the next attempt is not blocked
         self.assertIn("new", gzip.decompress(target.read_bytes()).decode())
 
+    def test_release_never_replaces_a_report_that_appears_under_the_free_name(self):
+        path = self.report()
+        claimed = claim(path, UID)
+        real_link = os.link
+
+        def apport_writes_first(source, target, **kwargs):
+            if not path.exists():
+                path.write_text("ProblemType: Crash\nnew\n")  # between the check and the link
+            return real_link(source, target, **kwargs)
+
+        with mock.patch.object(archive.os, "link", apport_writes_first):
+            target = release(claimed, path)
+        self.assertEqual(path.read_text(), "ProblemType: Crash\nnew\n")
+        self.assertEqual(target.name, "_usr_bin_app.1000.r1.crash")
+
     def test_a_leftover_claim_does_not_block_the_next_archive_of_the_same_name(self):
         path = self.report()
-        (self.crash / CLAIM_DIR).mkdir()
-        (self.crash / CLAIM_DIR / path.name).write_text("leftover")
-        with self.assertRaises(FileExistsError):
-            archive_file(path, self.dest, 1_800_000_000.0)
-        self.assertTrue(path.exists())
-        recover_claims(self.crash, os.geteuid())  # what the next scan does first
-        archive_file(path, self.dest, 1_800_000_000.0)
-        self.assertEqual(sorted(self.reports()), ["_usr_bin_app.1000.r1.crash"])
+        (claim_dir(self.crash, UID) / path.name).write_text("leftover")
+        target = archive_file(path, self.dest, 1_800_000_000.0)  # the claim of the report takes the next free name
+        self.assertEqual(gzip.decompress(target.read_bytes()).decode(), "ProblemType: Crash\nold\n")
+        self.assertEqual(self.reports(), [])
+        restored = recover_claims(self.crash, UID)  # and the earlier run's claim is still restored, not lost
+        self.assertEqual([p.read_text() for p in restored], ["leftover"])
+
+    def test_claims_live_in_a_private_directory_of_the_user(self):
+        claimed = claim(self.report(), UID)
+        self.assertEqual(claimed.parent, self.claims())
+        self.assertEqual(oct(self.claims().stat().st_mode & 0o777), "0o700")
+        self.assertEqual(self.reports(), [])
+        release(claimed, self.crash / claimed.name)
+        self.assertEqual(self.reports(), ["_usr_bin_app.1000.crash"])
+
+    def test_a_claim_directory_that_is_a_symlink_is_refused_and_the_report_stays(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.claims().symlink_to(elsewhere)
+        path = self.report()
+        with self.assertRaises(ClaimDirError):
+            claim(path, UID)
+        self.assertEqual(self.reports(), [path.name])
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(recover_claims(self.crash, UID), [])
+
+    def test_a_claim_directory_open_to_others_is_refused(self):
+        self.claims().mkdir()
+        self.claims().chmod(0o777)
+        with self.assertRaises(ClaimDirError):
+            claim(self.report(), UID)
+
+    def test_a_claim_directory_of_another_owner_is_refused(self):
+        fake = UID + 1
+        (self.crash / f"{CLAIM_PREFIX}{fake}").mkdir(
+            mode=0o700
+        )  # created by us, so not owned by the uid it is named for
+        with self.assertRaises(ClaimDirError):
+            claim(self.report(), fake)
+        self.assertEqual(recover_claims(self.crash, fake), [])
+
+    def test_restored_names_stay_within_the_file_system_limit(self):
+        name = "_" + "x" * (255 - len(".crash") - 1) + ".crash"
+        self.assertEqual(len(name), 255)
+        path = self.report(name)
+        claimed = claim(path, UID)
+        self.report(name)  # apport wrote a new report under the same name
+        target = release(claimed, path)
+        self.assertLessEqual(len(os.fsencode(target.name)), 255)
+        self.assertTrue(target.name.endswith(".crash"))
+        self.assertEqual(len(self.reports()), 2)
 
     def test_two_reports_of_the_same_name_and_second_never_overwrite_each_other(self):
         first = archive_file(self.report(text="first"), self.dest, 1_800_000_000.1)
