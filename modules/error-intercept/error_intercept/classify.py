@@ -20,13 +20,14 @@ Public API: ``Classification(kind, severity, source, key, signal, function, tags
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import signal as signal_module
 from dataclasses import dataclass
 
 from error_intercept.crash_report import first_function
-from error_intercept.sanitize import clean_line, clip
+from error_intercept.sanitize import clean_line
 
 NESTED_FLAGS = ("--headless", "--virtual-monitor", "--nested")
 NESTED_CAPABLE = frozenset({"gnome-shell", "mutter"})
@@ -103,6 +104,14 @@ def executable(fields: dict[str, str]) -> str:
     return os.path.basename(path) if path else "unknown"
 
 
+def _bounded(text: str, limit: int = 200) -> str:
+    """Masked, one line; a longer value keeps a prefix and a digest, so two long names never collapse into one key."""
+    cleaned = clean_line(text, 1 << 20)
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: limit - 11]}~{hashlib.sha1(cleaned.encode(errors='replace')).hexdigest()[:10]}"
+
+
 def classify(fields: dict[str, str]) -> Classification:
     exe = executable(fields)
     name = signal_name(fields)
@@ -116,6 +125,6 @@ def classify(fields: dict[str, str]) -> Classification:
     # routing above used the raw values; every value below is published (event, audit log) and so is masked first
     tags = tuple(tag for tag in (NESTED_TAG if nested else "", *clean_line(fields.get("Tags", ""), 200).split()) if tag)
     kind = KINDS.get(fields.get("ProblemType", ""), "report")
-    source, signal_text, function = clean_line(exe, 200), clean_line(name, 200), clean_line(function, 200)
-    key = clip(f"{source}|{signal_text}|{function}", 300) + ("|nested" if nested else "")
+    source, signal_text, function = _bounded(exe), _bounded(name), _bounded(function)
+    key = f"{source}|{signal_text}|{function}" + ("|nested" if nested else "")
     return Classification(kind, severity, source, key, signal_text, function, tags, nested)

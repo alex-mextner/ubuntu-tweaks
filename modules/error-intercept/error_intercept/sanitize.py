@@ -127,14 +127,14 @@ _SECRET_STEPS: tuple[Callable[[str], str], ...] = (
     _regex_step(re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,}"), r"\1 [masked]"),
     lambda text: _mask_named_values(text, _FLAG_WORD, _FLAG_TAIL, quote_group=False),
     lambda text: _mask_named_values(text, _NAME_WORD, _NAME_TAIL, quote_group=True),
-    _regex_step(re.compile(rf"(?i)\b(password|passwd|pwd)([\"']?)\s*[=:]\s*{_DONE}{_VALUE}"), r"\1\2=[masked]"),
+    _regex_step(re.compile(rf"(?i)\b(pwd)([\"']?)\s*(?:=|:(?!:))\s*{_DONE}{_VALUE}"), r"\1\2=[masked]"),
     _regex_step(
         re.compile(
             r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})\b"
         ),
         "[masked-token]",
     ),
-    _regex_step(re.compile(r"\beyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}"), "[masked-jwt]"),
+    _regex_step(re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}"), "[masked-jwt]"),
     _regex_step(re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "[masked-bot-token]"),
 )
 

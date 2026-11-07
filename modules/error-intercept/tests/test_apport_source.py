@@ -173,6 +173,8 @@ class ClaimBeforeInspectTest(IngestCase):
         self.assertTrue(path.exists())
         self.assertIn("claim-failed", self.audit_decisions())
         self.assertTrue(any("claim" in line for line in outcome.lines))
+        self.assertIn("could not be claimed", publish.events[0]["text"])
+        self.assertNotIn("root", publish.events[0]["text"])
         self.ingester(publish).run()  # the next trigger does not repeat the event for the same report
         self.assertEqual(len(publish.events), 1)
 

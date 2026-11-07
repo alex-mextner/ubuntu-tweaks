@@ -198,6 +198,7 @@ class SanitizeTest(Case):
             'password="',
             "cookie ",
             "eyJ-",
+            "x-eyJ-",
         )
         for word in words:
             for text in (word * (16_384 // len(word)), word * 4000 + "=", ("x" + word) * 3000):
@@ -243,6 +244,14 @@ class ClassifyTest(Case):
             keys.add(self.classified(top=f" {frame} (this=0x1) at x.cc:3\n").key)
         self.assertEqual(len(keys), 2)
         self.assertIn("PasswordFormManager::Save", "".join(keys))
+
+    def test_long_frames_that_differ_only_at_the_end_keep_distinct_keys(self):
+        head = "ns::" * 60
+        keys = {self.classified(top=f" {head}h{tail} (this=0x1) at x.cc:3\n").key for tail in ("aaaa", "bbbb")}
+        self.assertEqual(len(keys), 2)
+
+    def test_a_password_scope_is_not_an_assignment(self):
+        self.assertIn("Password::verify", self.classified(top=" KWallet::Password::verify (a=1) at x.cc:3\n").key)
 
     def test_every_nested_flag_counts(self):
         for flag in ("--headless", "--virtual-monitor 800x600", "--nested"):

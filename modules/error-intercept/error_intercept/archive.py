@@ -116,6 +116,12 @@ def _free_name(directory: Path, name: str) -> Path:
 
 def release(claimed: Path, source: Path) -> Path:
     """Undo ``claim``; returns where the report is now (``source``, or an ``.rN`` name when a new report took it)."""
+    try:
+        if os.path.samestat(os.lstat(claimed), os.lstat(source)):  # a release that died between link and unlink
+            claimed.unlink()
+            return source
+    except FileNotFoundError:
+        pass
     # link, never rename: rename replaces a report apport created under the free name a moment ago
     while True:
         target = _free_name(source.parent, source.name)
