@@ -48,7 +48,7 @@ def load_script():
     return module
 
 
-LIST = ("env", "LC_ALL=C", "snap", "list", "firefox")
+LIST = ("env", "LC_ALL=C", "LC_MESSAGES=C", "LANG=C", "snap", "list", "firefox")
 INSTALLED = CommandResult(0, "Name Version Rev\nfirefox 1 1\n", "")
 RETENTION = ("snap", "get", "system", "snapshots.automatic.retention")
 UNSET = CommandResult(1, "", 'error: snap "core" has no "snapshots.automatic.retention" configuration option\n')

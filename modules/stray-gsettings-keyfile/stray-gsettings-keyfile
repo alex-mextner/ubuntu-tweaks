@@ -1,0 +1,182 @@
+#!/usr/bin/python3 -B
+"""stray-gsettings-keyfile module: ~/.config/glib-2.0/settings/keyfile does not exist.
+
+    stray-gsettings-keyfile check     exit 0 satisfied (file absent), 3 unsatisfied (read-only)
+    stray-gsettings-keyfile status    the same fact, one line (read-only)
+    stray-gsettings-keyfile plan      what `install` is going to do (read-only)
+    stray-gsettings-keyfile install   back the file up, remove it, remove the settings directory when it is empty
+
+That file is the store of GLib's GKeyfile settings backend. Only processes that run with it (Homebrew's `gsettings`,
+which has no dconf backend) read and write it; the desktop session uses dconf and never sees it, so a key set through
+that `gsettings` changes nothing real. The backup is `<XDG_STATE_HOME or ~/.local/state>/ubuntu-tweaks/backups/
+glib-keyfile-<UTC>.keyfile` (mode 0600). Paths follow $XDG_CONFIG_HOME / $XDG_STATE_HOME / $HOME (tests set them).
+Spec: docs/specs/stray-gsettings-keyfile.md.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import sys
+import tempfile
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    invoking_account,
+    main,
+    module_config,
+    state_dir,
+)
+
+
+class StrayKeyfile(Module):
+    name = "stray-gsettings-keyfile"
+
+    def __init__(self, config_home: Path, backups: Path, now: datetime) -> None:
+        self.keyfile = config_home / "glib-2.0/settings/keyfile"
+        self.backups = backups
+        self.now = now
+
+    def leftovers(self) -> list[Path]:
+        """Staging directories of an interrupted run that still hold the removed file (the only copy of it)."""
+        pattern = f"{self.keyfile.name}.removing-*"
+        return sorted(d for d in self.keyfile.parent.glob(pattern) if (d / self.keyfile.name).is_symlink() or (d / self.keyfile.name).exists())
+
+    def present(self) -> bool:
+        return self.keyfile.is_symlink() or self.keyfile.exists()
+
+    def backup_path(self) -> Path:
+        return self.backups / f"glib-keyfile-{self.now:%Y%m%dT%H%M%SZ}.keyfile"
+
+    def findings(self) -> list[Finding]:
+        found = [Finding(not self.present(), f"{self.keyfile} is absent")]
+        found += [Finding(False, f"{directory} holds a file removed by an interrupted run") for directory in self.leftovers()]
+        return found
+
+    def plan(self) -> list[str]:
+        if not self.present():
+            return []
+        return [
+            f"cp {self.keyfile} {self.backup_path()}   # mode 0600",
+            f"rm {self.keyfile}",
+            f"rmdir {self.keyfile.parent}   # only when empty",
+        ]
+
+    def apply(self) -> None:
+        for directory in self.leftovers():
+            self.finish(directory / self.keyfile.name, directory)
+        if not self.present():
+            return
+        mode = self.keyfile.lstat().st_mode
+        if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+            # a directory or a FIFO is not what the GKeyfile backend writes: moving it would hide it, reading a FIFO blocks
+            raise ModuleError(f"{self.keyfile} is neither a regular file nor a symlink: left alone, look at it by hand")
+        # Move it into a fresh private directory (an atomic rename that can overwrite nothing): a writer that recreates
+        # `keyfile` afterwards makes a new file that the next run handles instead of one deleted unseen.
+        staging = Path(tempfile.mkdtemp(dir=self.keyfile.parent, prefix=f"{self.keyfile.name}.removing-"))
+        aside = staging / self.keyfile.name
+        try:
+            os.rename(self.keyfile, aside)
+        except FileNotFoundError:
+            staging.rmdir()
+            return
+        except OSError as error:
+            staging.rmdir()
+            raise ModuleError(f"cannot move {self.keyfile} aside: {error.strerror or error}") from error
+        self.finish(aside, staging)
+        try:
+            self.keyfile.parent.rmdir()
+        except OSError:
+            pass  # not empty (another file lives there), or already gone: nothing to tidy
+
+    def finish(self, aside: Path, staging: Path) -> None:
+        """Back the moved file up, then delete it; on any failure or interruption put it back (or say where it is)."""
+        try:
+            self.write_backup(self.content(aside))
+        except (OSError, ModuleError) as error:
+            raise ModuleError(
+                f"cannot back up {self.keyfile}: {getattr(error, 'strerror', None) or error}; {self.restore(aside, staging)}"
+            ) from error
+        except BaseException:
+            self.restore(aside, staging)  # Ctrl-C, SIGTERM handlers: never leave the only copy behind
+            raise
+        aside.unlink()
+        staging.rmdir()
+
+    def content(self, aside: Path) -> bytes:
+        """The bytes of the object that was actually moved aside, so what is backed up is what is removed. A symlink is
+        followed from the directory it came from (a relative target resolves there); a dangling one has no content, so
+        the backup records where it pointed; a target that is not a regular file is refused without blocking on it."""
+        if not aside.is_symlink():
+            return self.read_regular(aside)
+        target = os.readlink(aside)
+        resolved = Path(os.path.join(self.keyfile.parent, target))
+        try:
+            return self.read_regular(resolved)
+        except FileNotFoundError:
+            return f"# dangling symlink to {target}\n".encode()
+
+    @staticmethod
+    def read_regular(path: Path) -> bytes:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ModuleError(f"{path} is not a regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                return stream.read()
+        finally:
+            os.close(descriptor)
+
+    def restore(self, aside: Path, staging: Path) -> str:
+        """Put the moved file back after a failed backup; says where it is when that cannot be done."""
+        try:
+            os.link(aside, self.keyfile, follow_symlinks=False)
+            aside.unlink()
+            staging.rmdir()
+        except OSError as error:
+            return f"the original stays at {aside} ({error.strerror or error})"
+        return "the original was put back"
+
+    def write_backup(self, data: bytes) -> None:
+        """Create the backup with mode 0600, never replacing one: a second run in the same second gets `-1`, `-2`..."""
+        self.backups.mkdir(parents=True, exist_ok=True)
+        base = self.backup_path()
+        for attempt in range(1000):
+            path = base if attempt == 0 else base.with_name(f"{base.stem}-{attempt}{base.suffix}")
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return
+        raise ModuleError(f"no free backup name under {self.backups}")
+
+
+def build(env: Mapping[str, str]) -> StrayKeyfile:
+    options = module_config(env)
+    unknown = sorted(set(options) - {"enabled"})
+    if unknown:
+        raise ModuleError(f"[modules.stray-gsettings-keyfile] unknown option(s): {', '.join(unknown)}")
+    home = Path(env["HOME"]) if env.get("HOME") else invoking_account(env).home
+    config_home = Path(env["XDG_CONFIG_HOME"]) if env.get("XDG_CONFIG_HOME") else home / ".config"
+    return StrayKeyfile(config_home, state_dir(home, env) / "backups", datetime.now(UTC))
+
+
+if __name__ == "__main__":
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"stray-gsettings-keyfile: {error}\n")
+        sys.exit(1)
+    sys.exit(main(module, sys.argv[1:], out=sys.stdout, err=sys.stderr))

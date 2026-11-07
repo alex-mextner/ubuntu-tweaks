@@ -770,6 +770,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
 | a source file the module will not settle | `apt-sources` | a hand-written file declares a declared repository together with other ones, or a file the module wrote belongs to a source dropped from the profile; the module never edits the first and never deletes the second on its own | remove the duplicate lines from the file the output names, or declare the dropped source again (`enabled = false` removes it), then run `apply` again |
 | docker, the nvidia toolkit or a valid daemon.json missing | `docker-daemon` | the module configures docker, it does not install it, and never overwrites a daemon.json that is not a JSON object | add `docker.io` (or docker-ce via the `apt-sources` docker repository) and, for `nvidia_runtime = true`, `nvidia-container-toolkit` to `packages.toml`; fix a broken `/etc/docker/daemon.json` by hand; then run `apply` again |
+| The Firefox snap while root is unavailable | `firefox-snap-absent` | `snap remove firefox` needs root; the rootless run only removes the stale launcher | `ubuntu-tweak apply --only firefox-snap-absent --commit (as your normal user: it asks for sudo itself, so your profile is found)` (no `--purge`, a snapshot is kept even with automatic snapshots off; `snap saved` lists it) (*`docs/specs/firefox-snap-absent.md`*) |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
 
 ### Finish (`finish`): the human-only steps in one command
@@ -945,6 +946,9 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `earlyoom` | `system` (root), rootless fallback | the package, `/etc/default/earlyoom` from typed `[modules.earlyoom]` options, the service; spec: `docs/specs/earlyoom.md` |
 | `apt-sources` | `system` (root), `enabled = false` | the profile's extra apt repositories as deb822 files with fingerprint-pinned keys (*`docs/specs/apt-sources.md`*) |
 | `docker-daemon` | `system` (root), `enabled = false` | docker's daemon.json merged from profile options plus a memory-capped container slice (*`docs/specs/docker-daemon.md`*) |
+| `privacy-crash-reporting` | `system` (root), `enabled = false` | whoopsie.path / whoopsie.service masked and stopped, optionally apport `enabled=0`; opt-in, undecided by the owner (*`docs/specs/privacy-crash-reporting.md`*) |
+| `firefox-snap-absent` | `system` (root), rootless fallback, `enabled = false` | the Firefox snap removed (snapshot kept) and its stale user launcher gone; never the deb Firefox or `mimeapps.list` (*`docs/specs/firefox-snap-absent.md`*) |
+| `stray-gsettings-keyfile` | `system`, user, `enabled = false` | `~/.config/glib-2.0/settings/keyfile` (Homebrew gsettings' GKeyfile store) backed up to the state dir, then removed (*`docs/specs/stray-gsettings-keyfile.md`*) |
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
@@ -1006,11 +1010,12 @@ config (exit 2) while planning (module presets too), never a failure in the midd
 (`SettingsBackend.in_range`). Relocatable schemas (custom keybindings, tiling-assistant paths) go
 through `Gio.Settings.new_with_path`.
 
-`~/.config/glib-2.0/settings/keyfile` on a machine is a GSettings keyfile override that
-changes *effective* values (power, idle-delay, enabled-extensions, favorite-apps). The engine
-reads effective values through Gio, never freezes overrides into dconf (see *Plan and
-actions* on `enabled-extensions`), and `capture` reports keys whose effective value comes
-from the override rather than from the dconf user value. That file is itself a capturable
+`~/.config/glib-2.0/settings/keyfile` is the store of GLib's keyfile settings backend. The session's dconf
+backend never reads it; only keyfile-backend processes honour it, such as Homebrew's `gsettings`, so on a
+normal machine it holds test artifacts of scripts and agents, not settings (the `stray-gsettings-keyfile`
+module retires it). The engine reads effective values through Gio (dconf backend), never freezes an
+override into dconf (see *Plan and actions* on `enabled-extensions`), and `capture` reports keys whose
+effective value comes from such a file rather than from the dconf user value. The file is itself a capturable
 `files/` entry.
 
 Details of the planner (`ubuntu_tweaks/planners/settings.py`, helpers in `setkey.py`):

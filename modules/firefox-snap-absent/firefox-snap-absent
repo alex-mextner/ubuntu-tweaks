@@ -6,7 +6,8 @@
     firefox-snap-absent plan      what `install` is going to do (read-only)
     firefox-snap-absent install   as root: `snap remove firefox`; removes ~/.local/share/applications/firefox_firefox.desktop
 
-`snap list firefox` failing (or no `snap` at all) is the satisfied state. The removal keeps the automatic snapshot
+The satisfied state is snap answering `no matching snaps installed` to `snap list firefox`, or no `snap` at all (exit 127);
+any other failure is an error, never "absent". The removal keeps the automatic snapshot
 (no `--purge`): the profile comes back with `snap saved` and `snap restore <set-id>`. Only the snap named `firefox`
 and the one launcher `firefox_firefox.desktop` of the desktop user are touched; the Mozilla deb
 (/usr/bin/firefox, /usr/lib/firefox), its launcher and ~/.config/mimeapps.list are never read or written.
@@ -51,7 +52,7 @@ class FirefoxSnapAbsent(Module):
     def snap_installed(self) -> bool:
         """True when `snap list firefox` lists it. Absent is only what snap says (`no matching snaps installed`) or no
         `snap` at all; an unreachable snapd, a timeout or a refused call is an error, never "not installed"."""
-        result = self.process.query(["env", "LC_ALL=C", "snap", "list", "firefox"])  # fixed locale: the absence message is matched in English
+        result = self.process.query(["env", "LC_ALL=C", "LC_MESSAGES=C", "LANG=C", "snap", "list", "firefox"])  # fixed locale: the absence message is matched in English
         if result.returncode == 0:
             return True
         if result.returncode == 127 or "no matching snaps installed" in result.stderr:
@@ -80,8 +81,7 @@ class FirefoxSnapAbsent(Module):
 
     def apply(self) -> None:
         installed = self.snap_installed()  # asked first: an error must leave the launcher alone too
-        if self.launcher_present():
-            self.launcher.unlink()
+        self.launcher.unlink(missing_ok=True)
         if not installed:
             return
         if not self.is_root:
