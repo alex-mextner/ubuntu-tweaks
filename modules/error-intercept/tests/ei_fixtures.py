@@ -23,7 +23,7 @@ from error_intercept.publisher import PublishError  # noqa: E402
 
 FAKE_TOKEN = "ghp_" + "Zk3QxP9vLm2NwR7tYb5CdF8gHj1sAe4UoI6V"
 BEARER = "Bearer " + "abcDEF0123456789abcDEF0123456789"
-USER_HOME = "/home/ultra"
+USER_HOME = "/home/alice"
 MONITORS_LINE = f"monitors.xml: Error: [Errno 40] Too many levels of symbolic links: '{USER_HOME}/.config/monitors.xml'"
 NESTED_CMDLINE = "gnome-shell --headless --no-x11 --wayland-display=vtest-wl --virtual-monitor 1600x1000"
 REAL_CMDLINE = "/usr/bin/gnome-shell"

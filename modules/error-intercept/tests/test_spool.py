@@ -23,7 +23,7 @@ RECORD = {
     "action": "intercept",
     "wm_class": "Apport-gtk",
     "app_id": "apport-gtk",
-    "title": "Sorry, Ubuntu 26.04 has experienced an internal error. /home/ultra/x",
+    "title": "Sorry, Ubuntu 26.04 has experienced an internal error. /home/alice/x",
     "pid": 4321,
 }
 
@@ -43,7 +43,7 @@ class SpoolTest(Case):
         self.assertEqual((event["kind"], event["severity"], event["source"]), ("window", "warning", "Apport-gtk"))
         self.assertEqual(event["key"], "apport-crash|Apport-gtk")
         self.assertIn("hidden", event["text"])
-        self.assertNotIn("/home/ultra", json.dumps(event))
+        self.assertNotIn("/home/alice", json.dumps(event))
         self.assertEqual(event["data"]["pid"], 4321)
         self.assertEqual(list(self.paths.spool.iterdir()), [])
         (archived,) = self.paths.spool_archive.glob("*.gz")

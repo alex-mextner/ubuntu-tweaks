@@ -3,6 +3,8 @@ description = "Crash reports and error windows go to the agent subscribed to err
 enabled = false
 order = 96   # after autoheal (95); user level, needs agent-tools (agent-sub) from the machine
 
+manual = "install agent-tools (it provides agent-sub) or set [modules.error-intercept] agent_tools_dir to its directory, then run apply again"
+
 [source]
 kind = "system"
 root = false
