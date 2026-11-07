@@ -159,6 +159,25 @@ class ArchiveTest(Case):
         self.assertEqual(self.reports(), [path.name])
         self.assertEqual(os.listdir(self.claims()), [])
 
+    def test_an_interrupted_release_is_completed_whatever_names_were_involved(self):
+        path = self.report()
+        claimed = claim(path, UID)
+        os.link(claimed, self.crash / "_usr_bin_app.1000.r1.crash")  # linked back as .r1: a new report took the name
+        path.write_text("ProblemType: Crash\nnew\n")
+        back = release(claimed, path)
+        self.assertEqual(back.name, "_usr_bin_app.1000.r1.crash")
+        self.assertEqual(sorted(self.reports()), ["_usr_bin_app.1000.crash", "_usr_bin_app.1000.r1.crash"])
+        self.assertEqual(os.listdir(self.claims()), [])
+
+    def test_an_extra_hard_link_under_a_foreign_name_does_not_stand_in_for_the_report(self):
+        path = self.report()
+        claimed = claim(path, UID)
+        os.link(claimed, self.crash / "_usr_bin_app.1000.crash.bak")  # not a name release could have given it
+        back = release(claimed, path)
+        self.assertEqual(back, path)
+        self.assertTrue(path.exists())
+        self.assertEqual(os.listdir(self.claims()), [])
+
     def test_a_leftover_claim_does_not_block_the_next_archive_of_the_same_name(self):
         path = self.report()
         (claim_dir(self.crash, UID) / path.name).write_text("leftover")

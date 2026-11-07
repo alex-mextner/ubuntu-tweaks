@@ -30,7 +30,7 @@ Public API:
   private directory such as the spool, or a file already claimed);
   ``free_archive_path(archive_dir, source, mtime)`` (the name the next archive will use: bounded to 240 bytes);
 - ``recover_claims(directory, uid) -> list[Path]``: the restored reports;
-- ``remove_upload_stamps(report) -> list[Path]``: delete ``<report>.upload`` and ``.uploaded`` beside a ``.crash``;
+- ``remove_upload_stamps(report) -> (removed, failed)``: delete ``<report>.upload`` and ``.uploaded`` beside a ``.crash``;
 - ``list_archive(archive_dir) -> list[Path]``, newest first.
 """
 
@@ -39,6 +39,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
+import re
 import shutil
 import stat
 import time
@@ -48,6 +49,7 @@ from error_intercept.crash_report import open_noatime
 from error_intercept.durable import fsync_dir, short_temporary
 
 STAMP_SUFFIXES = (".upload", ".uploaded")
+_SERIAL_NAME = re.compile(r"\A[^.].*\.r\d+\.crash\Z", re.S)  # what ``_free_name`` gives a report beside a newer one
 COMPRESS_LEVEL = 3  # a crash report is mostly an already-compressed core dump: speed over ratio
 CLAIM_PREFIX = ".ei-claims-"  # + the uid: one claim directory per user
 ARCHIVE_NAME_BYTES = 240  # an archive file name stays under the file system limit, leaving room for a serial
@@ -114,14 +116,25 @@ def _free_name(directory: Path, name: str) -> Path:
     return path
 
 
+def _other_link(claimed: Path, source: Path) -> Path | None:
+    """The entry beside ``source`` that is the same file as ``claimed`` and has a name ``release`` could have given it."""
+    info = os.lstat(claimed)
+    with os.scandir(source.parent) as entries:
+        for entry in entries:
+            if entry.name != source.name and not _SERIAL_NAME.search(entry.name):
+                continue
+            if entry.inode() == info.st_ino and entry.stat(follow_symlinks=False).st_dev == info.st_dev:
+                return Path(entry.path)
+    return None
+
+
 def release(claimed: Path, source: Path) -> Path:
     """Undo ``claim``; returns where the report is now (``source``, or an ``.rN`` name when a new report took it)."""
-    try:
-        if os.path.samestat(os.lstat(claimed), os.lstat(source)):  # a release that died between link and unlink
+    if os.lstat(claimed).st_nlink > 1:  # a release that died between link and unlink: the report is already back
+        back = _other_link(claimed, source)
+        if back is not None:
             claimed.unlink()
-            return source
-    except FileNotFoundError:
-        pass
+            return back
     # link, never rename: rename replaces a report apport created under the free name a moment ago
     while True:
         target = _free_name(source.parent, source.name)
@@ -190,8 +203,10 @@ def recover_claims(directory: Path, uid: int) -> list[Path]:
     return restored
 
 
-def remove_upload_stamps(report: Path) -> list[Path]:
+def remove_upload_stamps(report: Path) -> tuple[list[Path], list[tuple[Path, OSError]]]:
+    """Delete the stamps beside ``report``; returns (removed, failed): whoopsie owns ``.uploaded`` in a sticky directory."""
     removed: list[Path] = []
+    failed: list[tuple[Path, OSError]] = []
     stem = report.with_suffix("")
     for suffix in STAMP_SUFFIXES:
         stamp = stem.with_name(stem.name + suffix)
@@ -199,8 +214,11 @@ def remove_upload_stamps(report: Path) -> list[Path]:
             stamp.unlink()
         except FileNotFoundError:
             continue
+        except OSError as error:
+            failed.append((stamp, error))
+            continue
         removed.append(stamp)
-    return removed
+    return removed, failed
 
 
 def list_archive(archive_dir: Path) -> list[Path]:

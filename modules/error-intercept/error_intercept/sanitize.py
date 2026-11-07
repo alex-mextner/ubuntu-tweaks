@@ -79,13 +79,51 @@ _DONE = r"(?!\[masked)"  # a value an earlier pattern masked is not masked again
 _SECRET_WORDS = r"(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential)"
 _BLOB = re.compile(r"[A-Za-z0-9+/]{48,}={0,2}")  # key material or an opaque token on a journal line
 _SECRET_WORD = re.compile(rf"(?i){_SECRET_WORDS}")
+_JWT_RUN = re.compile(r"[A-Za-z0-9_.-]{29,}")  # the shortest token: eyJ + 8, dot, 8, dot, 8
+_JWT_PART = re.compile(r"[A-Za-z0-9_-]{8,}\Z")
+
+
+def _mask_jwts_in_run(found: re.Match[str]) -> str:
+    """Mask ``eyJ<header>.<payload>.<signature>`` inside one run of token characters, in linear time.
+
+    The header may be any length (``x5c``, ``jwk``) and may follow a hyphen, so a pattern that restarts at every
+    ``-eyJ`` backtracks quadratically on ``eyJ-eyJ-...``. Whether a token matches depends only on the dots, not on where
+    inside the header it starts, so the first start of each header decides."""
+    parts = found.group().split(".")
+    out: list[str] = []
+    index = 0
+    while index < len(parts):
+        header = parts[index]
+        start = _jwt_start(header)
+        rest = parts[index + 1 : index + 3]
+        if start is not None and len(rest) == 2 and all(_JWT_PART.match(p) for p in rest):
+            out.append(header[:start] + "[masked-jwt]")
+            index += 3
+        else:
+            out.append(header)
+            index += 1
+    return ".".join(out)
+
+
+def _jwt_start(header: str) -> int | None:
+    """Where a token may begin in a header part: ``eyJ`` plus 8 more characters, at the start or after a hyphen."""
+    position = header.find("eyJ")
+    while position != -1:
+        if len(header) - position >= 11 and (position == 0 or header[position - 1] == "-"):
+            return position
+        position = header.find("eyJ", position + 1)
+    return None
+
+
 # The two secret-name patterns are scanned word by word, never as one regex with an open-ended prefix: a prefix such
 # as ``[a-z0-9_]*`` in front of the secret word backtracks quadratically on 16 KB of ``passwordpassword...`` and a
 # crash report is untrusted text.
 _FLAG_WORD = re.compile(r"(?i)--?[a-z0-9_-]+")
 _FLAG_TAIL = re.compile(rf"(?i)(?:=|\s+){_DONE}{_VALUE}")
 _NAME_WORD = re.compile(r"(?i)\b[a-z0-9_]+(?:-[a-z0-9_]+)*")  # hyphens inside a name: ``x-api-key: ...``
-_NAME_TAIL = re.compile(rf"(?i)([\"']?)\s*(?:=|:(?!:))\s*{_DONE}{_VALUE}")  # ``Token::next`` is a C++ scope, not an assignment
+_NAME_TAIL = re.compile(
+    rf"(?i)([\"']?)\s*(?:=|:(?!:))\s*{_DONE}{_VALUE}"
+)  # ``Token::next`` is a C++ scope, not an assignment
 
 
 def _mask_named_values(text: str, words: re.Pattern[str], tail: re.Pattern[str], quote_group: bool) -> str:
@@ -134,7 +172,7 @@ _SECRET_STEPS: tuple[Callable[[str], str], ...] = (
         ),
         "[masked-token]",
     ),
-    _regex_step(re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}"), "[masked-jwt]"),
+    lambda text: _JWT_RUN.sub(_mask_jwts_in_run, text),
     _regex_step(re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "[masked-bot-token]"),
 )
 
@@ -170,8 +208,12 @@ def mask(text: str, home: Path | None = None) -> str:
     return _HOME.sub("~", text)
 
 
+def one_line(text: str) -> str:
+    return " ".join(mask(text).split())
+
+
 def clean_line(text: str, limit: int) -> str:
-    return clip(" ".join(mask(text).split()), limit)
+    return clip(one_line(text), limit)
 
 
 def _without_monitors_loop(text: str) -> tuple[str, int]:
