@@ -1,0 +1,16 @@
+description = "Cursor lag under load: GNOME Shell never swaps, session.slice wins CPU contention (systemd user drop-ins, applied live without restarting the shell)"
+enabled = true
+order = 87   # after thumbnailers (86): user level, no root
+manual = "run `systemctl --user daemon-reload` from the desktop session; a value that still differs after it is overridden by another drop-in or a runtime property: `systemctl --user cat session.slice org.gnome.Shell@ubuntu.service` shows which"
+
+[source]
+kind = "system"
+root = false
+install = "session-priority install"
+check = "session-priority check"
+preview = "session-priority plan"
+
+[[coverage]]
+match = ["unit:org.gnome.Shell@.service", "unit:session.slice"]
+class = "tracked"
+reason = "written by modules/session-priority"
