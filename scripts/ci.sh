@@ -64,4 +64,6 @@ if /usr/bin/python3 -c 'import gi, sys; sys.exit(sys.version_info < (3, 12))' 2>
 fi
 echo "== unittest tests ($tweak_python)"
 "$tweak_python" -B -m unittest discover -s tests -t . || status=1
+echo "== backups-disk stub tests"
+scripts/backups-disk/test-move-to-backups.sh || status=1
 exit $status

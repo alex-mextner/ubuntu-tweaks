@@ -6,7 +6,7 @@
 # `move-to-backups.sh move` binds the whole xp tree and merges that path from the backups disk.
 set -euo pipefail
 
-# shellcheck source=/home/ultra/move-to-backups.sh
+# shellcheck disable=SC1091  # the deployed copy of move-to-backups.sh (README: "Where the live copies are"); CI has no such file
 source /home/ultra/move-to-backups.sh   # helpers only (busy, users_of, print_groups); main is guarded; die/log come from it
 
 M=$MNT

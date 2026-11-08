@@ -34,7 +34,8 @@
 #                трогаю», their item is skipped): terminal emulators (ghostty, gnome-terminal, kitty, alacritty,
 #                konsole, tmux server), this script and every ancestor of it (PPid chain of $$ and SUDO_PID),
 #                gnome-shell, Xorg/Xwayland, systemd, session units. Holders that never block: a process that only
-#                mmaps (keeps the old inode, the bind path serves identical data), and — for item .cache only — a
+#                mmaps read-only/privately (keeps the old inode, the bind path serves identical data; a WRITABLE
+#                shared mapping "rw-s" is a writer and blocks like an open fd), and — for item .cache only — a
 #                GUI/session process (gnome-shell, Xwayland, ghostty, chrome, firefox...) whose only holds are fds/
 #                mmaps (any file under ~/.cache: event-sound-cache.tdb.*, nvidia/GLCache...; losing a cache write is
 #                harmless). A GUI process with a cwd there still blocks and is never signalled. A browser with a real
@@ -68,7 +69,7 @@
 #      bind mounts (a bind of <backups>/home-ultra/<same relative path>) sits anywhere below it
 #   2. busy check (as root, /proc scan + docker): a process with cwd, exe, an open fd or a memory mapping inside the
 #      path or any descendant (nested bind mounts included), or a running docker container with a bind mount source
-#      inside it (or equal to it), blocks the item. A process that only MENTIONS the path in its cmdline holds nothing
+#      inside it, equal to it, or an ANCESTOR of it (e.g. all of ~), blocks the item. A process that only MENTIONS the path in its cmdline holds nothing
 #      and is ignored (logged as info). If the item is a git repo or a git worktree, every other worktree (and the
 #      main dir) of that repo is scanned as well, and the item is skipped when any of them is busy (a worktree's
 #      metadata lives in the main repo, so the set is moved together or not at all). A busy item is explained one line
@@ -97,7 +98,7 @@
 #
 # Re-runnable: if rsync fails or the run is interrupted the item stays partly moved (rest still in place,
 # nothing is lost); running `move` again continues from where it stopped, and finished items are skipped.
-# Per-item failures never abort the other items.
+# Per-item failures never abort the other items; `move` exits non-zero at the end when any item failed.
 #
 # SINGLE-COPY RISK: this is a MOVE, not a copy. After an item is moved the only copy of its data is on the
 # USB disk. If the disk dies or is unplugged the data is gone/unavailable (bind mounts use nofail, so the
@@ -118,7 +119,10 @@ OWNER="ultra:ultra"
 FSTAB="/etc/fstab"
 MOUNT_LINE="UUID=$UUID $MNT ext4 defaults,nofail,x-mount.mkdir,x-systemd.device-timeout=10s 0 2"
 BIND_OPTS="none bind,nofail,x-systemd.requires-mounts-for=$MNT 0 0"
-LOG="$HOME_DIR/move-to-backups-$(date +%Y%m%d-%H%M%S).log"
+# The log lives in a root-owned directory, never in the owner-writable home: root appending to a predictable
+# path there would follow a symlink the owner planted. init_log creates the file with mktemp (O_EXCL, never a link).
+LOG_DIR=${LOG_DIR:-}   # empty = the default of init_log
+LOG=""
 
 # shellcheck disable=SC2034  # table is consumed by enabled_items below
 ITEMS=(
@@ -160,6 +164,45 @@ warn() { printf '%s WARN %s\n' "$(date +%T)" "$*"; }
 die()  { printf '%s ERROR %s\n' "$(date +%T)" "$*"; exit 1; }
 
 need_root() { [[ $EUID -eq 0 ]] || die "run as: sudo $0 <phase>"; }
+# True (0) when every component of the absolute path $1 can be trusted not to be swapped by someone else: no symlink
+# among them, each owned by the running user or root and not writable by group/others (a sticky root-owned directory
+# such as /tmp is fine: only the owner of an entry can rename it). Without this a writable ANCESTOR (say /home/ultra
+# kept by `sudo -E LOG_DIR=/home/ultra/logs`) lets the owner rename a root-owned log dir, put a symlink in its place
+# and have root's chown/tee follow it.
+log_path_trusted() {
+  local p=${1%/} uid mode
+  [[ $p == /* && "$(readlink -f -- "$p")" == "$p" ]] || { warn "log path $p is not absolute, or contains a symlink — refusing"; return 1; }
+  while :; do
+    uid=$(stat -c %u -- "${p:-/}"); mode=$(stat -c %a -- "${p:-/}")
+    [[ $uid == "$EUID" || $uid == 0 ]] || { warn "${p:-/} is owned by uid $uid — not a trusted place for the log"; return 1; }
+    if (( 8#$mode & 8#022 )); then
+      (( 8#$mode & 8#1000 )) && [[ $uid == 0 ]] || { warn "${p:-/} is writable by group/others — not a trusted place for the log"; return 1; }
+    fi
+    [[ -n $p ]] || return 0
+    p=${p%/*}
+  done
+}
+
+# Creates a fresh private log file and sets LOG. Directory: $LOG_DIR, else /var/log/move-to-backups for root and
+# ~/.local/state/move-to-backups for an unprivileged run (`cleanup`). It must be a real directory owned by the running
+# user. As root, and for any explicit LOG_DIR, the whole path must also pass log_path_trusted; the unprivileged default
+# is exempt (the user's own ~/.local/state is group-writable under the usual umask, and nobody gains by redirecting
+# the user's own writes). The file name is unpredictable and made with O_EXCL (mktemp): a pre-planted link is never opened.
+init_log() {
+  local dir=${LOG_DIR:-} mode=0700
+  if [[ -z $dir ]]; then
+    if (( EUID == 0 )); then dir=/var/log/move-to-backups mode=0755; else dir=$HOME_DIR/.local/state/move-to-backups; fi
+  fi
+  dir=${dir%/}
+  # -p creates missing parents with default modes; only the leaf gets $mode
+  # shellcheck disable=SC2174
+  [[ -e $dir || -L $dir ]] || mkdir -p -m "$mode" -- "$dir" || { warn "cannot create log dir $dir"; return 1; }
+  [[ -d $dir ]] || { warn "log dir $dir is not a directory"; return 1; }
+  [[ "$(stat -c %u -- "$dir")" == "$EUID" ]] || { warn "log dir $dir is not owned by the running user — refusing"; return 1; }
+  if (( EUID == 0 )) || [[ -n ${LOG_DIR:-} ]]; then log_path_trusted "$dir" || return 1; fi
+  LOG=$(mktemp -- "$dir/move-to-backups-$(date +%Y%m%d-%H%M%S).XXXXXX.log") || { warn "cannot create a log file in $dir"; return 1; }
+  chown -- "$OWNER" "$LOG" 2>/dev/null || true
+}
 
 # Prints "tier rel mb" for every enabled item.
 enabled_items() {
@@ -294,6 +337,10 @@ for pid in filter(str.isdigit, os.listdir('/proc')):
                     p = parts[5].rstrip('\n').removesuffix(' (deleted)')
                     for i in match(p):
                         add(i, 'mmap', p)
+                        # MAP_SHARED + PROT_WRITE ("rw-s"): the process writes into the file through memory, with
+                        # no fd to show for it. After the move those writes go to the old, unlinked inode and are lost.
+                        if parts[1][1:2] == 'w' and parts[1][3:4] == 's':
+                            add(i, 'mmapw', p)
     except OSError:
         pass
     try:
@@ -322,13 +369,15 @@ PY
 
 # Running docker containers that bind-mount a path inside one of the given trees (or exactly the tree): invisible to
 # the /proc scan, because the container's processes hold the files through their own mount namespace. Rows in the
-# users_of format with the pseudo pid "docker:NAME", comm docker, kind mount. A source that is a PARENT of the tree
-# (e.g. all of $HOME) is not reported: it would flag every container that merely sees the tree and no mount source
-# below the tree is actually in the way. Needs root or docker group; a docker that cannot be queried (daemon down)
+# users_of format with the pseudo pid "docker:NAME", comm docker, kind mount. A source EQUAL to the tree, BELOW it, or
+# an ANCESTOR of it (e.g. all of $HOME, or /) is reported: a container that mounts an ancestor sees the tree through
+# its own mount namespace, and once the tree is rsynced away and bind-mounted the container keeps a view of the old
+# empty directory (and writes into it) until it is restarted — so it must be stopped like any other holder. Needs root
+# or docker group; a docker that cannot be queried (daemon down)
 # means no running containers, so it is skipped. Mount sources with spaces are not supported
 # (inspect output is space separated).
 docker_users_of() {
-  local line name srcs s t
+  local line name srcs s sn t
   local -a ids=() sources=()
   command -v docker >/dev/null 2>&1 || return 0
   mapfile -t ids < <(docker ps -q 2>/dev/null || true)
@@ -341,7 +390,8 @@ docker_users_of() {
     for s in "${sources[@]}"; do
       for t in "$@"; do
         t=${t%/}
-        if [[ $s == "$t" || $s == "$t"/* ]]; then printf 'docker:%s\tdocker\tmount\t%s\t%s\n' "$name" "$t" "$s"; fi
+        sn=${s%/}   # "/" becomes "": every absolute tree is below it
+        if [[ $s == "$t" || $s == "$t"/* || $t == "$sn"/* ]]; then printf 'docker:%s\tdocker\tmount\t%s\t%s\n' "$name" "$t" "$s"; fi
       done
     done
   done < <(docker inspect -f '{{.Name}} {{range .Mounts}}{{.Source}} {{end}}' "${ids[@]}" 2>/dev/null || true)
@@ -430,13 +480,13 @@ never_kill_pid() {
 cache_holder_ignorable() {
   local path=$1 comm=$2 kinds=$3
   [[ $path == "$HOME_DIR/.cache" ]] || return 1
-  [[ $kinds =~ ^(fd|mmap)(,(fd|mmap))*$ ]] || return 1
+  [[ $kinds =~ ^(fd|mmap|mmapw)(,(fd|mmap|mmapw))*$ ]] || return 1
   [[ $comm =~ $GUI_COMM ]]
 }
 # Blocker groups (see group_blockers): key -> kind/unit/pane/name/pids/kinds/first real path/distinct path count.
 declare -a G_KEYS=()
 declare -A G_KIND=() G_UNIT=() G_PANE=() G_NAME=() G_PIDS=() G_KINDS=() G_PATH=() G_NPATH=() G_SEEN=()
-declare -A PANE_BY_PID=() UNIT_DESC=() BL_COMM=() BL_KINDS=() BL_TARGET=()
+declare -A PANE_BY_PID=() UNIT_DESC=() BL_COMM=() BL_KINDS=()
 TMUX_LOADED=0
 CTX_KIND=proc CTX_UNIT="" CTX_PANE="" CTX_ID=""
 
@@ -487,6 +537,32 @@ unit_description() {
 
 # ~-shortened path for messages.
 short_path() { if [[ $1 == "$HOME_DIR" || $1 == "$HOME_DIR"/* ]]; then printf '~%s' "${1#"$HOME_DIR"}"; else printf '%s' "$1"; fi; }
+# Replaces the value of anything that looks like a secret in the command line $1 by <redacted>, so tokens and
+# passwords never reach the log (stdout is tee'd into it) or the terminal: NAME=value / --name=value where the name
+# contains secret, token, password, passwd, pwd, passphrase, api/access/private key, credential, auth or cookie;
+# the word after a --long-option of such a name; the credential after Bearer/Basic; user:password@ in a URL.
+# Over-redacting (a harmless value) is accepted, leaking is not.
+redact_secrets() {
+  local kw='secret|token|passw(or)?d|pwd|passphrase|api[-_.]?key|access[-_.]?key|private[-_.]?key|credential|auth|cookie'
+  local name='[A-Za-z0-9_.-]*('"$kw"')[A-Za-z0-9_.-]*'
+  local sp='([[:space:]]|\\ )+'                  # a real space, or the escaped one printf %q writes
+  local word='([^[:space:]\\]|\\.)'              # one character of a word; \x is one escaped character
+  local first='([^-[:space:]\\]|\\.)'            # first character of a value (not the next option)
+  sed -E \
+    -e 's/('"$name"'=)'"$word"'+/\1<redacted>/Ig' \
+    -e 's/((^|[[:space:]])--'"$name$sp"')'"$first$word"'*/\1<redacted>/Ig' \
+    -e 's/((bearer|basic)(\\?[[:space:]])+)[A-Za-z0-9._~+\/=-]+/\1<redacted>/Ig' \
+    -e 's#(://[^/@[:space:]:]+:)[^/@[:space:]]+@#\1<redacted>@#g' <<<"$1"
+}
+
+# The line that starts a plain process again: `cd CWD && exec ARGV...`, every word quoted with printf %q. It is run by
+# BASH (`bash -c`, see restart_phase), the shell %q quotes for: no word can be split or interpreted as code.
+restart_inner() {
+  local cwd=$1 q
+  shift
+  printf -v q '%q ' "$@"
+  printf 'cd %q && exec %s' "$cwd" "${q% }"
+}
 
 # Prints one human-readable line (Russian, the owner's language) about a pid: what it is (service / terminal /
 # plain process) and how it uses the path. KINDS/TARGET (the real path, 5th column of users_of) come from users_of;
@@ -501,7 +577,7 @@ describe_pid() {
   if [[ ! -d /proc/$pid ]]; then printf 'pid %s: процесс уже завершился\n' "$pid"; return 0; fi
   comm=$(cat "/proc/$pid/comm" 2>/dev/null || echo '?')
   args=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-  args=$(tr -s ' ' <<<"$args"); args=${args% }; [[ -n $args ]] || args="[$comm]"
+  args=$(tr -s ' ' <<<"$args"); args=${args% }; args=$(redact_secrets "$args"); [[ -n $args ]] || args="[$comm]"
   (( ${#args} <= 110 )) || args="${args:0:107}..."
   pid_context "$pid"
   if [[ -z $kinds ]]; then
@@ -519,6 +595,7 @@ describe_pid() {
       exe)     use+="${use:+; }запущен из исполняемого файла в $t" ;;
       fd)      use+="${use:+; }держит открытый файл в $t" ;;
       mmap)    use+="${use:+; }отображает файл из $t в памяти" ;;
+      mmapw)   use+="${use:+; }пишет в файл из $t через общее отображение в памяти (MAP_SHARED, rw)" ;;
       cmdline) use+="${use:+; }путь $t указан в командной строке" ;;
       *)       use+="${use:+; }использует $t ($k)" ;;
     esac
@@ -641,9 +718,10 @@ stop_procs() {
 
 # Remembers cmdline and cwd BEFORE the signal: after SIGTERM /proc is gone, and a plain process has no unit, so this
 # is the only way to start it again (offered by restart_phase, listed by restart_report). TERM_INNER gets the
-# `cd CWD && exec CMD` line (arguments shell-quoted) for every process with a real cmdline.
+# `cd CWD && exec CMD` line (restart_inner) for every process with a real cmdline; TERM_DESC/TERMINATED, which are
+# printed and logged, get the command with secrets redacted.
 record_terminated() {
-  local p cmd cwd cmdq
+  local p cmd cwd
   local -a argv=()
   for p in "$@"; do
     [[ $p =~ ^[0-9]+$ && -d /proc/$p ]] || continue
@@ -651,9 +729,8 @@ record_terminated() {
     mapfile -d '' -t argv <"/proc/$p/cmdline" 2>/dev/null || true
     cwd=$(readlink "/proc/$p/cwd" 2>/dev/null || true)
     if (( ${#argv[@]} )); then
-      cmd=$(printf '%s ' "${argv[@]}"); cmd=${cmd% }
-      printf -v cmdq '%q ' "${argv[@]}"; cmdq=${cmdq% }
-      TERM_INNER+=("cd $(printf '%q' "${cwd:-$HOME_DIR}") && exec $cmdq")
+      cmd=$(printf '%s ' "${argv[@]}"); cmd=$(redact_secrets "${cmd% }")
+      TERM_INNER+=("$(restart_inner "${cwd:-$HOME_DIR}" "${argv[@]}")")
     else
       cmd="[$(cat "/proc/$p/comm" 2>/dev/null || echo '?')]"
     fi
@@ -726,7 +803,7 @@ stop_group() {
 group_blockers() {
   local line pid comm kinds target rpath key name desc label cmd path win id
   G_KEYS=(); G_KIND=(); G_UNIT=(); G_PANE=(); G_NAME=(); G_PIDS=(); G_KINDS=(); G_PATH=(); G_NPATH=(); G_SEEN=()
-  BL_COMM=(); BL_KINDS=(); BL_TARGET=()
+  BL_COMM=(); BL_KINDS=()
   while IFS= read -r line; do
     [[ -n $line ]] || continue
     IFS=$'\t' read -r pid comm kinds target rpath <<<"$line"
@@ -754,7 +831,7 @@ group_blockers() {
         G_NAME[$key]=$name
       fi
       if [[ -z ${BL_COMM[$pid]:-} ]]; then
-        BL_COMM[$pid]=$comm; BL_KINDS[$pid]=$kinds; BL_TARGET[$pid]=$rpath
+        BL_COMM[$pid]=$comm; BL_KINDS[$pid]=$kinds
         G_PIDS[$key]+=" $pid"
       else
         BL_KINDS[$pid]+=",$kinds"
@@ -938,10 +1015,13 @@ restart_stopped_units() {
   for g in "${gtodo[@]}"; do start_unit "$g"; done
 }
 
-# Command line that starts a recorded plain process again as the owner, detached from this script.
+# Command line that starts a recorded plain process again as the owner, detached from this script. For DISPLAY only
+# (prompt, final report): secrets in the recorded command are replaced by <redacted> before it is shown or logged, so
+# a copy-paste of it needs the real values put back. The process itself is started from the unredacted $inner.
+# `bash -c`, never `sh -c`: $inner is quoted with printf %q (restart_inner), whose $'…' form only bash understands.
 plain_start_cmd() {
-  printf 'runuser -u %q -- env XDG_RUNTIME_DIR=%q setsid -f sh -c %q' \
-    "$OWNER_USER" "/run/user/$(id -u "$OWNER_USER")" "$1"
+  printf 'runuser -u %q -- env XDG_RUNTIME_DIR=%q setsid -f bash -c %q' \
+    "$OWNER_USER" "/run/user/$(id -u "$OWNER_USER")" "$(redact_secrets "$1")"
 }
 
 # End of `move`: asks separately for every unit, container and plain process ("start it back?"; units and
@@ -974,15 +1054,15 @@ restart_phase() {
   for i in "${!cur_inner[@]}"; do
     inner=${cur_inner[$i]} desc=${cur_desc[$i]}
     if ask_yes "Запустить процесс $desc ($(plain_start_cmd "$inner"))? [y/N]"; then
-      if runuser -u "$OWNER_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$OWNER_USER")" setsid -f sh -c "$inner"; then
-        log "запущен: $inner"; RESTART_OK+=("процесс: $inner")
+      if runuser -u "$OWNER_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$OWNER_USER")" setsid -f bash -c "$inner"; then
+        log "запущен: $(redact_secrets "$inner")"; RESTART_OK+=("процесс: $(redact_secrets "$inner")")
         for k in "${!TERMINATED[@]}"; do
           if [[ ${TERMINATED[$k]} == "$desc" ]]; then unset 'TERMINATED[k]'; break; fi
         done
         TERMINATED=("${TERMINATED[@]}")
         continue
       fi
-      warn "НЕ запустился: $inner"
+      warn "НЕ запустился: $(redact_secrets "$inner")"
     fi
     keep_inner+=("$inner"); keep_desc+=("$desc")
   done
@@ -1029,8 +1109,9 @@ busy() {
       fi
       continue
     fi
-    # A holder with ONLY mmaps never blocks: rsync --remove-source-files unlinks the file, the process keeps
-    # the old inode and the new bind path serves identical data.
+    # A holder with ONLY read-only/private mmaps never blocks: rsync --remove-source-files unlinks the file, the
+    # process keeps the old inode and the bind path serves identical data. A writable SHARED mapping (kind mmapw)
+    # is a writer without an fd: its later writes would go to the unlinked inode, so it blocks like an open fd.
     if [[ $kinds == mmap ]]; then
       if [[ -z ${INFO_SEEN["mmap:$pid"]:-} ]]; then
         INFO_SEEN["mmap:$pid"]=1
@@ -1074,18 +1155,42 @@ fstab_backup() {
   local ts
   (( FSTAB_BACKED_UP )) && return 0
   ts=$(date +%Y%m%d-%H%M%S)
-  cp -a "$FSTAB" "$FSTAB.bak-$ts"
+  cp -a -- "$FSTAB" "$FSTAB.bak-$ts" || { warn "cannot back up $FSTAB to $FSTAB.bak-$ts"; return 1; }
   FSTAB_BACKED_UP=1
   log "fstab backup: $FSTAB.bak-$ts"
 }
 
 fstab_has_bind() { awk -v p="$1" '$1 !~ /^#/ && $2 == p && $4 ~ /bind/ {f=1} END{exit !f}' "$FSTAB"; }
 
+# Appends one line to $FSTAB by writing a complete copy and renaming it over the file (owner and mode kept), so a
+# failed write never leaves a half line behind and the real file is replaced only when the copy is whole. The line is
+# added only when no identical line is there yet, a missing final newline is supplied first, and the result is read
+# back. Returns 1 (fstab untouched) on any failure.
+fstab_append_line() {
+  local line=$1 tmp
+  [[ -n $line && $line != *$'\n'* ]] || { warn "refusing to write a multi-line or empty fstab entry"; return 1; }
+  if grep -qxF -- "$line" "$FSTAB"; then return 0; fi
+  tmp=$(mktemp "$FSTAB.XXXXXX") || { warn "cannot create a temp file next to $FSTAB"; return 1; }
+  if cp -- "$FSTAB" "$tmp" \
+     && { [[ ! -s $tmp || $(tail -c1 "$tmp" | wc -l) -eq 1 ]] || printf '\n' >>"$tmp"; } \
+     && printf '%s\n' "$line" >>"$tmp" \
+     && chmod --reference="$FSTAB" "$tmp" && chown --reference="$FSTAB" "$tmp" \
+     && mv -f -- "$tmp" "$FSTAB" \
+     && grep -qxF -- "$line" "$FSTAB"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  warn "could not append to $FSTAB"
+  return 1
+}
+
+# Adds the bind line "$1 $2 ..." (source, mount target) unless an active bind line for the target exists. Fields with
+# whitespace would split into extra fstab columns, so they are refused.
 fstab_add_bind() {
   local src=$1 path=$2
+  [[ $src$path != *[[:space:]]* ]] || { warn "refusing an fstab bind line for a path with whitespace: '$src' '$path'"; return 1; }
   fstab_has_bind "$path" && return 0
-  fstab_backup
-  printf '%s %s %s\n' "$src" "$path" "$BIND_OPTS" >>"$FSTAB"
+  fstab_backup && fstab_append_line "$src $path $BIND_OPTS"
 }
 
 # Removes every active bind line whose mount-target field is exactly $1 (nothing else is touched; the file is
@@ -1093,7 +1198,7 @@ fstab_add_bind() {
 fstab_remove_bind() {
   local path=$1 tmp
   fstab_has_bind "$path" || return 0
-  fstab_backup
+  fstab_backup || return 1
   tmp=$(mktemp "$FSTAB.XXXXXX") || return 1
   if chmod --reference="$FSTAB" "$tmp" && chown --reference="$FSTAB" "$tmp" \
      && awk -v p="$path" '!($1 !~ /^#/ && NF >= 4 && $2 == p && $4 ~ /bind/)' "$FSTAB" >"$tmp" \
@@ -1128,8 +1233,7 @@ phase_prep() {
   if fstab_has_mount; then
     log "fstab already has an active line for this UUID or $MNT — leaving it alone"
   else
-    fstab_backup
-    printf '%s\n' "$MOUNT_LINE" >>"$FSTAB"
+    if ! { fstab_backup && fstab_append_line "$MOUNT_LINE"; }; then die "could not add the mount line to $FSTAB (see above) — fstab was not changed"; fi
     systemctl daemon-reload
     fstab_new=1
     log "fstab line added: $MOUNT_LINE"
@@ -1195,6 +1299,18 @@ move_tree() {
   done
 }
 
+# Prints the first symlink found on the destination path $1 or on any of its parents below $MNT and returns 0; returns
+# 1 when there is none. Root's rsync/mkdir/chown into a destination that is (or sits below) a symlink would write to
+# wherever the link points — the owner owns the tree on the backup disk and can plant one.
+dst_symlink() {
+  local p=${1%/}
+  while [[ $p != "$MNT" && $p != / && -n $p ]]; do
+    if [[ -L $p ]]; then printf '%s' "$p"; return 0; fi
+    p=$(dirname "$p")
+  done
+  return 1
+}
+
 # Returns 0 moved, 1 failed, 2 skipped.
 move_item() {
   local rel=$1 src="$HOME_DIR/$1" dst="$DEST/$1" rc=0 bytes n_src n_dst p kind t rows
@@ -1217,6 +1333,10 @@ move_item() {
     skip "$rel" "busy: $BUSY_WHY"
     return 2
   fi
+  if t=$(dst_symlink "$dst"); then
+    warn "FAIL $rel: destination $t is a symlink — refusing to rsync through it; nothing was changed. Remove the link"
+    return 1
+  fi
 
   if (( ${#nested[@]} )); then
     log "$rel: unmounting ${#nested[@]} nested bind mount(s), their data is already in $dst:"
@@ -1235,6 +1355,12 @@ move_item() {
     done
   fi
 
+  # Re-check after the unmounts and the busy scan, immediately before the first write into the destination.
+  if t=$(dst_symlink "$dst"); then
+    warn "FAIL $rel: destination $t is a symlink — refusing to rsync through it; nothing was moved"
+    nested_remount || true
+    return 1
+  fi
   bytes=$(du -sxb "$src" 2>/dev/null | cut -f1) || bytes=0
   mkdir -p "$dst"
   p=$(dirname "$dst")
@@ -1280,7 +1406,12 @@ move_item() {
       return 1
     fi
   done
-  fstab_add_bind "$dst" "$src"
+  if ! fstab_add_bind "$dst" "$src"; then
+    warn "FAIL $rel: could not write the fstab bind line — unmounting so nothing claims success; the data is complete in $dst, re-run 'move' to retry"
+    umount "$src" || warn "umount $src failed"
+    nested_remount || true
+    return 1
+  fi
   # The whole tree is bound now; the nested binds are gone for good, so their fstab lines are redundant.
   for t in "${nested[@]}"; do
     if fstab_remove_bind "$t"; then
@@ -1341,6 +1472,8 @@ REBOOT TEST (do this now):
   after the next reboot check that $MNT is mounted by fstab (findmnt $MNT) and that the moved paths show their data
   (sudo $0 status).
 EOF
+  # exit status of `move`: non-zero when any item failed (skipped/busy items are not failures)
+  (( failed == 0 ))
 }
 
 phase_status() {
@@ -1373,9 +1506,11 @@ EOF
 
 main() {
   if [[ ${1:-} != "" ]]; then
-    : >>"$LOG" 2>/dev/null || true
-    chown "$OWNER" "$LOG" 2>/dev/null || true
-    exec > >(tee -a "$LOG") 2>&1
+    if init_log; then
+      exec > >(tee -a "$LOG") 2>&1
+    elif (( EUID == 0 )); then
+      die "no safe log file (see above); refusing to run as root without one"
+    fi
   fi
   case "${1:-}" in
     prep)    phase_prep ;;
