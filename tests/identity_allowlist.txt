@@ -24,6 +24,9 @@ modules/passwords-app-polkit/tests/test_passwords_app_polkit.py | tool reference
 modules/passwords-app/module.toml | tool reference: default [source] repo of passwords-app
 modules/passwords-app/passwords-app | tool reference: passwords-app's bus name, object path, native host and extension id
 modules/passwords-app/tests/test_passwords_app.py | tool reference: the same identifiers in expectations
+scripts/backups-disk/move-to-backups.sh | owner-run personal script (not engine code): hard-codes the owner's home, user and backup-disk UUID, deployed by hand to the home directory
+scripts/backups-disk/relocate-chihuahua.sh | owner-run personal script (not engine code): sources the deployed home copy of move-to-backups.sh by its absolute path
+scripts/backups-disk/test-move-to-backups.sh | tests of the owner-run script: the same home paths in expectations
 scripts/bootstrap.sh | project reference: default URL of the project's own repository
 scripts/integration.sh | live extension uuid of english-in-overview (see its metadata.json)
 ubuntu_tweaks/panels.toml | tool reference: dconf path of passwords-app's settings, a panel rule
