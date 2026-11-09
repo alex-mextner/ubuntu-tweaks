@@ -176,7 +176,7 @@ log_path_trusted() {
     uid=$(stat -c %u -- "${p:-/}"); mode=$(stat -c %a -- "${p:-/}")
     [[ $uid == "$EUID" || $uid == 0 ]] || { warn "${p:-/} is owned by uid $uid — not a trusted place for the log"; return 1; }
     if (( 8#$mode & 8#022 )); then
-      (( 8#$mode & 8#1000 )) && [[ $uid == 0 ]] || { warn "${p:-/} is writable by group/others — not a trusted place for the log"; return 1; }
+      if ! { (( 8#$mode & 8#1000 )) && [[ $uid == 0 ]]; }; then warn "${p:-/} is writable by group/others — not a trusted place for the log"; return 1; fi
     fi
     [[ -n $p ]] || return 0
     p=${p%/*}
