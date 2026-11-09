@@ -3,7 +3,7 @@
 # mounts, stops or signals anything — users_of/docker/systemctl/rsync/as_owner are replaced by functions.
 # Run: scripts/backups-disk/test-move-to-backups.sh   (no root, no sudo)
 # The tests replace helpers with stub functions and set the script's globals, which shellcheck cannot see being used.
-# shellcheck disable=SC2034,SC2329,SC2317,SC2016
+# shellcheck disable=SC2034,SC2329,SC2317,SC2016,SC2218
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT=${MOVE_SCRIPT:-$HERE/move-to-backups.sh}
