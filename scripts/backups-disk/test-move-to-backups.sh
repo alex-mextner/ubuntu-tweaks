@@ -184,7 +184,7 @@ mv() { return 1; }
 fstab_append_line "UUID=new /mnt/n ext4 defaults 0 2"; rc=$?
 unset -f mv
 check "(f) failing replace: append reports failure" "1" "$rc"
-check "(f)   fstab unchanged and no temp file left" "$before 0" "$(cat "$FSTAB") $(find "$T" -maxdepth 1 -name 'fstab2.*' | wc -l)"
+check "(f)   fstab unchanged and no temp file left" "$before 0" "$(cat "$FSTAB") $(find "$T" -maxdepth 1 -name 'fstab2.??????' | wc -l)"
 fstab_append_line $'a\nb'; check "(f) a multi-line entry is refused" "1" "$?"
 FSTAB_BACKED_UP=1
 fstab_add_bind "$T/d d" "$T/p"; check "(f) bind line with whitespace in a path is refused" "1" "$?"
@@ -261,35 +261,53 @@ cache_holder_ignorable "$HOME_DIR/.cache" python3 mmap,mmapw; check "(h)   but n
 reload_script
 log() { :; }; warn() { WARNED+=("$*"); }
 # ---- (i) secrets never reach the log (#231 finding): redaction of command lines
-SEC='SUPERSECRET-9f3a'
+SEC=ZQX   # every secret value below contains this marker
 has_secret() { grep -q -- "$SEC" <<<"$1" && echo leaked || echo clean; }
-for s in "app --token=$SEC --port 80" "app --api-key $SEC -p 3" "DB_PASSWORD=$SEC cmd" "x --passwd $SEC --v" \
-          "curl -H Authorization:\\ Bearer\\ $SEC http://u:$SEC@h/x" "run --client-secret=$SEC" "env AWS_SECRET_ACCESS_KEY=$SEC a"; do
-  check "(i) redact_secrets hides the secret in: ${s%%"$SEC"*}…" "clean" "$(has_secret "$(redact_secrets "$s")")"
-done
-check "(i)   harmless words are kept" "sleep 5 --port 80 plain.txt" "$(redact_secrets 'sleep 5 --port 80 plain.txt')"
-check "(i)   an option after a redacted one is kept" "app --token <redacted> --verbose" "$(redact_secrets "app --token $SEC --verbose")"
+rd() { redact_argv "$@"; printf '%s|' "${REDACTED_ARGV[@]}"; }   # redacted argv, '|' between arguments
+check "(i) --name=value"                           "app|--token=<redacted>|--port|80|" "$(rd app --token=${SEC}one --port 80)"
+check "(i) --name VALUE (next argument)"           "app|--api-key|<redacted>|-p|3|" "$(rd app --api-key ${SEC}two -p 3)"
+check "(i) NAME=value (env style)"                 "env|DB_PASSWORD=<redacted>|cmd|" "$(rd env DB_PASSWORD=${SEC}three cmd)"
+check "(i) multiword value stays one hidden argument" "run|--password|<redacted>|--verbose|" "$(rd run --password "alpha ${SEC}tail omega" --verbose)"
+check "(i) value that starts with a dash is hidden"  "run|--token|<redacted>|--verbose|" "$(rd run --token "-${SEC}dash" --verbose)"
+check "(i) multiline value is hidden"               "run|--secret|<redacted>|" "$(rd run --secret $'line1\n'"${SEC}line2")"
+check "(i) Authorization header in one argument"    "curl|-H|Authorization: Bearer <redacted>|" "$(rd curl -H "Authorization: Bearer ${SEC}hdr")"
+check "(i) Bearer / Basic as a separate word"       "curl|Bearer|<redacted>|x|" "$(rd curl Bearer ${SEC}sep x)"
+check "(i) user:password@ in a URL"                 "curl|http://u:<redacted>@h/x|" "$(rd curl "http://u:${SEC}url@h/x")"
+check "(i) client-secret / AWS_SECRET_ACCESS_KEY"   "a|--client-secret=<redacted>|AWS_SECRET_ACCESS_KEY=<redacted>|" "$(rd a --client-secret=${SEC}x AWS_SECRET_ACCESS_KEY=${SEC}y)"
+check "(i)   harmless arguments are kept as they are" "sleep|5|--port|80|plain.txt|a b|" "$(rd sleep 5 --port 80 plain.txt 'a b')"
+check "(i) secret embedded in a bash -c string" "bash|-c|tool --token=<redacted>|" "$(rd bash -c "tool --token=${SEC}e")"
+check "(i) secret in a URL query" "curl|https://h/?token=<redacted>|" "$(rd curl "https://h/?token=${SEC}q&a=1")"
+check "(i) boolean auth flag does not swallow --password" "wget|--auth-no-challenge|--password|<redacted>|https://h|" "$(rd wget --auth-no-challenge --password ${SEC}w https://h)"
+check "(i) separated option inside a bash -c string" "bash|-c|app --password <redacted>|" "$(rd bash -c "app --password ${SEC}s")"
+check "(i) quoted and escaped embedded values" "bash|-c|app --token=<redacted>|" "$(rd bash -c "app --token=\"${SEC}q\"")"
+check "(i) chained camelCase option" "app|--auth|--apiKey|<redacted>|" "$(rd app --auth --apiKey ${SEC}c)"
 # a real process with secrets on its command line: what is recorded for display/log vs what is needed to restart it
-python3 -c 'import time; time.sleep(30)' "--token=$SEC" --api-key "$SEC" --name ok & SPID=$!
-for _ in $(seq 100); do grep -q -- "$SEC" "/proc/$SPID/cmdline" 2>/dev/null && break; sleep 0.05; done   # wait for the exec
-TERMINATED=(); TERM_DESC=(); TERM_INNER=()
+python3 -c 'import time; time.sleep(30)' "--token=${SEC}one" --api-key "${SEC}two" --password "alpha ${SEC}tail omega" --token "-${SEC}dash" --name ok & SPID=$!
+for _ in $(seq 100); do grep -q -- "${SEC}dash" "/proc/$SPID/cmdline" 2>/dev/null && break; sleep 0.05; done   # wait for the exec
+TERMINATED=(); TERM_DESC=(); TERM_INNER=(); TERM_SHOWN=()
 record_terminated "$SPID"
 check "(i) record_terminated: TERMINATED text (logged) has no secret" "clean" "$(has_secret "${TERMINATED[*]}")"
 check "(i)   TERM_DESC (prompt) has no secret" "clean" "$(has_secret "${TERM_DESC[*]}")"
-check "(i)   the restart line still holds the real value (the process must start the same)" "leaked" "$(has_secret "${TERM_INNER[*]}")"
-check "(i)   plain_start_cmd (displayed in prompt and report) has no secret" "clean" "$(has_secret "$(plain_start_cmd "${TERM_INNER[0]}")")"
+check "(i)   TERM_SHOWN (displayed restart line) has no secret" "clean" "$(has_secret "${TERM_SHOWN[*]}")"
+check "(i)   the restart line still holds the real values (the process must start the same)" "leaked" "$(has_secret "${TERM_INNER[*]}")"
+check "(i)   plain_start_cmd (displayed in prompt and report) has no secret" "clean" "$(has_secret "$(plain_start_cmd "${TERM_SHOWN[0]}")")"
 as_owner() { return 1; }
 check "(i)   describe_pid (plan/explanations) has no secret" "clean" "$(has_secret "$(describe_pid "$SPID" fd "$T/x")")"
-KEEP_INNER=("${TERM_INNER[@]}")
+KEEP_INNER=("${TERM_INNER[@]}") KEEP_SHOWN=("${TERM_SHOWN[@]}")
 unset -f as_owner; reload_script; log() { :; }; warn() { WARNED+=("$*"); }
 # the whole restart step: everything it prints/logs, and what it hands to runuser
-TERM_INNER=("${KEEP_INNER[@]}"); TERMINATED=("pid $SPID sleep (cwd $T)"); TERM_DESC=("pid $SPID sleep (cwd $T)")
+TERM_INNER=("${KEEP_INNER[@]}") TERM_SHOWN=("${KEEP_SHOWN[@]}"); TERMINATED=("pid $SPID sleep (cwd $T)"); TERM_DESC=("pid $SPID sleep (cwd $T)")
 runuser() { printf '%s\n' "$@" >"$T/runuser.args"; }   # file, not a variable: restart_phase runs in a $(...) subshell below
 ASSUME_YES=1; log() { echo "$*"; }; warn() { echo "WARN $*"; }
 out=$(restart_phase 2>&1)
 unset ASSUME_YES
 log() { :; }; warn() { WARNED+=("$*"); }
 check "(i)   restart_phase output (what tee writes into the log) has no secret" "clean" "$(has_secret "$out")"
+TERM_INNER=("${KEEP_INNER[@]}") TERM_SHOWN=("${KEEP_SHOWN[@]}"); TERMINATED=("pid $SPID python3 (cwd $T)"); TERM_DESC=()
+log() { echo "$*"; }
+out=$(restart_report 2>&1)
+log() { :; }
+check "(i)   restart_report (manual start commands) has no secret" "clean" "$(has_secret "$out")"
 kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
 
 # ---- (j) restart commands: quoted for bash, run by bash (#231 finding: %q quoting run through sh -c)
@@ -316,5 +334,45 @@ unset -f need_root require_mnt enabled_items upfront_stop restart_phase restart_
 reload_script; log() { :; }; warn() { WARNED+=("$*"); }
 
 
+# ---- (l) concurrent fstab writers do not lose each other's changes (#231 review: copy-modify-rename race)
+FSTAB=$T/fstab5; FSTAB_BACKED_UP=1
+{ echo 'UUID=abc / ext4 defaults 0 1'; for i in 1 2 3 4 5 6; do echo "$T/s$i $T/old$i none bind,nofail 0 0"; done; } >"$FSTAB"
+mv() { sleep 0.05; command mv "$@"; }   # widens the window between reading the original and renaming the copy
+for i in $(seq 12); do fstab_append_line "UUID=n$i /mnt/n$i ext4 defaults 0 2" & done
+for i in 1 2 3 4 5 6; do fstab_remove_bind "$T/old$i" & done
+wait
+unset -f mv
+check "(l) 12 concurrent appends + 6 concurrent removes: every append is there" "12" "$(grep -c '^UUID=n' "$FSTAB")"
+check "(l)   every removal took effect, the other lines survive" "0 1" "$(grep -c "$T/old" "$FSTAB") $(grep -c '^UUID=abc ' "$FSTAB")"
+
+# lock file is private; real classifier with many mount rows still repairs
+FSTAB=$T/fstab8; : >"$FSTAB"; fstab_append_line "x /y z 0 0"
+check "(l) lock file is mode 600" "600" "$(stat -c %a "$FSTAB.lock")"
+FSTAB=$T/fstab6
+
+# ---- (m) a bind that exists without its fstab line gets the line on the next run (#231 review: failed rollback umount)
+HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-ultra; FSTAB=$T/fstab6; : >"$FSTAB"; FSTAB_BACKED_UP=1
+mk_e
+is_bind_mounted() { return 0; }; nested_mounts() { printf 'bind\t%s\n' "$HOME_DIR/proj"; }; systemctl() { :; }
+move_item proj; rc=$?
+check "(m) existing bind without fstab line: line written, item skipped as already bound" "2 1" "$rc $(grep -c "^$DEST/proj $HOME_DIR/proj " "$FSTAB")"
+move_item proj; rc=$?
+check "(m)   second run: nothing written twice" "2 1" "$rc $(grep -c "^$DEST/proj " "$FSTAB")"
+: >"$FSTAB"; fstab_add_bind() { return 1; }
+move_item proj; rc=$?
+check "(m)   line cannot be written: the item FAILS instead of being skipped silently" "1" "$rc"
+unset -f systemctl; reload_script; log() { :; }; warn() { WARNED+=("$*"); }   # reload puts back the real is_bind_mounted/nested_mounts/fstab_add_bind
+
+# ---- (n) a destination swapped for a symlink during the final busy re-check is still refused (#231 review: TOCTOU)
+HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-ultra; FSTAB=$T/fstab7; : >"$FSTAB"; FSTAB_BACKED_UP=1
+is_bind_mounted() { return 1; }; nested_mounts() { :; }; mount() { :; }; umount() { :; }; chown() { :; }; systemctl() { :; }
+BUSY_CALLS=0
+busy() { BUSY_CALLS=$((BUSY_CALLS + 1)); if (( BUSY_CALLS == 2 )); then rm -rf "$DEST/proj"; ln -s "$T/elsewhere" "$DEST/proj"; fi; return 1; }
+mk_e; BUSY_CALLS=0
+move_item proj; rc=$?
+check "(n) symlink appears between the checks and rsync: refused, rsync not started" "1 0" "$rc $CALLS"
+check "(n)   nothing was written through the link" "0" "$(find "$T/elsewhere" -mindepth 1 | wc -l)"
+unset -f is_bind_mounted nested_mounts mount umount chown systemctl busy
+reload_script; log() { :; }; warn() { WARNED+=("$*"); }
 
 echo; if (( FAILS == 0 )); then echo "ALL OK"; else echo "$FAILS FAILED"; exit 1; fi

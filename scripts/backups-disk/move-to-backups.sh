@@ -441,6 +441,8 @@ RESTART_OK=() RESTART_BAD=() TERMINATED=()
 TERM_INNER=()
 # Same order as TERM_INNER: the TERMINATED text of that process (per-item question, removal from TERMINATED).
 TERM_DESC=()
+# Same order as TERM_INNER: the restart line with secrets redacted, the only form that is printed or logged.
+TERM_SHOWN=()
 # Scan result of upfront_stop/stop_again.
 ALL_ROWS=""
 STOP_APPROVED=0
@@ -537,22 +539,41 @@ unit_description() {
 
 # ~-shortened path for messages.
 short_path() { if [[ $1 == "$HOME_DIR" || $1 == "$HOME_DIR"/* ]]; then printf '~%s' "${1#"$HOME_DIR"}"; else printf '%s' "$1"; fi; }
-# Replaces the value of anything that looks like a secret in the command line $1 by <redacted>, so tokens and
-# passwords never reach the log (stdout is tee'd into it) or the terminal: NAME=value / --name=value where the name
-# contains secret, token, password, passwd, pwd, passphrase, api/access/private key, credential, auth or cookie;
-# the word after a --long-option of such a name; the credential after Bearer/Basic; user:password@ in a URL.
-# Over-redacting (a harmless value) is accepted, leaking is not.
-redact_secrets() {
-  local kw='secret|token|passw(or)?d|pwd|passphrase|api[-_.]?key|access[-_.]?key|private[-_.]?key|credential|auth|cookie'
-  local name='[A-Za-z0-9_.-]*('"$kw"')[A-Za-z0-9_.-]*'
-  local sp='([[:space:]]|\\ )+'                  # a real space, or the escaped one printf %q writes
-  local word='([^[:space:]\\]|\\.)'              # one character of a word; \x is one escaped character
-  local first='([^-[:space:]\\]|\\.)'            # first character of a value (not the next option)
-  sed -E \
-    -e 's/('"$name"'=)'"$word"'+/\1<redacted>/Ig' \
-    -e 's/((^|[[:space:]])--'"$name$sp"')'"$first$word"'*/\1<redacted>/Ig' \
-    -e 's/((bearer|basic)(\\?[[:space:]])+)[A-Za-z0-9._~+\/=-]+/\1<redacted>/Ig' \
-    -e 's#(://[^/@[:space:]:]+:)[^/@[:space:]]+@#\1<redacted>@#g' <<<"$1"
+# Words that make an option or NAME=value argument a secret. Matched case-insensitively against the NAME only.
+SECRET_NAME='^-{0,2}[a-z0-9_.-]*(secret|token|passw(or)?d|pwd|passphrase|api[-_.]?key|access[-_.]?key|private[-_.]?key|credential|auth|cookie)[a-z0-9_.-]*$'
+
+# Sets REDACTED_ARGV to the arguments "$@" with every secret replaced by <redacted>, one argument at a time, so no
+# value can leak through word splitting or a flattened command line: NAME=value and --name=value where NAME looks
+# like a secret (see SECRET_NAME); the WHOLE next argument after a bare secret-named option (--password VALUE; the
+# value may hold spaces or start with a dash) and after a lone Bearer/Basic word; the credential inside "Bearer X"
+# or "Basic X"; user:password@ in a URL. Over-redacting (a harmless value) is accepted, leaking is not. Only
+# self-describing arguments are caught: a bare positional secret (`tool hunter2`) or `-pSECRET` cannot be told apart
+# from a harmless word. Used for everything that is printed or logged; the process is restarted from the real argv.
+redact_argv() {
+  local a name nm hide=0
+  REDACTED_ARGV=()
+  for a in "$@"; do
+    if (( hide )); then
+      hide=0
+      # an option that is itself secret-named (e.g. --password after the boolean --auth-no-challenge) is handled
+      # normally, not swallowed as a value
+      nm=${a%%=*}; nm=${nm,,}
+      if ! [[ $a == -* && $nm =~ $SECRET_NAME ]]; then REDACTED_ARGV+=("<redacted>"); continue; fi
+    fi
+    if [[ ${a,,} == bearer || ${a,,} == basic ]]; then REDACTED_ARGV+=("$a"); hide=1; continue; fi
+    if [[ $a == -* && $a != *=* && ${a,,} =~ $SECRET_NAME ]]; then REDACTED_ARGV+=("$a"); hide=1; continue; fi
+    if [[ $a == *=* ]]; then
+      name=${a%%=*}
+      if [[ ${name,,} =~ $SECRET_NAME ]]; then REDACTED_ARGV+=("$name=<redacted>"); continue; fi
+    fi
+    # secrets embedded in a longer argument (bash -c 'tool --token=X', a URL ?token=X, Bearer X, user:pw@)
+    a=$(sed -E \
+      -e 's/([A-Za-z0-9_.-]*(secret|token|passw(or)?d|pwd|passphrase|api[-_.]?key|access[-_.]?key|private[-_.]?key|credential|auth|cookie)[A-Za-z0-9_.-]*=)[^[:space:]]+/\1<redacted>/Ig' \
+      -e 's/((^|[[:space:]])--?[A-Za-z0-9_.-]*(secret|token|passw(or)?d|pwd|passphrase|api[-_.]?key|access[-_.]?key|private[-_.]?key|credential|auth|cookie)[A-Za-z0-9_.-]*[[:space:]]+)[^[:space:]]+/\1<redacted>/Ig' \
+      -e 's/((bearer|basic)[[:space:]]+)[^[:space:]]+/\1<redacted>/Ig' \
+      -e 's#(://[^/@[:space:]:]+:)[^/@[:space:]]+@#\1<redacted>@#g' <<<"$a")
+    REDACTED_ARGV+=("$a")
+  done
 }
 
 # The line that starts a plain process again: `cd CWD && exec ARGV...`, every word quoted with printf %q. It is run by
@@ -570,14 +591,17 @@ restart_inner() {
 describe_pid() {
   local pid=$1 kinds=${2:-} target=${3:-} comm args who="" use="" k t desc
   local id label cmd path win
+  local -a pargv=()
   if [[ $pid == docker:* ]]; then
     printf 'docker контейнер %s: монтирует %s\n' "${pid#docker:}" "$(short_path "$target")"
     return 0
   fi
   if [[ ! -d /proc/$pid ]]; then printf 'pid %s: процесс уже завершился\n' "$pid"; return 0; fi
   comm=$(cat "/proc/$pid/comm" 2>/dev/null || echo '?')
-  args=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-  args=$(tr -s ' ' <<<"$args"); args=${args% }; args=$(redact_secrets "$args"); [[ -n $args ]] || args="[$comm]"
+  mapfile -d '' -t pargv <"/proc/$pid/cmdline" 2>/dev/null || true
+  redact_argv "${pargv[@]}"
+  args=$(printf '%s ' "${REDACTED_ARGV[@]}"); args=$(tr -s ' \n' ' ' <<<"$args"); args=${args% }
+  [[ -n $args ]] || args="[$comm]"
   (( ${#args} <= 110 )) || args="${args:0:107}..."
   pid_context "$pid"
   if [[ -z $kinds ]]; then
@@ -729,8 +753,10 @@ record_terminated() {
     mapfile -d '' -t argv <"/proc/$p/cmdline" 2>/dev/null || true
     cwd=$(readlink "/proc/$p/cwd" 2>/dev/null || true)
     if (( ${#argv[@]} )); then
-      cmd=$(printf '%s ' "${argv[@]}"); cmd=$(redact_secrets "${cmd% }")
+      redact_argv "${argv[@]}"
+      cmd=$(printf '%s ' "${REDACTED_ARGV[@]}"); cmd=$(tr '\n' ' ' <<<"${cmd% }")
       TERM_INNER+=("$(restart_inner "${cwd:-$HOME_DIR}" "${argv[@]}")")
+      TERM_SHOWN+=("$(restart_inner "${cwd:-$HOME_DIR}" "${REDACTED_ARGV[@]}")")
     else
       cmd="[$(cat "/proc/$p/comm" 2>/dev/null || echo '?')]"
     fi
@@ -1016,12 +1042,12 @@ restart_stopped_units() {
 }
 
 # Command line that starts a recorded plain process again as the owner, detached from this script. For DISPLAY only
-# (prompt, final report): secrets in the recorded command are replaced by <redacted> before it is shown or logged, so
-# a copy-paste of it needs the real values put back. The process itself is started from the unredacted $inner.
-# `bash -c`, never `sh -c`: $inner is quoted with printf %q (restart_inner), whose $'…' form only bash understands.
+# (prompt, final report): $1 is the already redacted restart line (TERM_SHOWN), so a copy-paste of it needs the real
+# values put back. The process itself is started from the unredacted TERM_INNER entry.
+# `bash -c`, never `sh -c`: the line is quoted with printf %q (restart_inner), whose $'…' form only bash understands.
 plain_start_cmd() {
   printf 'runuser -u %q -- env XDG_RUNTIME_DIR=%q setsid -f bash -c %q' \
-    "$OWNER_USER" "/run/user/$(id -u "$OWNER_USER")" "$(redact_secrets "$1")"
+    "$OWNER_USER" "/run/user/$(id -u "$OWNER_USER")" "$1"
 }
 
 # End of `move`: asks separately for every unit, container and plain process ("start it back?"; units and
@@ -1030,8 +1056,8 @@ plain_start_cmd() {
 # An item is taken off its list BEFORE the question, so an interrupt during it only restarts the items not yet handled
 # (restart_stopped_units in the trap) and never one twice.
 restart_phase() {
-  local u c i inner desc k
-  local -a keep_inner=() keep_desc=() cur_inner=() cur_desc=()
+  local u c i inner desc shown k
+  local -a keep_inner=() keep_desc=() keep_shown=() cur_inner=() cur_desc=() cur_shown=()
   if (( ${#STOPPED_UNITS[@]} + ${#STOPPED_CONTAINERS[@]} + ${#STOPPED_GUARDS[@]} + ${#TERM_INNER[@]} == 0 )); then return 0; fi
   log "== Запуск обратно: по каждому пункту отдельный вопрос"
   while (( ${#STOPPED_UNITS[@]} )); do
@@ -1049,24 +1075,24 @@ restart_phase() {
     u=${STOPPED_GUARDS[0]}; STOPPED_GUARDS=("${STOPPED_GUARDS[@]:1}")
     start_unit "$u"
   done
-  cur_inner=("${TERM_INNER[@]}"); cur_desc=("${TERM_DESC[@]}")
-  TERM_INNER=(); TERM_DESC=()
+  cur_inner=("${TERM_INNER[@]}"); cur_desc=("${TERM_DESC[@]}"); cur_shown=("${TERM_SHOWN[@]}")
+  TERM_INNER=(); TERM_DESC=(); TERM_SHOWN=()
   for i in "${!cur_inner[@]}"; do
-    inner=${cur_inner[$i]} desc=${cur_desc[$i]}
-    if ask_yes "Запустить процесс $desc ($(plain_start_cmd "$inner"))? [y/N]"; then
+    inner=${cur_inner[$i]} desc=${cur_desc[$i]} shown=${cur_shown[$i]}
+    if ask_yes "Запустить процесс $desc ($(plain_start_cmd "$shown"))? [y/N]"; then
       if runuser -u "$OWNER_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$OWNER_USER")" setsid -f bash -c "$inner"; then
-        log "запущен: $(redact_secrets "$inner")"; RESTART_OK+=("процесс: $(redact_secrets "$inner")")
+        log "запущен: $shown"; RESTART_OK+=("процесс: $shown")
         for k in "${!TERMINATED[@]}"; do
           if [[ ${TERMINATED[$k]} == "$desc" ]]; then unset 'TERMINATED[k]'; break; fi
         done
         TERMINATED=("${TERMINATED[@]}")
         continue
       fi
-      warn "НЕ запустился: $(redact_secrets "$inner")"
+      warn "НЕ запустился: $shown"
     fi
-    keep_inner+=("$inner"); keep_desc+=("$desc")
+    keep_inner+=("$inner"); keep_desc+=("$desc"); keep_shown+=("$shown")
   done
-  TERM_INNER=("${keep_inner[@]}"); TERM_DESC=("${keep_desc[@]}")
+  TERM_INNER=("${keep_inner[@]}"); TERM_DESC=("${keep_desc[@]}"); TERM_SHOWN=("${keep_shown[@]}")
 }
 
 # Final summary for the owner; clears what it printed, so the traps can call it again harmlessly.
@@ -1080,8 +1106,8 @@ restart_report() {
   fi
   for line in "${RESTART_BAD[@]}"; do log "Не запущены (нужно вручную): $line"; done
   for line in "${TERMINATED[@]}"; do log "Завершены без автозапуска: $line"; done
-  for inner in "${TERM_INNER[@]}"; do log "  запустить вручную: $(plain_start_cmd "$inner")"; done
-  RESTART_OK=(); RESTART_BAD=(); TERMINATED=(); TERM_INNER=(); TERM_DESC=()
+  for inner in "${TERM_SHOWN[@]}"; do log "  запустить вручную: $(plain_start_cmd "$inner")"; done
+  RESTART_OK=(); RESTART_BAD=(); TERMINATED=(); TERM_INNER=(); TERM_DESC=(); TERM_SHOWN=()
 }
 
 # Returns 0 when a live process or docker container uses the path or a git partner of it; sets BUSY_WHY to a short
@@ -1162,11 +1188,19 @@ fstab_backup() {
 
 fstab_has_bind() { awk -v p="$1" '$1 !~ /^#/ && $2 == p && $4 ~ /bind/ {f=1} END{exit !f}' "$FSTAB"; }
 
+# Runs the command "$@" under an exclusive lock shared by every fstab writer of this script. Append and remove copy the
+# file, change the copy and rename it back: two runs at once would each start from the same original and the later
+# rename would silently drop the earlier change. The lock file sits next to fstab (a root-only directory) and is never
+# fstab itself, whose inode the rename replaces.
+# Private lock (umask 077, chmod 600: a world-readable lock file could be held by any user to block us) and a bounded wait.
+fstab_locked() { ( umask 077; exec 9>>"$FSTAB.lock" || exit 1; chmod 600 "$FSTAB.lock" 2>/dev/null; flock -w 120 -x 9 || exit 1; "$@" ); }
+
 # Appends one line to $FSTAB by writing a complete copy and renaming it over the file (owner and mode kept), so a
 # failed write never leaves a half line behind and the real file is replaced only when the copy is whole. The line is
 # added only when no identical line is there yet, a missing final newline is supplied first, and the result is read
 # back. Returns 1 (fstab untouched) on any failure.
-fstab_append_line() {
+fstab_append_line() { fstab_locked _fstab_append_line "$@"; }
+_fstab_append_line() {
   local line=$1 tmp
   [[ -n $line && $line != *$'\n'* ]] || { warn "refusing to write a multi-line or empty fstab entry"; return 1; }
   if grep -qxF -- "$line" "$FSTAB"; then return 0; fi
@@ -1195,10 +1229,9 @@ fstab_add_bind() {
 
 # Removes every active bind line whose mount-target field is exactly $1 (nothing else is touched; the file is
 # replaced atomically, keeping owner and mode).
-fstab_remove_bind() {
+_fstab_remove_bind() {
   local path=$1 tmp
   fstab_has_bind "$path" || return 0
-  fstab_backup || return 1
   tmp=$(mktemp "$FSTAB.XXXXXX") || return 1
   if chmod --reference="$FSTAB" "$tmp" && chown --reference="$FSTAB" "$tmp" \
      && awk -v p="$path" '!($1 !~ /^#/ && NF >= 4 && $2 == p && $4 ~ /bind/)' "$FSTAB" >"$tmp" \
@@ -1207,6 +1240,11 @@ fstab_remove_bind() {
   fi
   rm -f "$tmp"
   return 1
+}
+fstab_remove_bind() {
+  fstab_has_bind "$1" || return 0
+  fstab_backup || return 1   # outside the lock's subshell, so the once-per-run flag survives
+  fstab_locked _fstab_remove_bind "$1"
 }
 
 # Active fstab line that already mounts this UUID or this target?
@@ -1315,8 +1353,24 @@ dst_symlink() {
 move_item() {
   local rel=$1 src="$HOME_DIR/$1" dst="$DEST/$1" rc=0 bytes n_src n_dst p kind t rows
   local -a nested=()
+  local nrows
   [[ -d $src && ! -L $src ]] || { skip "$rel" "not a directory"; return 2; }
-  if is_bind_mounted "$src"; then skip "$rel" "already a bind mount"; return 2; fi
+  if is_bind_mounted "$src"; then
+    # A bind of this script whose fstab line is missing (the line could not be written and the rollback umount failed,
+    # or the run was cut off between the two): without the line the bind is gone after a reboot and the path looks
+    # like an empty directory. Write it now instead of skipping the item for good.
+    nrows=$(nested_mounts "$(dirname "$src")") || nrows=""   # captured first: grep -q closing the pipe early would fail it under pipefail
+    if ! fstab_has_bind "$src" && grep -qxF "bind"$'\t'"$src" <<<"$nrows" && ! grep -qxF "foreign"$'\t'"$src" <<<"$nrows"; then
+      if fstab_add_bind "$dst" "$src"; then
+        log "$rel: the fstab bind line was missing for the existing bind mount — written"
+        systemctl daemon-reload
+      else
+        warn "FAIL $rel: the bind mount exists but its fstab line cannot be written (see above) — it will not survive a reboot"
+        return 1
+      fi
+    fi
+    skip "$rel" "already a bind mount"; return 2
+  fi
   rows=$(nested_mounts "$src") || { warn "FAIL $rel: cannot read the mount table"; return 1; }
   while IFS=$'\t' read -r kind t; do
     [[ -n $kind ]] || continue
@@ -1355,16 +1409,19 @@ move_item() {
     done
   fi
 
-  # Re-check after the unmounts and the busy scan, immediately before the first write into the destination.
+  bytes=$(du -sxb "$src" 2>/dev/null | cut -f1) || bytes=0   # (slow: before the checks, not between check and write)
+  # Re-check after the unmounts and the busy scan, immediately before the first write into the destination. A check
+  # cannot be atomic with the write that follows (no openat/O_NOFOLLOW in bash); the checks are repeated right before
+  # rsync and chown does not follow a final link (-h), which leaves a window of microseconds that only the owner of the
+  # tree, who is the one running this script with sudo, could use.
   if t=$(dst_symlink "$dst"); then
     warn "FAIL $rel: destination $t is a symlink — refusing to rsync through it; nothing was moved"
     nested_remount || true
     return 1
   fi
-  bytes=$(du -sxb "$src" 2>/dev/null | cut -f1) || bytes=0
   mkdir -p "$dst"
   p=$(dirname "$dst")
-  while [[ $p != "$MNT" && $p != / ]]; do chown "$OWNER" "$p"; p=$(dirname "$p"); done
+  while [[ $p != "$MNT" && $p != / ]]; do chown -h "$OWNER" "$p"; p=$(dirname "$p"); done
 
   # Last chance: nothing may have started inside since the first check. The path is incomplete from here on.
   if busy "$src"; then
@@ -1372,6 +1429,11 @@ move_item() {
     RETRY_ITEMS+=("$rel")
     skip "$rel" "busy (re-check): $BUSY_WHY"
     return 2
+  fi
+  if t=$(dst_symlink "$dst"); then
+    warn "FAIL $rel: destination $t became a symlink — refusing to rsync through it; nothing was moved"
+    nested_remount || true
+    return 1
   fi
   log "MOVE $rel (~$((bytes / 1048576)) MB)"
   rc=0
