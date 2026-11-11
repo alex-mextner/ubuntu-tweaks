@@ -124,6 +124,8 @@ def _settings_section(doc: Document, plan: CapturePlan, machine: str, verbose: b
         if hidden:
             doc.lines(f"{hidden} already in the profile (= hidden, -v shows them)")
     if result.overrides:
+        # The keyfile is the GKeyfile backend's store: only keyfile-backend processes (Homebrew's gsettings) honour it, the
+        # dconf session does not. The table reports what such a process would see, so these keys are never frozen.
         doc.heading(3, "keyfile overrides (not captured), per panel")
         doc.lines(
             "~/.config/glib-2.0/settings/keyfile sets these keys to a value that differs from dconf, so their "

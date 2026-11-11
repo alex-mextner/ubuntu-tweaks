@@ -23,12 +23,11 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -42,13 +41,14 @@ from ubuntu_tweaks.apt_consistency import (  # noqa: E402
 )
 from ubuntu_tweaks.module_script import (  # noqa: E402
     Finding,
-    Module,
     ModuleError,
     NeedsManual,
+    RootedModule,
     TempFail,
-    main,
     module_config,
     read_text_or_none,
+    run_cli,
+    staged_root,
     unified_diff_lines,
     write_file,
 )
@@ -426,7 +426,7 @@ class Gpg:
             return (work / "out").read_bytes()
 
 
-class AptSources(Module):
+class AptSources(RootedModule):
     name = "apt-sources"
 
     def __init__(
@@ -438,23 +438,12 @@ class AptSources(Module):
         is_root: bool,
         clock: datetime | None = None,
     ) -> None:
-        self._root = root
+        super().__init__(root, backup_dir=BACKUP_DIR, is_root=is_root, clock=clock)
         self._sources = list(sources)
         self._process = process
         self._gpg = Gpg(process)
-        self._is_root = is_root
-        self._stamp = (clock or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
 
     # -- paths ---------------------------------------------------------------------------------------------
-
-    def _p(self, relative: str) -> Path:
-        return self._root / relative
-
-    def _shown(self, path: Path) -> str:
-        try:
-            return "/" + str(path.relative_to(self._root))
-        except ValueError:
-            return str(path)
 
     def _list_files(self) -> list[Path]:
         try:
@@ -776,13 +765,6 @@ class AptSources(Module):
                 failures.append(Failure(label, str(error), error.transient))
         raise SourceFailure("; ".join(f"{f.name}: {f.cause}" for f in failures), all(f.transient for f in failures))
 
-    def _backup(self, path: Path) -> None:
-        if not path.exists():
-            return
-        target = self._p(f"{BACKUP_DIR}/{self._stamp}")
-        target.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target / path.name)
-
     def _remove(self, change: Change) -> str:
         if change.backup:
             self._backup(change.path)
@@ -837,8 +819,7 @@ class AptSources(Module):
             path.unlink(missing_ok=True)
 
     def apply(self) -> None:
-        if not self._is_root:
-            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+        self._require_root()
         result = self.inspect()
         if result.clean:
             self._require_accepted(result)
@@ -1002,20 +983,13 @@ class AptSources(Module):
 
 
 def build(env: Mapping[str, str]) -> AptSources:
-    staged = env.get(ROOT_ENV)
     sources = parse_options(module_config(env))
-    return AptSources(
-        Path(staged) if staged else Path("/"), sources, Process(), is_root=bool(staged) or os.geteuid() == 0
-    )
+    root, is_root = staged_root(env, ROOT_ENV)
+    return AptSources(root, sources, Process(), is_root=is_root)
 
 
 def cli(argv: list[str]) -> int:
-    try:
-        module = build(os.environ)
-    except ModuleError as error:
-        sys.stderr.write(f"apt-sources: {error}\n")
-        return 1
-    return main(module, argv, out=sys.stdout, err=sys.stderr)
+    return run_cli("apt-sources", build, argv)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,8 @@ Assumptions:
   so ``5``, ``uint32 5`` and an unset key at its default compare correctly: parse wanted text
   with ``parse_value`` (the schema key's type), then compare with the *effective* value.
 - Never write an *effective* value back: on Ubuntu the effective value can come from a session
-  override (``~/.config/glib-2.0/settings/keyfile``) and writing it back would freeze the
+  override (``~/.config/glib-2.0/settings/keyfile``, honoured only by keyfile-backend processes such as
+  Homebrew's ``gsettings``, not by the dconf-backed session) and writing it back would freeze the
   override into dconf. Edit list keys such as ``enabled-extensions`` as single-item changes of
   ``user_value``.
 - ``path`` arguments are the dconf directory of a relocatable schema (``/a/b/``, with leading

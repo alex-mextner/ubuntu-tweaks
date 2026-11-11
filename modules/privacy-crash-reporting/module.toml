@@ -1,0 +1,16 @@
+description = "Ubuntu crash upload off: whoopsie masked and stopped, optionally apport disabled (opt-in)"
+enabled = false   # the owner has not decided yet: a machine opts in with [modules.privacy-crash-reporting] enabled = true
+
+# Option ([modules.privacy-crash-reporting]): apport = true also sets enabled=0 in /etc/default/apport (default false:
+# apport keeps writing crash reports to /var/crash, nothing leaves the machine without whoopsie). Spec: docs/specs/privacy-crash-reporting.md.
+[source]
+kind = "system"
+root = true
+install = "privacy-crash-reporting install"
+check = "privacy-crash-reporting check"
+preview = "privacy-crash-reporting plan"
+
+[[coverage]]
+match = ["etc:/etc/default/apport"]
+class = "tracked"
+reason = "enabled=0 is set by modules/privacy-crash-reporting when its apport option is on"

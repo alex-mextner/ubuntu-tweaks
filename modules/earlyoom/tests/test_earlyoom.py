@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 
 import earlyoom_lib as eo  # noqa: E402
 
+from ubuntu_tweaks.coverage import Coverage, Item, Rules  # noqa: E402
 from ubuntu_tweaks.manifest import load_manifest  # noqa: E402
 from ubuntu_tweaks.module_script import APT_ENVIRONMENT, ModuleError  # noqa: E402
 from ubuntu_tweaks.process import CommandError, CommandResult, Process  # noqa: E402
@@ -40,10 +41,12 @@ STOCK = '# stock\nEARLYOOM_ARGS="-r 3600"\n'
 class FakeMachine(Process):
     """Answers the queries the modules make from a small state and applies the mutations they execute."""
 
-    def __init__(self, root, home, *, installed=False, enabled=False, active=False):
+    def __init__(self, root, home, *, installed=False, enabled=False, active=False, held=False):
         self.root = root
         self.home = home
         self.installed = installed
+        self.status_text = None  # a literal dpkg Status line that overrides installed/held
+        self.held = held  # `apt-mark hold earlyoom`: dpkg's wanted state is `hold`, the package is still installed
         self.enabled = enabled
         self.active = active
         self.user_enabled = False
@@ -62,7 +65,10 @@ class FakeMachine(Process):
     def query(self, argv, *, timeout=60.0, cwd=None):
         argv = list(argv)
         if argv[0] == "dpkg-query":
-            return CommandResult(0 if self.installed else 1, "install ok installed" if self.installed else "", "")
+            if self.status_text is not None:
+                return CommandResult(0, self.status_text, "")
+            want = "hold" if self.held else "install"
+            return CommandResult(0 if self.installed else 1, f"{want} ok installed" if self.installed else "", "")
         if argv[0] == "systemctl":
             user = argv[1] == "--user"
             verb = argv[2] if user else argv[1]
@@ -80,6 +86,8 @@ class FakeMachine(Process):
         if argv[0] == "apt-get":
             self.apt_runs.append((input_text, {name: os.environ.get(name) for name in APT_ENVIRONMENT}))
         if self.fail and tuple(argv[: len(self.fail)]) == self.fail:
+            if argv[0] == "systemctl" and argv[-2] in ("start", "restart"):
+                setattr(self, "user_active" if argv[1] == "--user" else "active", False)  # a failed (re)start leaves it down
             raise CommandError(f"{' '.join(argv)}: exited with status 1")
         if argv[0] == "apt-get" and argv[1] == "install":
             self.installed = self.enabled = self.active = True
@@ -225,6 +233,9 @@ class OptionParsing(unittest.TestCase):
         ):
             with self.subTest(word=word), self.assertRaises(ModuleError):
                 eo.parse_options({"extra_args": [word]})
+        for word in ("-pm5", "-gs", "-nN/x"):
+            with self.subTest(word=word), self.assertRaises(ModuleError):
+                eo.parse_options({"extra_args": [word]})
         for word in ("two words", ""):
             with self.subTest(word=word), self.assertRaises(ModuleError):
                 eo.parse_options({"extra_args": [word]})
@@ -233,6 +244,16 @@ class OptionParsing(unittest.TestCase):
         self.assertEqual(
             eo.parse_options({"extra_args": ["--ignore=x", "--syslog"]}).extra_args, ("--ignore=x", "--syslog")
         )
+
+    def test_the_hook_flags_take_their_attached_text_as_an_argument(self):
+        """`-N` (script after a kill) and `-P` (script before it) take the rest of the word, whatever letters it holds:
+        the `s` of `/usr/local/bin/notify` is a path, not the managed `-s`."""
+        words = ("-N/usr/local/bin/notify", "-P/opt/pre-hook.sh", "-gN/usr/local/bin/hook-m", "-N", "-P", "-p", "-d")
+        for word in words:
+            with self.subTest(word=word):
+                self.assertEqual(eo.parse_options({"extra_args": [word]}).extra_args, (word,))
+        options = eo.parse_options({"extra_args": ["-N/usr/local/bin/notify", "-P", "/opt/pre-hook"]})
+        self.assertTrue(eo.render_args(options).endswith("-N/usr/local/bin/notify -P /opt/pre-hook"))
 
     def test_an_empty_regex_switches_the_flag_off(self):
         options = eo.parse_options({"avoid": "", "prefer": ""})
@@ -334,6 +355,27 @@ class SystemInstall(Base):
         self.assertEqual(self.machine.executed, [("systemctl", "restart", "earlyoom.service")])
         self.assertIn("-m 5 ", self.defaults)
 
+    def test_a_held_package_counts_as_installed(self):
+        """`apt-mark hold earlyoom` makes dpkg's status `hold ok installed`: pinned, not missing."""
+        machine = FakeMachine(self.root, self.home, installed=True, enabled=True, active=True, held=True)
+        module = self.system(LAPTOP_OPTIONS, machine=machine)
+        self.assertTrue(self.ok(module)["the earlyoom package is installed"])
+        module.apply()
+        self.assertEqual([call for call in machine.executed if call[0] == "apt-get"], [])
+        self.assertNotIn("apt-get install earlyoom (keeps this file over the package's)", module.plan())
+
+    def test_a_package_that_is_only_configured_or_removed_is_not_installed(self):
+        for status in ("deinstall ok config-files", "install ok half-installed", "install ok not-installed"):
+            with self.subTest(status=status):
+                machine = FakeMachine(self.root, self.home, installed=True)
+                machine.status_text = status
+                self.assertFalse(self.ok(self.system(machine=machine))["the earlyoom package is installed"])
+
+    def test_an_installed_instance_counts_next_to_a_leftover_one_of_another_architecture(self):
+        machine = FakeMachine(self.root, self.home, installed=True)
+        machine.status_text = "install ok installed\ndeinstall ok config-files\n"
+        self.assertTrue(self.ok(self.system(machine=machine))["the earlyoom package is installed"])
+
     def test_a_stopped_service_is_started_without_rewriting_the_file(self):
         module = self.system(LAPTOP_OPTIONS)
         module.apply()
@@ -362,6 +404,40 @@ class SystemInstall(Base):
         self.assertEqual(self.defaults, good)
         self.assertTrue(self.machine.active)  # reset-failed first: a crash-looping unit refuses a plain restart
         self.assertFalse(self.machine.limit_hit)
+
+    def test_a_start_limit_window_is_cleared_and_the_restart_tried_again(self):
+        """A restart that itself raises (systemd's start limit, left by an earlier crash loop) is not the options'
+        fault: reset-failed, one more try, and the new file stays."""
+        self.system({}).apply()
+        self.machine.limit_hit = True
+        module = self.system({"report_interval": 60})
+        module.apply()
+        self.assertIn("-r 60", self.defaults)
+        self.assertTrue(self.machine.active)
+        self.assertFalse(self.machine.limit_hit)
+
+    def test_a_restart_that_keeps_raising_goes_through_reset_failed_and_the_rollback(self):
+        self.system({}).apply()
+        good = self.defaults
+        self.machine.fail = ("systemctl", "restart")
+        self.machine.executed.clear()
+        with self.assertRaisesRegex(ModuleError, "previous options were put back, but it is still down"):
+            self.system({"report_interval": 60}).apply()
+        self.assertEqual(self.defaults, good)
+        verbs = [call[1] for call in self.machine.executed if call[0] == "systemctl"]
+        # restart raised, reset-failed + one more try raised, the rollback restores the file and tries once more
+        self.assertEqual(verbs, ["restart", "reset-failed", "restart", "reset-failed", "restart"])
+
+    def test_a_start_that_raises_on_an_unchanged_file_is_cleared_once_then_reported(self):
+        self.system({}).apply()
+        self.machine.active = False
+        self.machine.fail = ("systemctl", "start")
+        self.machine.executed.clear()
+        with self.assertRaisesRegex(ModuleError, r"does not stay active even with its options in place \(.+; see its journal\)"):
+            self.system({}).apply()
+        self.assertEqual(
+            [call[1] for call in self.machine.executed], ["start", "reset-failed", "start"]
+        )  # no file of ours to blame, so no rollback
 
     def test_a_rejected_first_file_is_removed_rather_than_left_behind(self):
         machine = FakeMachine(self.root, self.home, installed=True, enabled=True, active=False)
@@ -478,6 +554,15 @@ class Failover(Base):
             self.user({"extra_args": ["--bogus"]}).apply()
         self.assertEqual((self.home / eo.USER_ENV).read_text(), good)
         self.assertTrue(self.machine.user_active)  # restarted with the old options, after reset-failed
+
+    def test_a_user_restart_that_raises_is_rolled_back_after_reset_failed(self):
+        self.user().apply()
+        good = (self.home / eo.USER_ENV).read_text()
+        self.machine.fail = ("systemctl", "--user", "restart")
+        with self.assertRaisesRegex(ModuleError, "previous options were put back, but it is still down"):
+            self.user({"report_interval": 5}).apply()
+        self.assertEqual((self.home / eo.USER_ENV).read_text(), good)
+        self.assertIn(("systemctl", "--user", "reset-failed", "earlyoom.service"), self.machine.executed)
 
     def test_a_first_user_install_that_never_stays_up_leaves_no_options_file(self):
         self.machine.crash_on_args = "-m 10"
@@ -625,6 +710,21 @@ class Manifest(unittest.TestCase):
         self.assertEqual(manifest.source.preview, ("earlyoom", "plan"))
         self.assertEqual([(f.install, f.root) for f in manifest.fallbacks], [(("earlyoom-user", "install"), False)])
         self.assertTrue(any(rule.coverage.value == "tracked" for rule in manifest.coverage))
+
+    def test_the_coverage_rules_own_the_user_unit_and_the_options_file(self):
+        rules = Rules(load_manifest(MODULE).coverage)
+        for item_id in (
+            "unit:earlyoom.service",
+            "file:~/.local/opt/earlyoom",
+            "etc:/etc/default/earlyoom",
+        ):
+            with self.subTest(item=item_id):
+                rule = rules.classify(Item("test", item_id, "file"))
+                self.assertIsNotNone(rule)
+                self.assertEqual(rule.coverage, Coverage.TRACKED)
+        for item_id in ("unit:earlyoom-other.service", "file:~/.config/systemd/user/other.service"):
+            with self.subTest(item=item_id):
+                self.assertIsNone(rules.classify(Item("test", item_id, "file")))
 
     def test_scripts_named_by_the_manifest_are_executable(self):
         for name in ("earlyoom", "earlyoom-user"):

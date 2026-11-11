@@ -20,7 +20,7 @@ is `modules/earlyoom/earlyoom_lib.py`.
 
 | Fact (system install) | Checked by |
 |---|---|
-| the `earlyoom` package is installed | `dpkg-query` |
+| the `earlyoom` package is installed (dpkg status `install ok installed`, or `hold ok installed`: an `apt-mark hold` pin is still installed) | `dpkg-query` |
 | `/etc/default/earlyoom` equals the rendered text (byte for byte) | file read (mode 644, readable by the desktop user) |
 | `earlyoom.service` is enabled | `systemctl is-enabled` |
 | `earlyoom.service` is active | `systemctl is-active` |
@@ -36,9 +36,13 @@ stdin at EOF and the four non-interactive variables, so it never touches the ter
 
 *Rollback.* After a start or restart the module looks again after one second. earlyoom exits at once on a flag it
 rejects (a bad `extra_args` word), and a last line of defence must never end up stopped by the module that configures
-it: the previous file (or none) is put back, the failed state cleared (`reset-failed`: a crash-looping unit hits
-systemd's start limit and refuses a plain restart), the service restarted, and the install fails with the reason. The rootless
-copy below follows the same rule for its options file *and* its unit file (one shared routine).
+it. A start or restart that fails, whether the verb itself raises (systemd's start limit, left by an earlier crash
+loop, refuses it) or the service is down a second later, first gets **one more try after `reset-failed`**: a refused
+start is not proof that the options are wrong. When that fails too and the options changed, the previous file (or none)
+is put back, the failed state cleared again, the service restarted, and the install fails with the reason (`..., but it
+is still down` when even that did not bring it up). With nothing of ours to roll back (the file did not change) the
+install fails with `does not stay active even with its options in place`. The rootless copy below follows the same
+rule for its options file *and* its unit file (one shared routine).
 
 `plan` (the manifest `preview`) prints the steps and the unified diff of the defaults file; the engine shows it under
 the action in `apply --dry-run`.
@@ -77,9 +81,11 @@ runs `ExecStart=/usr/bin/earlyoom $EARLYOOM_ARGS`: systemd splits the value at w
 The module therefore refuses (before anything is written) a regex or word that contains a quote of either kind, a
 backslash (systemd would unescape it inside the double quotes), a backtick, a `$` anywhere but at the end of the
 expression or before `|` or `)` (the stock file is also sourced by `sh`, which expands `$name`, `${`, `$(`, `$$`, `$?`),
-or any character outside printable ASCII (newline, tab, control). `(^|/)(a|b)$` is fine. `extra_args` words may not contain a space and may not repeat a flag the typed options own, in any spelling earlyoom's `getopt_long` accepts: `-m`, `-M`, `-s`, `-S`, `-r`, `-n`
-(also with an attached value, `-m5`, or grouped, `-gm5`) and `--prefer` / `--avoid` (also `--prefer=x` and any
-abbreviation such as `--pref`).
+or any character outside printable ASCII (newline, tab, control). `(^|/)(a|b)$` is fine. `extra_args` words may not contain a space and may not repeat a flag the typed options own, in any spelling earlyoom's `getopt_long` accepts: `-m`, `-M`, `-s`, `-S`, `-r`, `-n`,
+`--prefer` and `--avoid` (also `--prefer=x` and any abbreviation such as `--pref`); `-m5` (attached value) and `-gm5`
+(grouped) count too. The letters are read left to right the way getopt does: a flag that takes an argument (`-N`, `-P`,
+and the managed ones) swallows the rest of the word, so the hook flags are accepted with an attached path,
+`-N/usr/local/bin/notify` or `-gP/opt/pre-hook` (the `s` and `m` inside a path are not flags).
 Regexes are compiled with the same `regcomp` call before they are written; a regex libc rejects is a configuration
 error (earlyoom itself dies at start with `fatal: could not compile regexp`). Test: laptop options render the
 laptop's line byte for byte, and with a real `earlyoom` on `PATH` its verdict is compared with libc's.
@@ -107,12 +113,12 @@ retried with backoff); the module has no offline alternative.
 ## Staging for tests
 
 `EARLYOOM_ROOT=DIR` stages the install: only `DIR/etc/default/earlyoom` is read and written; no package, no systemd,
-no root. Unit tests (`modules/earlyoom/tests`) run against a fake machine; `Cli` tests run the scripts with a staged
+no root. Unit tests (`modules/earlyoom/tests`) run against a fake machine (the fake knows a held package and a start limit; the suite passes as root too, because `earlyoom-user` validates its options before it refuses root); `Cli` tests run the scripts with a staged
 root and the JSON options in `UBUNTU_TWEAK_MODULE_CONFIG`.
 
 ## Coverage
 
-`etc:/etc/default/earlyoom` and the rootless copy's files are `tracked` by the module (`[[coverage]]`).
+`etc:/etc/default/earlyoom` and the rootless copy's files are `tracked` by the module (`[[coverage]]`): `~/.local/opt/earlyoom*`, `~/.config/earlyoom*` and the item `unit:earlyoom.service` (the `units` adapter reports the user unit; the `files` adapter only lists top-level entries, so the unit file and its wants symlink are never items of their own).
 
 ## Relation to the other layers, and what changes per machine
 

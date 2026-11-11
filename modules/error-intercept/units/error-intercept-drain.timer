@@ -1,0 +1,13 @@
+# Managed by ubuntu-tweaks (module error-intercept).
+# agent-sub retries pending events (rate-limited, waiting for an agent, not acknowledged) only when it is asked to
+# `drain`; the ingesters ask after their work, this timer asks every 5 minutes in between.
+[Unit]
+Description=error-intercept: retry held events every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

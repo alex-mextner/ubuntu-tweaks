@@ -61,7 +61,10 @@ OPTION_NAMES = ("mem_percent", "swap_percent", "report_interval", "prefer", "avo
 # flags in any spelling (`-m5`, `-M 100`), the long ones with a value (`--prefer=x`).
 # getopt_long, which earlyoom uses, also accepts a long option by any unambiguous prefix (`--pref=x`) and grouped
 # short flags (`-gm5`): so every spelling that can set one of them is refused.
-_MANAGED_SHORT = re.compile(r"-[^-]*[mMsSrn].*")
+_MANAGED_SHORT = frozenset("mMsSrn")
+# The short flags that take an argument (the `:` letters of earlyoom's getopt string): `-N/path` and `-P/path` hand the
+# rest of the word to the hook, so the letters of a path are never flags.
+_SHORT_WITH_ARGUMENT = frozenset("mMsSrNP")
 _MANAGED_LONG_NAMES = ("prefer", "avoid")
 # `$` is only safe at the end of the text or before `|` / `)`: anything else can be a shell parameter ($$, $?, $1, $name)
 _UNSAFE_DOLLAR = re.compile(r"\$(?![|)]|\Z)")
@@ -137,6 +140,19 @@ def _regex(name: str, value: object) -> str | None:
     return value
 
 
+def _sets_managed_short(word: str) -> bool:
+    """Whether getopt reads a managed short flag out of ``word``: its letters left to right, until a flag that takes an
+    argument swallows the rest (``-gm5`` sets ``-m``; ``-gN/usr/bin/notify`` sets none)."""
+    if not word.startswith("-") or word.startswith("--"):
+        return False
+    for letter in word[1:]:
+        if letter in _MANAGED_SHORT:
+            return True
+        if letter in _SHORT_WITH_ARGUMENT or not letter.isalpha():
+            return False
+    return False
+
+
 def _extra_word(word: str) -> str:
     problem = (
         _unsafe(word) or ("an empty word" if not word else None) or ("a word with a space" if " " in word else None)
@@ -144,9 +160,7 @@ def _extra_word(word: str) -> str:
     if problem:
         raise ModuleError(f"[modules.earlyoom] extra_args {word!r}: {problem}")
     long_name = word[2:].partition("=")[0] if word.startswith("--") else ""
-    if _MANAGED_SHORT.fullmatch(word) or (
-        long_name and any(name.startswith(long_name) for name in _MANAGED_LONG_NAMES)
-    ):
+    if _sets_managed_short(word) or (long_name and any(name.startswith(long_name) for name in _MANAGED_LONG_NAMES)):
         raise ModuleError(
             f"[modules.earlyoom] extra_args {word!r} repeats a flag the typed options own "
             "(mem_percent, swap_percent, report_interval, prefer, avoid, notify)"
@@ -257,35 +271,52 @@ class _Systemd:
         self._process.execute([*self._prefix, *argv])
 
 
+def _launch(systemd: _Systemd, verb: str, settle: float) -> str | None:
+    """``systemctl <verb>``, then look again after ``settle``: ``None`` when the service is up, else why it is not. A
+    verb that itself raises (systemd's start limit refuses it after a crash loop) counts as not up, and its own
+    message (masked unit, no session bus, polkit) is the reason."""
+    try:
+        systemd.run(verb, SERVICE)
+    except CommandError as error:
+        return str(error)
+    time.sleep(settle)  # a rejected flag makes earlyoom exit at once; look again after it had the chance
+    return None if systemd.is_active() else f"systemctl {verb} succeeded, but the service did not stay active"
+
+
 def _bring_up(
     systemd: _Systemd, settle: float, *, changed: bool, restore: Callable[[], None] | None, what: str
 ) -> None:
     """Enable the service, start it, restart it when its options changed, and prove it stays up.
 
     earlyoom exits at once on a flag it rejects, and a last line of defence must never end up stopped by the module
-    that configures it: with ``restore`` the previous options are put back and the service restarted before the
+    that configures it. A start or restart that fails (or does not stay up) first gets one more try after
+    ``reset-failed``: the start limit of an earlier crash loop refuses it whatever the options are. When it still
+    fails and the options changed, ``restore`` puts the previous ones back and the service is restarted before the
     failure is reported."""
     if not systemd.is_enabled():
         systemd.run("enable", SERVICE)
     was_active = systemd.is_active()
     if not was_active:
-        systemd.run("start", SERVICE)
+        verb = "start"
     elif changed:
-        systemd.run("restart", SERVICE)
+        verb = "restart"
     else:
         return
-    time.sleep(settle)  # a rejected flag makes earlyoom exit at once; look again after it had the chance
-    if systemd.is_active():
+    if _launch(systemd, verb, settle) is None:
+        return
+    with contextlib.suppress(CommandError):  # the service is down already: the error below says why
+        systemd.run("reset-failed", SERVICE)
+    failure = _launch(systemd, verb, settle)
+    if failure is None:
         return
     if changed and restore is not None:
         restore()
-        # a flag earlyoom rejects makes it crash-loop into systemd's start limit, which refuses a plain restart
-        with contextlib.suppress(CommandError):  # the service is down already: the error below says why
+        with contextlib.suppress(CommandError):
             systemd.run("reset-failed", SERVICE)
             systemd.run("restart", SERVICE)
         outcome = "the previous options were put back" + ("" if systemd.is_active() else ", but it is still down")
-        raise ModuleError(f"{what} did not stay active with the new options (see its journal); {outcome}")
-    raise ModuleError(f"{what} does not stay active even with its options in place: see its journal")
+        raise ModuleError(f"{what} did not stay active with the new options ({failure}; see its journal); {outcome}")
+    raise ModuleError(f"{what} does not stay active even with its options in place ({failure}; see its journal)")
 
 
 class UserEarlyoom(Module):
@@ -458,8 +489,13 @@ class SystemEarlyoom(Module):
         return self._root / DEFAULTS_FILE
 
     def _installed(self) -> bool:
-        result = self._process.query(["dpkg-query", "-W", "-f=${Status}", PACKAGE])
-        return result.returncode == 0 and "install ok installed" in result.stdout
+        """dpkg's Status is ``<wanted> <flag> <state>``: ``hold`` (``apt-mark hold``) is a wanted state of a package that
+        is installed, so a pinned version is as present as an unpinned one."""
+        result = self._process.query(["dpkg-query", "-W", "-f=${Status}\\n", PACKAGE])
+        return result.returncode == 0 and any(
+            line.split() in (["install", "ok", "installed"], ["hold", "ok", "installed"])
+            for line in result.stdout.splitlines()
+        )
 
     def _rootless_copy(self) -> UserEarlyoom | None:
         """The user copy, when it is all the machine has: then it is what ``check`` and ``status`` judge."""

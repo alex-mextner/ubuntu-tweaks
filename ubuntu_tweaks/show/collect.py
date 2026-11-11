@@ -2,7 +2,8 @@
 
 Accessed via: ``commands/show.py`` (``build``). Inputs are plain data, so the same code serves the
 local machine and a remote one (``--ssh``): ``user`` is a ``dconf dump /`` keyfile, ``override`` the
-parsed ``~/.config/glib-2.0/settings/keyfile`` (it overrides schema *defaults*), the schemas come from
+parsed ``~/.config/glib-2.0/settings/keyfile`` (the GKeyfile backend's store: it overrides schema *defaults* only for
+keyfile-backend processes, never for the dconf session), the schemas come from
 the ``SettingsBackend`` / ``SchemaCatalog`` of the machine running the command.
 
 Panel membership is the capture rules' (``capture.rules.Rules.panel_rule``, i.e. ``panels.toml``); keys

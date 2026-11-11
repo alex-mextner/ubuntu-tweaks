@@ -25,6 +25,10 @@ class = "tracked"
 reason = "rendered from [modules.earlyoom] by modules/earlyoom"
 
 [[coverage]]
-match = ["file:~/.local/opt/earlyoom*", "file:~/.config/earlyoom*"]
+match = [
+    "file:~/.local/opt/earlyoom*",
+    "file:~/.config/earlyoom*",
+    "unit:earlyoom.service",
+]
 class = "tracked"
-reason = "the rootless copy (earlyoom-user) owns these"
+reason = "the rootless copy (earlyoom-user) owns these: its files and its user unit"

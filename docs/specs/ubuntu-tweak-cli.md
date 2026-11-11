@@ -462,6 +462,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 8 | dock | `hyperdock` (80) |
 | 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
 | 8c | thumbnails in Files, the file chooser and the dock for 3D and web-development files | `thumbnailers` (86) |
+| 8d | cursor lag under load: the shell never swaps and wins CPU contention | `session-priority` (87) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -498,9 +499,11 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `hyperdock` | 80 | submodule, link, toggle, settings (their own phases; the order is only the tie-break) | on |
 | `quicklook` | 85 | `packages` | on |
 | `thumbnailers` | 86 | `system` (user level, no root) | on |
+| `session-priority` | 87 | `system` (user level, no root) | on |
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
+| `error-intercept` | 96 | `system` (user level, `root = false`; [`error-intercept.md`](error-intercept.md)) | off |
 | `rig` | 100 | `system` | off |
 
 Steps 5-8 and 10 belong to their own modules; this section defines the mechanism they plug into.
@@ -651,6 +654,23 @@ files (TS, TSX, Vue, CSS, JSON, YAML, HTML, Dockerfile, notebooks, WOFF2): a use
 that writes a thumbnailer entry, MIME definitions and nothing outside `$HOME`. GNOME's bubblewrap sandbox shows a thumbnailer only `/usr`, so
 the renderers are one pure-Python package carried inside the entry's `Exec=` line. Full spec: [thumbnailers.md](thumbnailers.md).
 
+### Session priority (`session-priority`)
+
+Cursor lag under load (ticket #204 triage: swap 27/32 GB, gnome-shell partly swapped out, CPU storms from agent processes in
+`omp.slice`). A user-level `system` module (`root = false`, order 87, ticket #210): two systemd user drop-ins
+`50-ubuntu-tweaks-session-priority.conf` under `~/.config/systemd/user` (undo: delete the files, `systemctl --user daemon-reload`):
+`org.gnome.Shell@.service.d` `MemorySwapMax=0` (the real unit on 26.04 is `org.gnome.Shell@ubuntu.service`, in `session.slice`) and
+`session.slice.d` `CPUWeight=300` (sibling slices keep 100). The user manager's `daemon-reload` re-applies cgroup settings to running
+units, so `install` writes the files, reloads and restarts nothing (the shell cannot be restarted on Wayland).
+
+`check` reads the running state back from the kernel (`memory.swap.max` of the shell's cgroup, `cpu.weight` of `session.slice`) as well as
+`systemctl show`, so a value written behind systemd's back is drift. A live value that differs while the file is right is drift that one `install` (a reload) fixes; one that survives the reload (another drop-in,
+a runtime `set-property`) makes `install` stop with `needs manual`. The coverage rule claims the two units, so a hand-written extra drop-in in those directories is also shown as tracked. An
+unreachable user manager (no session bus) is an unmet fact (exit 3) for `check` and `needs manual` (run the reload in the desktop session) for `install`, never a pass. Swap draining stays with `memguard` (swap-drain);
+swappiness and zram are not changed without measurements. A tracker (localsearch) scope module was dropped: the schema's
+`ignored-directories-with-content` (`.git`) already skips repository trees, and the indexer already runs at nice 19 and the idle I/O class.
+Tests: `modules/session-priority/tests`.
+
 ### Base modules
 
 Steps 1-4. All are `kind = "builtin"`, `phase = "base"`, enabled by default.
@@ -759,8 +779,10 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | git identity | `git-gh` | planned from the first source that knows it; only when none does: warned, not an error | set `[git] name` / `email` in `profile.toml`, or `git config --global user.name ...` |
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
 | `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) every user-level action still runs, the root actions are listed as the root remainder with the command to run from a normal terminal, and the exit code is 6; or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
+| user manager unreachable, or a foreign override of a setting | `session-priority` | the module reloads the user manager and reads the kernel's cgroup files back; without a session bus (ssh without a login session, a sandbox) it cannot, and an override by another drop-in or `set-property` survives a reload | run `systemctl --user daemon-reload` from the desktop session; if a value still differs, `systemctl --user cat session.slice org.gnome.Shell@ubuntu.service` shows the overriding drop-in |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | FileVault volume, or the kernel module under Secure Boot | `disks` | an encrypted APFS volume needs a password no unit can type and the module never stores; a DKMS module needs a signing key enrolled with a reboot | mount it by hand (`apfs-fuse -r <password> <device> <dir>`); or `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`, reboot, confirm; or keep the default `driver = "fuse"` (*Disks*) |
+| `agent-sub` missing | `error-intercept` | the `agent-tools` package that provides `agent-sub` comes from a repository the module does not fetch | install agent-tools, or set `[modules.error-intercept] agent_tools_dir` to its directory (*Error interception*) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
 | polkit without the checkout | `passwords-app-polkit` | needs the clone made by `passwords-app` | keep `passwords-app` enabled |
 | AMO signing key | `firefox` | the key belongs to the owner's AMO account | `secret-tool store` the items `purpose=amo-jwt-issuer` and `purpose=amo-jwt-secret` (the install output prints the commands) |
@@ -772,6 +794,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | a source file the module will not settle | `apt-sources` | a hand-written file declares a declared repository together with other ones, or a file the module wrote belongs to a source dropped from the profile; the module never edits the first and never deletes the second on its own | remove the duplicate lines from the file the output names, or declare the dropped source again (`enabled = false` removes it), then run `apply` again |
 | docker, the nvidia toolkit or a valid daemon.json missing | `docker-daemon` | the module configures docker, it does not install it, and never overwrites a daemon.json that is not a JSON object | add `docker.io` (or docker-ce via the `apt-sources` docker repository) and, for `nvidia_runtime = true`, `nvidia-container-toolkit` to `packages.toml`; fix a broken `/etc/docker/daemon.json` by hand; then run `apply` again |
 | a wireplumber conf requires a module wireplumber cannot find; or a retired conf cannot go back | `wireplumber-portal-conf` | the module only retires the stray `/usr/local` xdg-desktop-portal conf; any other broken conf (`/etc`, `/usr/share`, another `/usr/local` file) is the owner's. Its retired copy is restored when the module appears, but never over a file: another file or link at the live name, or several retired copies with different bytes, wait for the owner | install the named module from a package into `/usr/lib/<arch>/wireplumber-0.5`, or remove the conf named in the output (a package's conf under `/usr/share`: mask it with an empty file of the same name in `/etc/wireplumber/wireplumber.conf.d`); for a retired copy, keep the one you want as `10-xdg-desktop-portal.conf` and remove the rest; then run `apply` again |
+| The Firefox snap while root is unavailable | `firefox-snap-absent` | `snap remove firefox` needs root; the rootless run only removes the stale launcher | `ubuntu-tweak apply --only firefox-snap-absent --commit` (as your normal user: it asks for sudo itself, so your profile is found; no `--purge`, a snapshot is kept even with automatic snapshots off; `snap saved` lists it) (*`docs/specs/firefox-snap-absent.md`*) |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
 
 ### Finish (`finish`): the human-only steps in one command
@@ -938,6 +961,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
 | `disks` | `system` (root) | the disks the profile declares: driver, `/etc/fstab` block, mount point, systemd automount; plans nothing without `[modules.disks.mounts.*]`, so it is on by default and belongs to no init step (*Disks*) |
+| `error-intercept` | `system`, user (`root = false`) | apport crash dialogs replaced by publishing the sanitized report to the agent subscribed to `errors` (agent-sub): a drop-in for `update-notifier-crash.service`, scan/spool/journal user units, `~/.local/bin` links, the `errors` topic; `enabled = false` by default (opt in per machine); full design, safety and rollback in [`error-intercept.md`](error-intercept.md) |
 | `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
 | `passwords-app-polkit` | `system` (root) | the one root step `install.sh` only prints: the polkit action for unlocking with the login password |
 | `firefox` | `system`, user | build the passwords-app extension and have it signed on AMO (key from the Secret Service) (*Firefox*) |
@@ -948,6 +972,10 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `apt-sources` | `system` (root), `enabled = false` | the profile's extra apt repositories as deb822 files with fingerprint-pinned keys (*`docs/specs/apt-sources.md`*) |
 | `docker-daemon` | `system` (root), `enabled = false` | docker's daemon.json merged from profile options plus a memory-capped container slice (*`docs/specs/docker-daemon.md`*) |
 | `wireplumber-portal-conf` | `system` (root), user post | retires the `/usr/local` xdg-desktop-portal wireplumber conf whose module wireplumber cannot load (and restores it once the module is installed), reports any other conf that requires a missing module, then restarts `wireplumber.service` (`docs/specs/wireplumber-portal-conf.md`) |
+| `privacy-crash-reporting` | `system` (root), `enabled = false` | whoopsie.path / whoopsie.service masked and stopped, optionally apport `enabled=0`; opt-in, undecided by the owner (*`docs/specs/privacy-crash-reporting.md`*) |
+| `firefox-snap-absent` | `system` (root), rootless fallback, `enabled = false` | the Firefox snap removed (snapshot kept) and its stale user launcher gone; never the deb Firefox or `mimeapps.list` (*`docs/specs/firefox-snap-absent.md`*) |
+| `stray-gsettings-keyfile` | `system`, user, `enabled = false` | `~/.config/glib-2.0/settings/keyfile` (Homebrew gsettings' GKeyfile store) backed up to the state dir, then removed (*`docs/specs/stray-gsettings-keyfile.md`*) |
+| `inotify-limits` | `system` (root) | `/etc/sysctl.d/60-inotify.conf` with `fs.inotify.max_user_instances` (2048), applied with `sysctl --system` (*`docs/specs/inotify-limits.md`*) |
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
@@ -1014,11 +1042,12 @@ config (exit 2) while planning (module presets too), never a failure in the midd
 (`SettingsBackend.in_range`). Relocatable schemas (custom keybindings, tiling-assistant paths) go
 through `Gio.Settings.new_with_path`.
 
-`~/.config/glib-2.0/settings/keyfile` on a machine is a GSettings keyfile override that
-changes *effective* values (power, idle-delay, enabled-extensions, favorite-apps). The engine
-reads effective values through Gio, never freezes overrides into dconf (see *Plan and
-actions* on `enabled-extensions`), and `capture` reports keys whose effective value comes
-from the override rather than from the dconf user value. That file is itself a capturable
+`~/.config/glib-2.0/settings/keyfile` is the store of GLib's keyfile settings backend. The session's dconf
+backend never reads it; only keyfile-backend processes honour it, such as Homebrew's `gsettings`, so on a
+normal machine it holds test artifacts of scripts and agents, not settings (the `stray-gsettings-keyfile`
+module retires it). The engine reads effective values through Gio (dconf backend), never freezes an
+override into dconf (see *Plan and actions* on `enabled-extensions`), and `capture` reports keys whose
+effective value comes from such a file rather than from the dconf user value. The file is itself a capturable
 `files/` entry.
 
 Details of the planner (`ubuntu_tweaks/planners/settings.py`, helpers in `setkey.py`):
@@ -2401,6 +2430,17 @@ check = "ssh-server check"
 | `status` | The same facts, all of them, one line each: `ok`, `missing` or `manual` (unmet and not fixable by `install`, e.g. a signing key that does not exist). Exit codes as `check`. Used by hand and by tests; the engine does not call it. |
 | `plan` | Optional, read-only: what `install` is going to do, one line each (`firefox-passkey-qr` prints its installer's `--dry-run` listing). Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
 | `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 75 = failed only for a network / lock cause (`TempFail` in `module_script`, which the engine turns into its `Transient` and retries with backoff), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
+
+**Scaffold for a module that writes under `/`** (`apt-sources`, `docker-daemon`; ticket #105). A new root module
+copies nothing: it subclasses `module_script.RootedModule(root, backup_dir="var/backups/ubuntu-tweaks/<name>",
+is_root=..., clock=None)` and gets `_p(relative)` (path under the root), `_shown(path)` (the `/`-rooted display
+form), `_backup(path)` (copy into `<backup_dir>/<UTC stamp>/`, nothing for a missing file; one stamp per run) and
+`_require_root()` (first line of `apply`). The entry point is `build(env)` plus
+`cli(argv) = run_cli("<name>", build, argv)`, where `build` reads the root with
+`staged_root(env, "<NAME>_ROOT")`: the variable stages every path below a directory (tests, no root needed;
+`is_root` is then true), unset means `/` and `euid == 0`. `apt-sources` and `docker-daemon` define none of these themselves; the other modules keep their own entry points until they move over.
+
+**Root installers on a real root** (ticket #26): `scripts/root-container-check.sh <module>` runs `modules/<module>/install.sh` as root twice and `--check` as an unprivileged user inside a disposable `docker run --rm` container (repository mounted read-only, no host system path, never `--privileged`; `--apt`, `--stub`, `--show` add packages, stubbed commands (a `systemctl` that remembers `enable`/`start`, so a forgotten `enable` fails the check), and files to print; `--installer`, `--install-args`, `--check-args` run a `module_script` program as `--installer apt-sources --install-args install --check-args check`). The second run must change nothing: a `--show` file that differs, or anything under `/etc`, `/usr/local`, `/opt`, `/srv` newer than the second run's start, fails the check with exit 4. `--user root` is refused. A kernel module can be built there against the headers package of the host kernel, but not loaded: `modprobe` is refused without privilege, which is the intended limit.
 
 Options come from `[modules.<name>]` in `profile.toml` / `machine.toml` (merged as everywhere):
 the engine passes the table minus `enabled` as JSON in `UBUNTU_TWEAK_MODULE_CONFIG` to both
