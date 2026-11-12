@@ -93,7 +93,7 @@ error (exit 2).
 | `show [--all] [--panel ID] [--format text\|md\|html] [--ssh [USER@]HOST]` | read-only Russian overview of all settings (explanations, readable values, defaults, status) grouped by Settings panel; `--ssh` shows another machine without installing anything there |
 
 Modules live in `modules/<name>/module.toml`: `hyperdock` (submodule), `english-in-overview`, `quiet-notifications` and
-`allowlockedremotedesktop` (local extensions); `memguard` and `apple-hid-battery` are root-level `system` modules. The `init` pipeline is a
+`allowlockedremotedesktop` (local extensions); `memguard`, `apple-hid-battery` and `wireplumber-portal-conf` (retires a stray `/usr/local` WirePlumber conf that stops the audio service and restores it once its module is installed; its `check` flags any conf that requires a missing module) are root-level `system` modules. The `init` pipeline is a
 module per step, in this `order`: `base-tools` 10, `zsh` 11, `clipboard` 20, `git-gh` 30, `dotfiles` 35, `shell-rc` 36,
 `brew` 40, `ssh-server` 50,
 `passwords-app` 60 / `passwords-app-polkit` 61, `firefox` 70 / `firefox-policy` 71 / `firefox-autologin` 72 /

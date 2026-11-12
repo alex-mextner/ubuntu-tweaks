@@ -490,6 +490,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `brew` | 40 | `base` | on |
 | `ssh-server` | 50 | `system` | on |
 | `docker-daemon` | 55 | `system` | off |
+| `wireplumber-portal-conf` | 57 | `system` | on |
 | `passwords-app` | 60 | `system` | on |
 | `passwords-app-polkit` | 61 | `system` | on |
 | `firefox` | 70 | `system` | on |
@@ -798,6 +799,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | rig clone | `rig` (opt-in) | its repository has no default (private forge), then forge credentials, or a directory in the way | set `[modules.rig] repo` to the git URL of rig-cli; `gh auth login` / `fj auth login`; move the directory; `rig profile sync --take local\|remote` |
 | a source file the module will not settle | `apt-sources` | a hand-written file declares a declared repository together with other ones, or a file the module wrote belongs to a source dropped from the profile; the module never edits the first and never deletes the second on its own | remove the duplicate lines from the file the output names, or declare the dropped source again (`enabled = false` removes it), then run `apply` again |
 | docker, the nvidia toolkit or a valid daemon.json missing | `docker-daemon` | the module configures docker, it does not install it, and never overwrites a daemon.json that is not a JSON object | add `docker.io` (or docker-ce via the `apt-sources` docker repository) and, for `nvidia_runtime = true`, `nvidia-container-toolkit` to `packages.toml`; fix a broken `/etc/docker/daemon.json` by hand; then run `apply` again |
+| a wireplumber conf requires a module wireplumber cannot find; or a retired conf cannot go back | `wireplumber-portal-conf` | the module only retires the stray `/usr/local` xdg-desktop-portal conf; any other broken conf (`/etc`, `/usr/share`, another `/usr/local` file) is the owner's. Its retired copy is restored when the module appears, but never over a file: another file or link at the live name, or several retired copies with different bytes, wait for the owner | install the named module from a package into `/usr/lib/<arch>/wireplumber-0.5`, or remove the conf named in the output (a package's conf under `/usr/share`: mask it with an empty file of the same name in `/etc/wireplumber/wireplumber.conf.d`); for a retired copy, keep the one you want as `10-xdg-desktop-portal.conf` and remove the rest; then run `apply` again |
 | The Firefox snap while root is unavailable | `firefox-snap-absent` | `snap remove firefox` needs root; the rootless run only removes the stale launcher | `ubuntu-tweak apply --only firefox-snap-absent --commit` (as your normal user: it asks for sudo itself, so your profile is found; no `--purge`, a snapshot is kept even with automatic snapshots off; `snap saved` lists it) (*`docs/specs/firefox-snap-absent.md`*) |
 | missing `python3` | `rig`, `dotfiles` | their installers need it (it ships with Ubuntu) | `sudo apt-get install -y python3` |
 
@@ -975,6 +977,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `earlyoom` | `system` (root), rootless fallback | the package, `/etc/default/earlyoom` from typed `[modules.earlyoom]` options, the service; spec: `docs/specs/earlyoom.md` |
 | `apt-sources` | `system` (root), `enabled = false` | the profile's extra apt repositories as deb822 files with fingerprint-pinned keys (*`docs/specs/apt-sources.md`*) |
 | `docker-daemon` | `system` (root), `enabled = false` | docker's daemon.json merged from profile options plus a memory-capped container slice (*`docs/specs/docker-daemon.md`*) |
+| `wireplumber-portal-conf` | `system` (root), user post | retires the `/usr/local` xdg-desktop-portal wireplumber conf whose module wireplumber cannot load (and restores it once the module is installed), reports any other conf that requires a missing module, then restarts `wireplumber.service` (`docs/specs/wireplumber-portal-conf.md`) |
 | `privacy-crash-reporting` | `system` (root), `enabled = false` | whoopsie.path / whoopsie.service masked and stopped, optionally apport `enabled=0`; opt-in, undecided by the owner (*`docs/specs/privacy-crash-reporting.md`*) |
 | `firefox-snap-absent` | `system` (root), rootless fallback, `enabled = false` | the Firefox snap removed (snapshot kept) and its stale user launcher gone; never the deb Firefox or `mimeapps.list` (*`docs/specs/firefox-snap-absent.md`*) |
 | `stray-gsettings-keyfile` | `system`, user, `enabled = false` | `~/.config/glib-2.0/settings/keyfile` (Homebrew gsettings' GKeyfile store) backed up to the state dir, then removed (*`docs/specs/stray-gsettings-keyfile.md`*) |
@@ -982,6 +985,11 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 
 The init-pipeline modules (`base-tools`, `zsh`, `clipboard`, `git-gh`, `brew`; *Base modules*) are enabled by
 default and switchable per machine. No other module is added until it has real content.
+
+### WirePlumber conf
+
+Ticket #234. `modules/wireplumber-portal-conf/` (kind `system`, root, on by default, no options, order 57). The full
+spec is `docs/specs/wireplumber-portal-conf.md`.
 
 ### Profile layout
 

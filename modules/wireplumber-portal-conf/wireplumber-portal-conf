@@ -1,0 +1,435 @@
+#!/usr/bin/python3 -B
+"""wireplumber-portal-conf module: no wireplumber conf requires a module wireplumber cannot load; the stray
+/usr/local xdg-desktop-portal conf is retired when its module is missing.
+
+    wireplumber-portal-conf check     exit 0 satisfied, 3 drift (read-only, no root)
+    wireplumber-portal-conf status    the same facts, one line each
+    wireplumber-portal-conf plan      what `install` is going to do (`--dry-run`)
+    wireplumber-portal-conf install   as root (sudo): retire the conf, or restore it once its module is installed
+                                      (exit 10 when only a human can fix the rest)
+
+Why: a hand-built xdg-desktop-portal under /usr/local put `wireplumber.conf.d/10-xdg-desktop-portal.conf` into
+/usr/local/share (wireplumber reads it) and its `libxdg-desktop-portal.so` into /usr/local/lib (wireplumber never
+looks there: `type = module` components come from `/usr/lib/<arch>/wireplumber-0.5` only). wireplumber then exits 78
+(CONFIG) on every start, PipeWire keeps only the Dummy Output, and the headset has no device.
+
+`check` reads the fragments wireplumber loads (`*.conf` of `/etc/xdg`, `/etc`, `/usr/local/share`, `/usr/share`, each +
+`/wireplumber/wireplumber.conf.d`; a name in a higher-priority directory masks the same name below it) and the
+elements of their `wireplumber.components` arrays: `{ name = X, type = module }` needs `/usr/lib/<arch>/wireplumber-0.5/X.so`,
+`type = pw-module` needs `/usr/lib/<arch>/pipewire-0.3/X.so`; an absolute `name` is a path of its own. It reports every
+conf with a module that is not there. A profile that disables the feature (`feature = disabled`) is not evaluated:
+such a conf still reports. `install` retires only the files named in `RETIRED_CONFS` of the /usr/local directory
+(rename to `<name>.conf.disabled`: wireplumber reads `*.conf` only, so renaming back undoes it) and only while a module
+of theirs is missing; a conf whose module exists is never touched. A retired copy is never overwritten (a different
+`.disabled` there makes the new name `.disabled.<UTC stamp>`); the same bytes retired already make the conf the
+duplicate. Any other broken conf is the owner's: `install` ends in `needs manual` naming it. The module `.so` under
+/usr/local/lib stays (no coverage adapter scans /usr/local yet, #235: the module.toml `[[coverage]]` rules that name
+it and the conf are declarative until one does).
+
+The other direction: the retirement is only as good as the module's absence. When every module a retired copy
+(`<name>.conf.disabled`, `.disabled.<UTC stamp>`, a regular file of `RETIRED_CONFS` in the /usr/local directory)
+requires is found where wireplumber looks (for example a proper package installs `libxdg-desktop-portal.so` into
+/usr/lib/<arch>/wireplumber-0.5), `check` reports the copy as drift and `install` renames it back to `<name>.conf`.
+It never overwrites: a link is created and the copy unlinked, so a file that appeared at the live name meanwhile
+wins and nothing is lost. The same bytes already live are the restore done (no drift, the copy stays: a later
+retire finds it and treats the conf as the duplicate); any other file or link at the live name, or several retired
+copies with different bytes that could each be restored, end in `needs manual` naming them. A conf retired in the
+same run frees its name for an older restorable copy. A copy is not restored over a same-name fragment of /usr/share (it would shadow the package). A copy with a module still missing stays retired, so the two
+directions never alternate. User confs (`~/.config/wireplumber`) are out of scope: a root script cannot find them reliably.
+`WIREPLUMBER_PORTAL_CONF_ROOT=DIR` stages every path below DIR and `WIREPLUMBER_PORTAL_CONF_MULTIARCH` names its dpkg
+triplet (tests; needs no root; sudo's env_reset keeps both out of a real install).
+Spec: docs/specs/wireplumber-portal-conf.md.
+"""
+
+from __future__ import annotations
+
+import glob
+import os
+import re
+import sys
+import sysconfig
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Finding,
+    Module,
+    ModuleError,
+    NeedsManual,
+    main,
+    module_config,
+)
+
+ROOT_ENV = "WIREPLUMBER_PORTAL_CONF_ROOT"
+MULTIARCH_ENV = "WIREPLUMBER_PORTAL_CONF_MULTIARCH"  # tests: the dpkg triplet of the staged root
+LOCAL_CONF_DIR = "usr/local/share/wireplumber/wireplumber.conf.d"
+# wireplumber's lookup order, highest priority first: $XDG_CONFIG_DIRS, /etc, $XDG_DATA_DIRS (/usr/local/share, /usr/share)
+CONF_DIRS = (
+    "etc/xdg/wireplumber/wireplumber.conf.d",
+    "etc/wireplumber/wireplumber.conf.d",
+    LOCAL_CONF_DIR,
+    "usr/share/wireplumber/wireplumber.conf.d",
+)
+RETIRED_CONFS = ("10-xdg-desktop-portal.conf",)
+RETIRED_SUFFIX = ".disabled"
+COMPONENTS_KEY = "wireplumber.components"
+# component type -> the directory (below /usr/lib/<arch>) of the process that loads it
+MODULE_DIRS = {"module": "wireplumber-0.5", "pw-module": "pipewire-0.3"}
+TOKEN = re.compile(
+    r'(?P<comment>#[^\n]*)|(?P<string>"(?:[^"\\]|\\.)*")|(?P<punct>[{}\[\]=:])|(?P<word>[^\s{}\[\]=:,"#]+)'
+)
+
+
+def tokens(text: str) -> Iterator[tuple[str, str]]:
+    """SPA-JSON tokens: ``(kind, text)`` with kind ``punct`` or ``word`` (quotes removed); comments and commas drop."""
+    for found in TOKEN.finditer(text):
+        if found.lastgroup == "punct":
+            yield "punct", found.group()
+        elif found.lastgroup == "string":
+            yield "word", found.group()[1:-1]
+        elif found.lastgroup == "word":
+            yield "word", found.group()
+
+
+@dataclass
+class Frame:
+    """One open ``{`` or ``[`` of the file being read."""
+
+    fields: dict[str, str] | None  # the pairs of an object; None for an array
+    components: bool = False  # the top-level ``wireplumber.components`` array
+    element: bool = False  # an object directly inside it
+
+
+def required_modules(text: str) -> list[tuple[str, str]]:
+    """``(type, name)`` of every element of the top-level ``wireplumber.components`` array with ``type`` ``module`` or
+    ``pw-module`` and a ``name``, in order. Other objects (``wireplumber.components.rules`` matches, profiles) are not
+    components.
+
+    Objects may nest (``arguments = { ... }``); ``key = value``, ``key: value`` and ``key value`` all read as a pair."""
+    found: list[tuple[str, str]] = []
+    stack: list[Frame] = []
+    key: str | None = None
+    for kind, value in tokens(text):
+        if kind == "punct":
+            if value in "{[":
+                is_component = bool(stack) and stack[-1].components and value == "{"
+                is_list = value == "[" and not stack and key == COMPONENTS_KEY
+                stack.append(Frame({} if value == "{" else None, components=is_list, element=is_component))
+                key = None
+            elif value in "}]":
+                if stack:
+                    frame = stack.pop()
+                    fields = frame.fields
+                    if frame.element and fields is not None and fields.get("type") in MODULE_DIRS and "name" in fields:
+                        found.append((fields["type"], fields["name"]))
+                key = None
+            continue
+        if not stack:
+            key = value  # a top-level key is remembered for the bracket that follows it
+            continue
+        fields = stack[-1].fields
+        if fields is None:
+            continue
+        if key is None:
+            key = value
+        else:
+            fields[key] = value
+            key = None
+    return found
+
+
+@dataclass(frozen=True)
+class BrokenConf:
+    path: Path
+    missing: tuple[tuple[str, str], ...]  # (type, name)
+    retirable: bool
+
+
+@dataclass(frozen=True)
+class Restore:
+    """A retired copy whose modules all exist now, and the live name it goes back to."""
+
+    source: Path
+    target: Path
+    modules: tuple[tuple[str, str], ...]  # (type, name), every one present
+    blocked: str = ""  # why only a human can restore it (name taken, copies differ); empty: install renames it back
+
+
+@dataclass
+class Inspection:
+    facts: list[Finding] = field(default_factory=list)
+    retire: list[BrokenConf] = field(default_factory=list)
+    manual: list[BrokenConf] = field(default_factory=list)
+    restore: list[Restore] = field(default_factory=list)  # what install renames back
+    restore_manual: list[Restore] = field(default_factory=list)  # what only a human can settle
+
+
+class WireplumberPortalConf(Module):
+    name = "wireplumber-portal-conf"
+
+    def __init__(self, root: Path, *, is_root: bool, multiarch: str, clock: datetime | None = None) -> None:
+        self._root = root
+        self._is_root = is_root
+        self._multiarch = multiarch
+        self._stamp = (clock or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+
+    def _shown(self, path: Path) -> str:
+        try:
+            return "/" + str(path.relative_to(self._root))
+        except ValueError:
+            return str(path)
+
+    def _module_dir(self, kind: str) -> Path:
+        """The one directory wireplumber's loader searches for this component type (``/usr/lib/<arch>/<leaf>``)."""
+        return self._root / "usr/lib" / self._multiarch / MODULE_DIRS[kind]
+
+    def _module_present(self, kind: str, name: str) -> bool:
+        """A bare name is ``<dir>/<name>.so``; an absolute name is a path of its own."""
+        if name.startswith("/"):
+            return (self._root / name.lstrip("/")).is_file()
+        return (self._module_dir(kind) / f"{name}.so").is_file()
+
+    def _confs(self) -> Iterator[Path]:
+        """The fragments wireplumber loads: one per file name, from the highest-priority directory that has it (an
+        empty file of the same name in ``/etc`` masks a packaged fragment)."""
+        seen: set[str] = set()
+        for relative in CONF_DIRS:
+            directory = self._root / relative
+            if not directory.is_dir():
+                continue
+            for path in sorted(directory.glob("*.conf")):
+                if path.is_file() and path.name not in seen:
+                    seen.add(path.name)
+                    yield path
+
+    def inspect(self) -> Inspection:
+        result = Inspection()
+        scanned = 0
+        for path in self._confs():
+            modules = required_modules(path.read_text(encoding="utf-8", errors="replace"))
+            if not modules:
+                continue
+            scanned += 1
+            missing = tuple((kind, name) for kind, name in modules if not self._module_present(kind, name))
+            shown = self._shown(path)
+            if not missing:
+                result.facts.append(Finding(True, f"{shown} requires only modules that exist"))
+                continue
+            retirable = path.parent == self._root / LOCAL_CONF_DIR and path.name in RETIRED_CONFS
+            broken = BrokenConf(path, missing, retirable)
+            (result.retire if retirable else result.manual).append(broken)
+            result.facts.append(
+                Finding(
+                    False,
+                    f"{shown} requires only modules that exist",
+                    self._why(broken) + ("" if retirable else self._manual_hint(path)),
+                    manual=not retirable,
+                )
+            )
+        for restore in self._restorations({broken.path for broken in result.retire}):
+            shown = self._shown(restore.target)
+            if restore.blocked:
+                result.restore_manual.append(restore)
+                result.facts.append(
+                    Finding(False, f"{shown} is live while its module exists", restore.blocked, manual=True)
+                )
+                continue
+            result.restore.append(restore)
+            result.facts.append(
+                Finding(
+                    False,
+                    f"{shown} is live while its module exists",
+                    f"{self._shown(restore.source)} was retired and {self._found(restore.modules)}: install renames it back",
+                )
+            )
+        if not scanned:
+            result.facts.append(Finding(True, "no wireplumber conf requires a module"))
+        return result
+
+    def _manual_hint(self, path: Path) -> str:
+        """A package's file is never deleted (dpkg restores it): an empty file of the same name in /etc masks it."""
+        if path.parent == self._root / "usr/share/wireplumber/wireplumber.conf.d":
+            return f"; fix it, or mask it with an empty /etc/wireplumber/wireplumber.conf.d/{path.name}"
+        return "; fix or remove it by hand"
+
+    def _why(self, broken: BrokenConf) -> str:
+        parts = []
+        for kind, name in broken.missing:
+            if name.startswith("/"):
+                parts.append(f"{name} does not exist (wireplumber exits 78 at start when a profile requires it)")
+            else:
+                where = self._shown(self._module_dir(kind))
+                parts.append(f"{name} is not in {where} (wireplumber exits 78 at start when a profile requires it)")
+        return "; ".join(parts)
+
+    def _found(self, modules: tuple[tuple[str, str], ...]) -> str:
+        parts = []
+        for kind, name in modules:
+            if name.startswith("/"):
+                parts.append(f"{name} exists")
+            else:
+                parts.append(f"{name} is in {self._shown(self._module_dir(kind))}")
+        return "; ".join(parts)
+
+    def findings(self) -> list[Finding]:
+        return self.inspect().facts
+
+    # -- restore ---------------------------------------------------------------------------------------------
+
+    def _retired_copies(self, name: str) -> list[Path]:
+        """The retired copies of ``name``: ``<name>.disabled`` and ``<name>.disabled.<suffix>``, regular files only
+        (a link is never "a copy", as in ``_destination``)."""
+        base = name + RETIRED_SUFFIX
+        return sorted(
+            path
+            for path in (self._root / LOCAL_CONF_DIR).glob(f"{glob.escape(base)}*")
+            if (path.name == base or path.name.startswith(base + ".")) and path.is_file() and not path.is_symlink()
+        )
+
+    def _restorations(self, retiring: set[Path]) -> list[Restore]:
+        """The retired copies whose modules all exist now. ``retiring`` are live confs this run retires: their name
+        is free by the time a restore runs. The live name is never overwritten: the same bytes there are the restore
+        done, anything else is ``blocked`` (so is a choice between copies with different bytes)."""
+        found: list[Restore] = []
+        for name in RETIRED_CONFS:
+            live = self._root / LOCAL_CONF_DIR / name
+            restorable: dict[bytes, tuple[Path, tuple[tuple[str, str], ...]]] = {}
+            for copy in self._retired_copies(name):
+                content = copy.read_bytes()
+                modules = tuple(required_modules(content.decode("utf-8", errors="replace")))
+                present = all(self._module_present(kind, module) for kind, module in modules)
+                if modules and present and content not in restorable:
+                    restorable[content] = (copy, modules)
+            if not restorable or self._packaged(name):
+                continue
+            taken = os.path.lexists(live) and live not in retiring
+            if taken and live.is_file() and not live.is_symlink() and live.read_bytes() in restorable:
+                continue
+            source, modules = next(iter(restorable.values()))
+            blocked = ""
+            if len(restorable) > 1:
+                names = ", ".join(self._shown(copy) for copy, _ in restorable.values())
+                blocked = (
+                    f"{len(restorable)} different retired copies could be restored ({names}): "
+                    f"keep the right one as {self._shown(live)} by hand and remove the others"
+                )
+            elif taken:
+                blocked = (
+                    f"{self._shown(live)} is in the way of the retired {self._shown(source)} "
+                    f"(its module exists now): keep one of them by hand, never both"
+                )
+            found.append(Restore(source, live, modules, blocked))
+        return found
+
+    def _packaged(self, name: str) -> bool:
+        """A fragment of this name in a directory below /usr/local: restoring the hand-built copy would shadow it."""
+        below = CONF_DIRS[CONF_DIRS.index(LOCAL_CONF_DIR) + 1 :]
+        return any((self._root / relative / name).is_file() for relative in below)
+
+    def _restore(self, restore: Restore) -> None:
+        """Rename back without ever replacing a file: link, then unlink the copy."""
+        try:
+            os.link(restore.source, restore.target)
+        except FileExistsError:
+            raise NeedsManual(
+                f"{self._shown(restore.target)} appeared while restoring {self._shown(restore.source)}: "
+                "keep one of them by hand, then run apply again"
+            ) from None
+        restore.source.unlink()
+
+    # -- retire ----------------------------------------------------------------------------------------------
+
+    def _destination(self, path: Path) -> tuple[Path, bool]:
+        """Where ``path`` is retired to, and whether a copy with the same bytes is retired already (then ``path`` is
+        just the duplicate). ``<name>.disabled``; when that is taken, ``<name>.disabled.<UTC stamp>`` and then
+        ``...<stamp>.2``, ``.3``: a retired file is never overwritten, so no byte is ever lost."""
+        content = path.read_bytes()
+        base = path.name + RETIRED_SUFFIX
+        for copy in self._retired_copies(path.name):  # only what a restore would find again (no editor backups)
+            if copy.read_bytes() == content:
+                return copy, True
+        stamped = f"{base}.{self._stamp}"
+        for name in (base, stamped, *(f"{stamped}.{number}" for number in range(2, 1_000))):
+            if not os.path.lexists(path.with_name(name)):
+                return path.with_name(name), False
+        raise ModuleError(f"{self._shown(path)}: too many retired copies next to it, remove some by hand")
+
+    def plan(self) -> list[str]:
+        result = self.inspect()
+        lines: list[str] = []
+        for broken in result.retire:
+            shown = self._shown(broken.path)
+            target, duplicate = self._destination(broken.path)
+            lines.append(f"  retire {shown}: {self._why(broken)}")
+            if duplicate:
+                lines.append(f"  remove {shown} (the same bytes are retired already as {self._shown(target)})")
+            else:
+                lines.append(f"  rename {shown} to {self._shown(target)} (rename it back to undo)")
+        for restore in result.restore:
+            lines.append(f"  restore {self._shown(restore.target)}: {self._found(restore.modules)}")
+            lines.append(f"  rename {self._shown(restore.source)} to {self._shown(restore.target)}")
+        for broken in result.manual:
+            lines.append(f"needs manual: {self._shown(broken.path)}: {self._why(broken)}{self._manual_hint(broken.path)}")
+        for restore in result.restore_manual:
+            lines.append(f"needs manual: {restore.blocked}")
+        return lines or ["nothing to change"]
+
+    def apply(self) -> None:
+        if not self._is_root:
+            raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
+        retired = self.inspect().retire
+        for broken in retired:
+            target, duplicate = self._destination(broken.path)
+            if duplicate:  # the very same bytes are retired already: the conf is the duplicate
+                broken.path.unlink()
+            else:
+                os.replace(broken.path, target)
+            sys.stdout.write(f"retired {self._shown(broken.path)} -> {self._shown(target)}\n")
+        # after the retire: its name is free for an older copy whose module exists
+        restored = self.inspect().restore
+        for restore in restored:
+            self._restore(restore)
+            sys.stdout.write(f"restored {self._shown(restore.source)} -> {self._shown(restore.target)}\n")
+        # again, after the renames: a retired conf stops masking a lower-priority file of the same name
+        remaining = self.inspect()
+        problems = [
+            f"{self._shown(broken.path)} requires a module wireplumber cannot find ({self._why(broken)})"
+            for broken in remaining.manual
+        ] + [restore.blocked for restore in remaining.restore_manual]
+        if problems:
+            raise NeedsManual("; ".join(problems) + "; settle it by hand, then run apply again")
+        if not retired and not restored:
+            sys.stdout.write("nothing to change\n")
+
+
+def build(env: Mapping[str, str]) -> WireplumberPortalConf:
+    options = module_config(env)
+    if options:
+        raise ModuleError(f"[modules.wireplumber-portal-conf] takes no options, got: {', '.join(sorted(options))}")
+    staged = env.get(ROOT_ENV)
+    multiarch = env.get(MULTIARCH_ENV) or sysconfig.get_config_var("MULTIARCH")
+    if not multiarch:  # without it every module would look missing and a working conf would be retired
+        raise ModuleError(
+            "cannot tell the dpkg architecture triplet (sysconfig MULTIARCH): run it with /usr/bin/python3"
+        )
+    return WireplumberPortalConf(
+        Path(staged) if staged else Path("/"), is_root=bool(staged) or os.geteuid() == 0, multiarch=multiarch
+    )
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        module = build(os.environ)
+    except ModuleError as error:
+        sys.stderr.write(f"wireplumber-portal-conf: {error}\n")
+        return 1
+    return main(module, argv, out=sys.stdout, err=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

@@ -1,0 +1,37 @@
+description = "wireplumber: retire the stray /usr/local xdg-desktop-portal conf whose module wireplumber cannot load (it exits 78, PipeWire has no audio device), and restore it once that module is installed where wireplumber looks; check reports any conf that requires a missing module (root)"
+enabled = true
+order = 57   # after docker-daemon; independent of every other module
+manual = "a wireplumber conf requires a module missing from /usr/lib/<arch>/wireplumber-0.5: install it or remove the conf (the output says how for a package's); or a retired 10-xdg-desktop-portal.conf.disabled* cannot go back (name taken): keep one; then apply"
+
+[source]
+kind = "system"
+install = "wireplumber-portal-conf install"
+check = "wireplumber-portal-conf check"
+preview = "wireplumber-portal-conf plan"
+
+# The root installer cannot touch the user's units. Unsatisfied only for the incident's state: wireplumber's last main
+# process exited 78 (EX_CONFIG: systemd keeps it while the unit is inactive or failed), the unit is enabled and it is
+# not running. A plain `systemctl --user stop`, a masked or disabled unit, a machine without the unit and a shell
+# without a user bus (show prints nothing) all count as satisfied, so nothing is started that the owner did not want.
+# `run` waits and fails when the unit does not stay up, so a different config error is a failure, not a quiet success.
+[[post]]
+name = "wireplumber-start"
+description = "clear wireplumber.service's failed state and start it, so PipeWire gets its audio devices back"
+needs_root = false
+check = ["/bin/sh", "-c", "[ \"$(systemctl --user show -p ExecMainStatus --value wireplumber.service 2>/dev/null)\" != 78 ] || systemctl --user is-active --quiet wireplumber.service || ! systemctl --user is-enabled --quiet wireplumber.service"]
+run = ["/bin/sh", "-c", "systemctl --user reset-failed wireplumber.service; systemctl --user start wireplumber.service; sleep 3; systemctl --user is-active --quiet wireplumber.service || { echo 'wireplumber.service did not stay up: see journalctl --user -u wireplumber -n 20' >&2; exit 1; }"]
+
+# No coverage adapter scans /usr/local yet (ticket #235): these rules are declarative until one does; they are exact
+# paths (the multiarch triplet of the machine this was written on), never globs over the library directories.
+[[coverage]]
+match = ["etc:/usr/local/share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf*"]
+class = "tracked"
+reason = "the stray xdg-desktop-portal wireplumber conf (and its .disabled copies) the wireplumber-portal-conf module retires, and restores once its module is installed"
+
+[[coverage]]
+match = [
+  "etc:/usr/local/lib/x86_64-linux-gnu/wireplumber-0.5/libxdg-desktop-portal.so",
+  "etc:/usr/local/lib/x86_64-linux-gnu/pipewire-0.3/libxdg-desktop-portal.so",
+]
+class = "tracked"
+reason = "libxdg-desktop-portal.so of the hand-built xdg-desktop-portal: left in place by wireplumber-portal-conf (wireplumber loads modules from /usr/lib/<arch> only, so it is inert there); its conf is retired until a package installs the module"
