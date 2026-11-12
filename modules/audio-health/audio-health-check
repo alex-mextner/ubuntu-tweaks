@@ -17,7 +17,8 @@ a notification the notification daemon could not show (early in the login it is 
 next run tries again; a healthy run clears the stamps, so a recurrence is announced at once.
 
 Environment: AUDIO_HEALTH_RENOTIFY_MIN (minutes before the same problem is announced again, default 1440),
-XDG_STATE_HOME. Exit status: 0 whatever the verdict (a failing check must not become a failed unit of its own).
+XDG_STATE_HOME, XDG_RUNTIME_DIR (the sighting of a card that is missing while both services run, see seen_before).
+Exit status: 0 whatever the verdict (a failing check must not become a failed unit of its own).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ PIPEWIRE = "pipewire.service"
 COMMAND_TIMEOUT_S = 15
 LOG_LINES = 60
 MESSAGE_LIMIT = 300  # characters of one log line in the notification (the cause often ends a long line)
+PENDING_MAX_AGE_S = 900  # 3 x OnUnitActiveSec of audio-health.timer (5 min)
 HDMI_DEVICE = re.compile(r"HDMI|DisplayPort|\bDP\b", re.IGNORECASE)
 ALSA_DEVICE = re.compile(r"^card (\d+): .*?\[(.*?)\], device \d+: (.*?) \[")
 # PipeWire (and its pulse layer) set api.alsa.card / api.alsa.card.name; a real PulseAudio only alsa.card / alsa.card_name
@@ -165,6 +167,17 @@ def stamp_dir() -> Path:
     return Path(base) / "audio-health"
 
 
+def pending_dirs() -> list[tuple[Path, bool]]:
+    """Where the sightings of the last runs are kept, first choice first, each with whether a missing parent directory may
+    be made: the runtime directory (gone with the boot; its base is the system's to create), then the state directory."""
+    dirs = []
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        dirs.append((Path(runtime) / "audio-health", False))
+    dirs.append((stamp_dir(), True))
+    return dirs
+
+
 def announce(title: str, body: str, signature: str) -> str:
     """Show the notification unless this problem was announced within the window; returns what happened."""
     stamp = stamp_dir() / f"notified-{signature}"
@@ -188,26 +201,55 @@ def announce(title: str, body: str, signature: str) -> str:
     return "notified"
 
 
+def record_sighting(directory: Path, parents: bool, signature: str) -> bool:
+    """Record this sighting in `directory`; True when the previous one is less than PENDING_MAX_AGE_S old. Raises OSError
+    when the directory cannot be used (the caller falls back to the next one)."""
+    stamp = directory / f"pending-{signature}"
+    try:
+        age = time.time() - stamp.stat().st_mtime
+    except FileNotFoundError:
+        age = None
+    directory.mkdir(parents=parents, exist_ok=True)
+    stamp.touch()
+    return age is not None and 0 <= age < PENDING_MAX_AGE_S  # a stamp dated in the future: the clock was set back
+
+
+def forget_pending(keep: str = "") -> None:
+    """Drop every pending stamp but the one of the problem `keep`: a run that saw something else ends the row of sightings."""
+    for directory, _ in pending_dirs():
+        try:
+            for stamp in directory.glob("pending-*"):
+                if stamp.name != f"pending-{keep}":
+                    stamp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def seen_before(signature: str) -> bool:
     """True when the previous run saw this very problem too (it leaves a ``pending`` stamp now). A card PipeWire has not
-    published yet (right after wireplumber starts, right after a plug-in) must not be announced from one sample."""
-    stamp = stamp_dir() / f"pending-{signature}"
-    if stamp.exists():
-        return True
-    try:
-        stamp.parent.mkdir(parents=True, exist_ok=True)
-        stamp.touch()
-    except OSError:
-        return True  # cannot count runs: announce rather than stay silent
-    return False
+    published yet (right after wireplumber starts, a plug-in, a login) must not be announced from one sample. The stamp
+    counts only as the previous run's: it lives in $XDG_RUNTIME_DIR (empty after a reboot, so a run of the last boot is no
+    run of this one; the state directory when that is unusable), it is less than PENDING_MAX_AGE_S old (a card gone for
+    hours, a laptop that slept, confirms nothing), not dated in the future, and no run saw another problem since (those
+    drop the stamp: forget_pending). Every sighting refreshes the stamp, so a card missing on consecutive runs stays
+    confirmed."""
+    for directory, parents in pending_dirs():
+        try:
+            confirmed = record_sighting(directory, parents, signature)
+        except OSError:
+            continue
+        forget_pending(keep=signature)
+        return confirmed
+    return True  # cannot count runs: announce rather than stay silent
 
 
 def clear_stamps() -> None:
-    try:
-        for stamp in stamp_dir().glob("*"):
-            stamp.unlink(missing_ok=True)
-    except OSError:
-        pass
+    for directory, _ in pending_dirs():  # the state directory is among them: it also holds the notified- stamps
+        try:
+            for stamp in directory.glob("*"):
+                stamp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def check() -> int:
@@ -229,6 +271,8 @@ def check() -> int:
         clear_stamps()
         print("audio-health: ok")
         return 0
+    if problems:
+        forget_pending()  # a unit is to blame now: a card seen missing before is not seen "in a row" with a later one
     unit, (kind, what) = problems[0] if problems else (WIREPLUMBER, ("silent", "serves no matching card"))
     signature = hashlib.sha1("|".join([unit, kind, *sorted(missing_cards)]).encode()).hexdigest()[:16]
     if missing_cards:

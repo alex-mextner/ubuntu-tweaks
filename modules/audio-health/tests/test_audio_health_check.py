@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -147,7 +148,8 @@ class CheckTest(unittest.TestCase):
         self.stub = self.root / "stub"
         self.bin = self.root / "bin"
         self.state = self.root / "state"
-        for directory in (self.stub, self.bin):
+        self.runtime = self.root / "runtime"  # $XDG_RUNTIME_DIR: a tmpfs that is empty again after a reboot
+        for directory in (self.stub, self.bin, self.runtime):
             directory.mkdir()
         for name, body in FAKES.items():
             self.fake(name, body)
@@ -156,6 +158,7 @@ class CheckTest(unittest.TestCase):
             "STUB": str(self.stub),
             "HOME": str(self.root / "home"),
             "XDG_STATE_HOME": str(self.state),
+            "XDG_RUNTIME_DIR": str(self.runtime),
         }
         # the incident: the headset is there for ALSA, PipeWire serves nothing, wireplumber is gone
         self.say("aplay", APLAY_HEADSET)
@@ -237,6 +240,7 @@ class CheckTest(unittest.TestCase):
         self.run_check()
         self.assertIn("restart loop", self.notifications()[0])
         shutil.rmtree(self.state, ignore_errors=True)
+        self.reboot()
         self.say("unit-wireplumber.service", UNIT_ACTIVE)
         self.serve_headset()
         self.say("unit-pipewire.service", WP_FAILED)
@@ -323,6 +327,7 @@ class CheckTest(unittest.TestCase):
         self.run_confirmed()
         self.assertEqual(len(self.notifications()), 1)
         shutil.rmtree(self.state, ignore_errors=True)
+        self.reboot()
         self.serve((0, "HDA NVidia"), (3, "Jabra EVOLVE 20 MS"))
         self.run_confirmed()
         self.assertEqual(len(self.notifications()), 2)
@@ -452,6 +457,133 @@ class CheckTest(unittest.TestCase):
         self.say("wpctl", WPCTL_NO_DEVICES)
         self.run_check()
         self.assertEqual(len(self.notifications()), 1, "a healthy run in between starts the count again")
+
+    def reboot(self):
+        """The runtime directory is a tmpfs: empty again after a boot (the system creates it before the session starts)."""
+        shutil.rmtree(self.runtime, ignore_errors=True)
+        self.runtime.mkdir()
+
+    def runtime_stamps(self):
+        return list((self.runtime / "audio-health").glob("pending-*"))
+
+    def age_pending_stamp(self, seconds):
+        """Make the one pending stamp `seconds` old (negative: dated in the future)."""
+        (stamp,) = self.runtime_stamps()
+        then = time.time() - seconds
+        os.utime(stamp, (then, then))
+
+    def test_a_pending_stamp_from_hours_ago_does_not_confirm_the_card(self):
+        """A sighting left hours ago (a laptop asleep, a card unplugged and plugged in again with no healthy run between) is
+        no 'previous run': the card must be seen on two runs in a row, not twice in a day."""
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check()
+        self.age_pending_stamp(3 * 3600)
+        self.run_check()
+        self.assertEqual(self.notifications(), [], "the old sighting is not the previous run")
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1, "the run that refreshed the stamp is the previous run")
+
+    def test_the_pending_window_is_three_timer_periods(self):
+        """The window is 15 minutes: sightings 14 minutes apart (two periods, a run that judged nothing between, and slack)
+        confirm, 16 do not."""
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check()
+        self.age_pending_stamp(14 * 60)
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1, "two periods and the slack of a skipped run")
+        self.run_check(AUDIO_HEALTH_RENOTIFY_MIN="0")  # confirmed again: the stamp was refreshed
+        self.assertEqual(len(self.notifications()), 2, "confirmed again: the stamp was refreshed by the confirmed run")
+        self.age_pending_stamp(16 * 60)
+        before = len(self.notifications())
+        self.run_check(AUDIO_HEALTH_RENOTIFY_MIN="0")
+        self.assertEqual(len(self.notifications()), before, "older than three periods is not the previous run")
+
+    def test_a_pending_stamp_dated_in_the_future_does_not_confirm_the_card(self):
+        """The clock was ahead (RTC in local time before NTP) when the stamp was written and is right now."""
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check()
+        self.age_pending_stamp(-3600)
+        self.run_check()
+        self.assertEqual(self.notifications(), [])
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1)
+
+    def test_a_sighting_before_a_reboot_does_not_confirm_the_card_after_it(self):
+        """The first run after a login is the one that sees PipeWire before it published the card: the stamp of the
+        previous boot (it lives in the runtime directory, empty again after a reboot) is not its previous run."""
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check()
+        self.reboot()
+        self.run_check()
+        self.assertEqual(self.notifications(), [])
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1)
+
+    def test_a_run_that_blames_a_unit_in_between_ends_the_row_of_sightings(self):
+        """Two runs in a row: the run between them reported a failed wireplumber, so the earlier sighting is no longer the
+        previous run (wireplumber was restarted and has not published the card yet)."""
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check()
+        self.say("unit-wireplumber.service", WP_FAILED)
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1, "the failed unit is announced at once")
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1, "a single sighting after the restart")
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 2)
+
+    def test_a_run_that_misses_other_cards_in_between_ends_the_row_of_sightings(self):
+        self.say("aplay", APLAY_WITH_ANALOG)
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.serve((0, "HDA NVidia"), (2, "HD-Audio Generic"))  # the headset is missing
+        self.run_check()
+        self.serve((0, "HDA NVidia"))  # the headset and the analog codec are missing: another problem
+        self.run_check()
+        self.serve((0, "HDA NVidia"), (2, "HD-Audio Generic"))  # only the headset again
+        self.run_check()
+        self.assertEqual(self.notifications(), [], "it was not seen by two runs in a row")
+        self.run_check()
+        self.assertEqual(len(self.notifications()), 1)
+
+    def state_stamps(self):
+        return list((self.state / "audio-health").glob("pending-*"))
+
+    def test_without_a_runtime_directory_the_state_directory_holds_the_stamp(self):
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check(XDG_RUNTIME_DIR="")
+        self.assertEqual(self.notifications(), [])
+        self.assertEqual(len(self.state_stamps()), 1)
+        self.assertEqual(self.runtime_stamps(), [])
+        self.run_check(XDG_RUNTIME_DIR="")
+        self.assertEqual(len(self.notifications()), 1)
+
+    def test_an_unusable_runtime_directory_falls_back_to_the_state_directory(self):
+        """$XDG_RUNTIME_DIR inherited from another user (su, sudo -u) or left behind by a logout: still two runs in a row."""
+        blocker = self.root / "gone"
+        blocker.write_text("not a directory")
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check(XDG_RUNTIME_DIR=str(blocker))
+        self.assertEqual(self.notifications(), [], "one sample is still not announced")
+        self.assertEqual(len(self.state_stamps()), 1)
+        self.run_check(XDG_RUNTIME_DIR=str(blocker))
+        self.assertEqual(len(self.notifications()), 1)
+
+    def test_a_runtime_directory_that_does_not_exist_is_not_created(self):
+        """Made from a stale value it would sit on a disk, and the stamp would survive a reboot."""
+        missing = self.root / "no" / "run" / "user"
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check(XDG_RUNTIME_DIR=str(missing))
+        self.assertFalse((self.root / "no").exists())
+        self.assertEqual(len(self.state_stamps()), 1)
+
+    def test_when_no_directory_can_hold_the_stamp_the_card_is_announced_at_once(self):
+        """Runs cannot be counted: announce rather than stay silent for ever."""
+        blocker = self.root / "blocker"
+        blocker.write_text("x")
+        self.say("unit-wireplumber.service", UNIT_ACTIVE)
+        self.run_check(XDG_RUNTIME_DIR=str(blocker), XDG_STATE_HOME=str(blocker))
+        self.assertEqual(len(self.notifications()), 1)
 
     def test_a_missing_card_with_healthy_units_does_not_blame_wireplumber_or_quote_its_log(self):
         self.say("unit-wireplumber.service", UNIT_ACTIVE)

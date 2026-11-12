@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import re
 import shutil
 import sys
 import tempfile
@@ -20,6 +21,15 @@ from ubuntu_tweaks.process import CommandResult, FakeProcess  # noqa: E402
 
 TIMER = ("systemctl", "--user", "is-enabled", "audio-health.timer")
 RUNNING = ("systemctl", "--user", "is-active", "audio-health.timer")
+
+
+def load_script(name):
+    """The extensionless script MODULE/name as a module."""
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(MODULE / name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    script = importlib.util.module_from_spec(spec)
+    loader.exec_module(script)
+    return script
 
 
 class SystemdProcess(FakeProcess):
@@ -90,6 +100,14 @@ class AudioHealthModule(unittest.TestCase):
         self.assertRegex(timer, r"(?m)^OnUnitActiveSec=\d+min$")
         self.assertIn("WantedBy=timers.target", timer)
 
+    def test_the_pending_window_of_the_check_covers_three_timer_periods(self):
+        """The check forgets a sighting after PENDING_MAX_AGE_S: a copy of the timer's period, which must leave room for two
+        periods (one run in between judged nothing) plus one of slack, or a slower timer would never confirm."""
+        script = load_script("audio-health-check")
+        period = re.search(r"(?m)^OnUnitActiveSec=(\d+)min$", (MODULE / "units/audio-health.timer").read_text())
+        self.assertIsNotNone(period, "the timer period is written as OnUnitActiveSec=Nmin")
+        self.assertGreaterEqual(script.PENDING_MAX_AGE_S, 3 * int(period.group(1)) * 60)
+
     def test_an_enabled_timer_that_was_stopped_is_drift_and_install_starts_it(self):
         self.module().apply()
         self.process.running = False
@@ -152,10 +170,7 @@ class AudioHealthModule(unittest.TestCase):
 
 class ScriptEntry(unittest.TestCase):
     def test_script_loads(self):
-        loader = importlib.machinery.SourceFileLoader("audio_health_script", str(MODULE / "audio-health"))
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        script = importlib.util.module_from_spec(spec)
-        loader.exec_module(script)
+        script = load_script("audio-health")
         self.assertTrue(callable(script.build))
 
 
