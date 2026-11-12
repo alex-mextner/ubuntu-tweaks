@@ -219,6 +219,14 @@ class PartialTests(Case):
         assert report is not None
         self.assertIn("--only 'a b;c'", flat(report))
 
+    def test_a_failed_retirement_is_retried_by_its_module_like_an_installer(self) -> None:
+        report = self.explain(
+            7, journal(entry("system-module-retire|audio-health|system-module-retire:audio-health", "failed", "boom"))
+        )
+        assert report is not None
+        self.assertIn("audio-health", flat(report))
+        self.assertIn("ubuntu-tweak apply --commit --only audio-health", flat(report))
+
     def test_a_failed_item_without_detail_is_just_its_name(self) -> None:
         report = self.explain(7, journal(entry(module("m"), "failed", "")))
         assert report is not None

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 MAX_CAUSE = 200
 MAX_NAME = 100
-MODULE_KIND = "system-module"
+MODULE_KINDS = ("system-module", "system-module-retire")
 SHOWN = ("failed", "blocked")  # the journal statuses an exit of 7 is about
 # what process.CommandError puts before the tool's own words (the module's argv with its options precedes it)
 _COMMAND_FAILURE = re.compile(r"exited with status (\d+):?\s*")
@@ -71,7 +71,7 @@ def _module(entry: Entry) -> str | None:
     """The module behind a ``system-module|<module>|...`` journal key, else ``None`` (control characters dropped)."""
     kind, _, rest = entry.key.partition("|")
     scope = _CONTROL.sub("", rest.partition("|")[0])
-    return scope if kind == MODULE_KIND and scope else None
+    return scope if kind in MODULE_KINDS and scope else None
 
 
 def _command_line(command: str) -> str:

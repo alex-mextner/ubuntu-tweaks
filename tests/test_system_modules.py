@@ -341,6 +341,193 @@ class SystemModulePlannerTests(TempDirCase):
         self.assertEqual(action.describe().splitlines()[1:], ["        (preview unavailable: exit 2: no network)"])
 
 
+RETIRING = """
+description = "user thing with a declared retirement"
+enabled = {enabled}
+
+[source]
+kind = "system"
+root = {root}
+install = "tool install"
+check = "tool check"
+retire = "tool retire"
+retire_check = "tool retire-check"
+retire_preview = "tool retire-plan"
+"""
+
+
+class RetiringRecorder(Recorder):
+    """A machine where ``tool check`` and ``tool retire-check`` each answer from one flag and ``tool retire`` clears it."""
+
+    def __init__(self, left_over: bool = True) -> None:
+        super().__init__(check_exit=0)
+        self.left_over = left_over
+
+    def query(self, argv, *, timeout=60.0, cwd=None):  # type: ignore[no-untyped-def]
+        self.calls.append((list(argv), cwd, timeout, True))
+        match argv[-1]:
+            case "retire-check":
+                return process.CommandResult(3 if self.left_over else 0, "", "")
+            case "retire-plan":
+                return process.CommandResult(0, "systemctl --user disable --now tool.timer\n", "")
+        return process.CommandResult(0, "", "")
+
+    def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+        super().execute(argv, input_text=input_text, cwd=cwd)
+        if argv[-1] == "retire":
+            self.left_over = False
+
+
+class SystemModuleRetirementTests(TempDirCase):
+    """A disabled system module that declares a retirement ends in "what it installed is gone"; spec, *Source kinds*."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.tmp / "repo"
+        self.profile = Profile(self.tmp / "profile", "home")
+        self.profile.root.mkdir()
+
+    def module(self, name: str = "tool", *, enabled: bool = False, root: bool = False) -> None:
+        write(
+            self.repo / "modules" / name / "module.toml",
+            RETIRING.format(enabled=str(enabled).lower(), root=str(root).lower()),
+        )
+
+    def candidates(self, runner: Recorder, only: frozenset[str] = frozenset()) -> list:
+        return system_modules.build(Context(self.repo, self.profile, only), FakeBackend(), process=runner)
+
+    def test_a_disabled_module_with_something_left_is_one_retire_action_that_shows_its_preview(self) -> None:
+        self.module()
+        runner = RetiringRecorder()
+
+        plan = Plan.build(self.candidates(runner))
+
+        (action,) = plan.actions
+        self.assertEqual(
+            (action.kind, action.phase, action.needs_root, action.scope),
+            ("system-module-retire", Phase.SYSTEM, False, "tool"),
+        )
+        self.assertEqual(
+            plan.render().splitlines()[1:],
+            [
+                "  1. [system-module-retire] retire tool: modules/tool/tool retire",
+                "        systemctl --user disable --now tool.timer",
+            ],
+        )
+        directory = self.repo / "modules/tool"
+        self.assertIn(([str(directory / "tool"), "retire-check"], directory, 60, True), runner.calls)
+
+    def test_a_disabled_module_with_nothing_left_is_converged_and_the_install_checker_never_runs(self) -> None:
+        self.module()
+        runner = RetiringRecorder(left_over=False)
+
+        plan = Plan.build(self.candidates(runner))
+
+        self.assertEqual((len(plan), plan.satisfied), (0, 1))
+        self.assertNotIn("check", [call[0][-1] for call in runner.calls])
+
+    def test_commit_runs_the_retirement_without_sudo_and_a_second_plan_has_nothing_to_do(self) -> None:
+        self.module()
+        runner = RetiringRecorder()
+
+        result = Plan.build(self.candidates(runner)).execute(no_sudo=True)
+
+        self.assertEqual((len(result.skipped), len(result.failed)), (0, 0))
+        directory = self.repo / "modules/tool"
+        self.assertIn(([str(directory / "tool"), "retire"], directory, None, False), runner.calls)
+        self.assertEqual(len(Plan.build(self.candidates(runner))), 0)
+
+    def test_a_retirement_that_does_not_converge_fails(self) -> None:
+        self.module()
+
+        class Stubborn(RetiringRecorder):
+            def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+                Recorder.execute(self, argv, input_text=input_text, cwd=cwd)
+
+        result = Plan.build(self.candidates(Stubborn())).execute(no_sudo=True)
+
+        self.assertEqual(len(result.failed), 1)
+
+    def test_a_retirement_of_a_root_module_goes_through_sudo(self) -> None:
+        self.module(root=True)
+
+        (action,) = Plan.build(self.candidates(RetiringRecorder())).actions
+
+        self.assertTrue(action.needs_root)
+        self.assertIn("retire tool: sudo -- modules/tool/tool retire", action.describe())
+
+    def test_an_enabled_module_gets_its_installer_and_never_its_retirement(self) -> None:
+        self.module(enabled=True)
+
+        class Install(RetiringRecorder):
+            def query(self, argv, *, timeout=60.0, cwd=None):  # type: ignore[no-untyped-def]
+                if argv[-1] == "check":
+                    self.calls.append((list(argv), cwd, timeout, True))
+                    return process.CommandResult(3, "", "")
+                return super().query(argv, timeout=timeout, cwd=cwd)
+
+        runner = Install()
+        (action,) = Plan.build(self.candidates(runner)).actions
+
+        self.assertEqual(action.kind, "system-module")
+        self.assertEqual(action.describe().splitlines()[0], "run tool: modules/tool/tool install")
+        self.assertNotIn("retire-check", [call[0][-1] for call in runner.calls])
+
+    def test_a_machine_overlay_that_disables_the_module_retires_it_and_one_that_enables_it_installs_it(self) -> None:
+        self.module(enabled=True)
+        write(self.profile.machine_toml, "[modules.tool]\nenabled = false\n")
+        (action,) = self.candidates(RetiringRecorder())
+        self.assertEqual(action.kind, "system-module-retire")
+
+        write(self.profile.machine_toml, "[modules.tool]\nenabled = true\n")
+        (action,) = self.candidates(RetiringRecorder())
+        self.assertEqual(action.kind, "system-module")
+
+    def test_a_retirement_that_exits_10_is_a_manual_step_named_a_retirement_with_the_modules_hint(self) -> None:
+        write(
+            self.repo / "modules/tool/module.toml",
+            'manual = "run it in the desktop session"\n' + RETIRING.format(enabled="false", root="false"),
+        )
+
+        class NeedsSession(RetiringRecorder):
+            def execute(self, argv, *, input_text=None, cwd=None):  # type: ignore[no-untyped-def]
+                Recorder.execute(self, argv, input_text=input_text, cwd=cwd)
+
+        runner = NeedsSession()
+        runner.install_exit = 10
+
+        result = Plan.build(self.candidates(runner)).execute(no_sudo=True)
+
+        ((action, message),) = result.manual
+        self.assertEqual(action.kind, "system-module-retire")
+        self.assertIn("tool: the retirement needs a manual step (exit 10", message)
+        self.assertIn("run it in the desktop session", message)
+
+    def test_a_disabled_module_without_a_retirement_is_still_only_skipped(self) -> None:
+        write(self.repo / "modules/plain/module.toml", MANIFEST.format(enabled="false"))
+
+        self.assertEqual(self.candidates(Recorder(check_exit=3)), [])
+
+    def test_only_selects_the_retirement_by_module_name(self) -> None:
+        self.module("tool")
+        self.module("other")
+
+        only = frozenset({"other"})
+        plan = Plan.build(self.candidates(RetiringRecorder(), only), only=only)
+
+        self.assertEqual([action.scope for action in plan.actions], ["other"])
+
+    def test_a_crashing_retire_check_fails_with_the_module_name_and_its_output(self) -> None:
+        self.module()
+
+        class Crashing(RetiringRecorder):
+            def query(self, argv, *, timeout=60.0, cwd=None):  # type: ignore[no-untyped-def]
+                return process.CommandResult(1, "", "boom\n")
+
+        with self.assertRaisesRegex(ActionFailed, r"(?s)tool: check .*tool retire-check crashed \(exit 1.*boom"):
+            Plan.build(self.candidates(Crashing()))
+
+
 class DefaultRunnerTests(TempDirCase):
     def test_a_real_checker_script_is_run_relative_to_its_module(self) -> None:
         repo = self.tmp / "repo"

@@ -391,6 +391,8 @@ that is absolute or contains `..` are invalid config (exit 2).
     install = "install.sh"
     check = "install.sh --check"   # exit 0 = installed files match; must be read-only
     repo = "https://example.org/tool.git"   # optional, system only: default git URL of the tool this module installs
+    retire = "install.sh retire"            # optional pair (+ retire_preview, a read-only plan): see *Retirement* below
+    retire_check = "install.sh retire-check"
     ```
 
     The action's `check()` runs the checker; its `run()` runs the installer through
@@ -405,7 +407,8 @@ that is absolute or contains `..` are invalid config (exit 2).
     it. The planner (`planners/system_modules.py`) emits one action per enabled `system`
     module: kind `system-module`, phase SYSTEM, root, scope = the module name, preview line
     `run <module>: sudo <command>`. Disabled modules (module default, profile or machine
-    overlay) emit nothing; `--no-sudo` skips them and says so like every root action.
+    overlay) emit nothing, unless they declare a retirement (*Retirement*); `--no-sudo` skips
+    the root ones and says so like every root action.
     `memguard` checks with `install.sh --check` (the `--dry-run` comparison: every installed
     file byte-equal to the repo copy and its mode, timer enabled; `/etc/polkit-1/rules.d` is not
     readable by the desktop user, so that one file is vouched for by
@@ -414,6 +417,17 @@ that is absolute or contains `..` are invalid config (exit 2).
     real root can verify is listed in `docs/specs/memguard.md`, *Real-root verification*). `apple-hid-battery` checks the running
     kernel: module present, loaded at
     boot, livepatch enabled, or absent on kernels with the upstream fix (>= 7.3).
+    *Retirement.* Disabling a module stops managing it; it does not uninstall (*`profile.toml` /
+    `machine.toml`*). A `system` module that must leave a machine clean when it is switched off says so
+    with `retire` (the command that removes what the installer put in place) and `retire_check` (read-only,
+    the checker protocol: exit 0 nothing is left, 3 something is), plus an optional `retire_preview`
+    (what `retire` would change, shown under the action like `preview`). The three are given both
+    commands or neither; a lone `retire_preview` is an error. While such a module is disabled (module default,
+    profile or machine overlay) the planner emits one action of kind `system-module-retire`
+    (`retire <module>: <command>`, through sudo only for `root = true`, scope = the module name, so `--only`
+    selects it): satisfied once `retire_check` exits 0, so a second `apply` has nothing to do, and a piece that
+    comes back (a timer enabled again, a file written again) is drift. An enabled module never runs its
+    retirement; a disabled one without it stays only skipped. `audio-health` declares one.
     A `system` module may also set `root = false`, `preview` and `repo` (the default git URL of the tool it
     installs, handed to the installer as the option `repo`: *Author-published tool modules*), read
     `UBUNTU_TWEAK_MODULE_CONFIG` and exit 10 from its installer; see *Init pipeline*.
@@ -463,7 +477,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
 | 8c | thumbnails in Files, the file chooser and the dock for 3D and web-development files | `thumbnailers` (86) |
 | 8d | cursor lag under load: the shell never swaps and wins CPU contention | `session-priority` (87) |
-| 8e | a desktop notification, naming the failed unit and its log line, when a plugged-in sound card has no PipeWire card of its own | `audio-health` (88) |
+| 8e | a desktop notification, naming the failed unit and its log line, when a plugged-in sound card has no PipeWire card of its own (opt-in; while off its retirement removes it) | `audio-health` (88) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -501,7 +515,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `quicklook` | 85 | `packages` | on |
 | `thumbnailers` | 86 | `system` (user level, no root) | on |
 | `session-priority` | 87 | `system` (user level, no root) | on |
-| `audio-health` | 88 | `system` (user level, no root) | on |
+| `audio-health` | 88 | `system` (user level, no root; retires itself while off) | off |
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
@@ -675,7 +689,7 @@ Tests: `modules/session-priority/tests`.
 
 ### Audio health (`audio-health`)
 
-A user-level `system` module (`root = false`, order 88, ticket #236) that sends a desktop notification when a plugged-in sound card has no PipeWire card of its own. Full spec: [audio-health.md](audio-health.md).
+A user-level `system` module (`root = false`, order 88, tickets #236 and #244, **off by default**; turn it on per machine with `[modules.audio-health] enabled = true` in `profile.toml` or the machine's `machine.toml`) that sends a desktop notification when a plugged-in sound card has no PipeWire card of its own. While it is off its declared retirement removes what an earlier apply installed. Full spec: [audio-health.md](audio-health.md).
 
 ### Base modules
 
@@ -786,6 +800,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | login shell, `brew-prefix` / `brew-install` under `--no-sudo` | `zsh`, `brew` | they need root | run without `--no-sudo`, or `chsh -s /usr/bin/zsh`; a root-owned existing prefix: `sudo chown -R <user>:<group> /home/linuxbrew/.linuxbrew` |
 | `sudo` password | every `[sudo]` action | root actions ask on the terminal | answer the prompt of `sudo` once, up front (*Elevation*; the same password covers the whole run). Without a terminal (ssh without `-t`, an agent or a sandbox with `no_new_privs`) every user-level action still runs, the root actions are listed as the root remainder with the command to run from a normal terminal, and the exit code is 6; or use a temporary NOPASSWD sudoers file for the remote run and remove it afterwards (ticket #54) |
 | user manager unreachable, or a foreign override of a setting | `session-priority` | the module reloads the user manager and reads the kernel's cgroup files back; without a session bus (ssh without a login session, a sandbox) it cannot, and an override by another drop-in or `set-property` survives a reload | run `systemctl --user daemon-reload` from the desktop session; if a value still differs, `systemctl --user cat session.slice org.gnome.Shell@ubuntu.service` shows the overriding drop-in |
+| user manager silent while audio-health is switched off | `audio-health` | the retirement (`retire`) leaves the timer and the files alone when no user manager answers (ssh without a login session, `su`, cron): removing the units under a running timer would leave it firing at a missing script | run `ubuntu-tweak apply --commit --only audio-health` in the desktop user's own session (*Audio health*) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
 | FileVault volume, or the kernel module under Secure Boot | `disks` | an encrypted APFS volume needs a password no unit can type and the module never stores; a DKMS module needs a signing key enrolled with a reboot | mount it by hand (`apfs-fuse -r <password> <device> <dir>`); or `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`, reboot, confirm; or keep the default `driver = "fuse"` (*Disks*) |
 | `agent-sub` missing | `error-intercept` | the `agent-tools` package that provides `agent-sub` comes from a repository the module does not fetch | install agent-tools, or set `[modules.error-intercept] agent_tools_dir` to its directory (*Error interception*) |
@@ -1203,8 +1218,9 @@ include = []                                                  # lifts the `state
 "laptop/power" = ["org/gnome/settings-daemon/plugins/power/**"]
 ```
 
-Disabling a module stops managing it; it does not uninstall. `ubuntu-tweak` never edits the
-repo's files on the user's behalf.
+Disabling a module stops managing it; it does not uninstall, except a `system` module that declares a
+retirement (`retire`, *Source kinds*): while that one is disabled, `apply` removes what it installed.
+`ubuntu-tweak` never edits the repo's files on the user's behalf.
 
 #### `system.toml` (root, applied through sudo/pkexec at `--commit`)
 
@@ -2435,6 +2451,7 @@ check = "ssh-server check"
 | `check` (`--check`; `plan` is also `--dry-run`) | Read-only, needs no root. Exit 0 = every fact holds, 3 = drift (the unmet facts are printed, one line each), anything else = the checker broke (the checker protocol in *Source kinds*). |
 | `status` | The same facts, all of them, one line each: `ok`, `missing` or `manual` (unmet and not fixable by `install`, e.g. a signing key that does not exist). Exit codes as `check`. Used by hand and by tests; the engine does not call it. |
 | `plan` | Optional, read-only: what `install` is going to do, one line each (`firefox-passkey-qr` prints its installer's `--dry-run` listing). Named in the manifest as `preview`; the engine prints it indented under the action line of the `apply` preview. |
+| `retire-check`, `retire-plan`, `retire` | Only for a module that declares a retirement (`[source] retire`, *Source kinds*), run while the module is disabled: `retire-check` is `check` for "nothing of the install is left" (exit 0 / 3), `retire-plan` is `plan` for the removal, `retire` removes what is left and may exit 10 like `install`. Any other module answers them with exit 1. |
 | `install` | Makes the facts true. Exit 0 = done, 1 = failed (stderr says why), 75 = failed only for a network / lock cause (`TempFail` in `module_script`, which the engine turns into its `Transient` and retries with backoff), 10 = blocked on a human step: it prints `needs manual: <what>` and changed nothing it could not finish. The engine runs `check` again afterwards (*Plan and actions*), so an exit 0 that did not converge is an error, never a success. |
 
 **Scaffold for a module that writes under `/`** (`apt-sources`, `docker-daemon`; ticket #105). A new root module
@@ -2477,116 +2494,7 @@ Tests never touch the machine: the scripts take an injectable `Process` (the one
 
 #### SSH server (`ssh-server`, root)
 
-Facts, in the order `status` prints them:
-
-1. the `openssh-server` package is installed (`dpkg-query`);
-2. only when the profile sets `password_auth` (below): `/etc/ssh/sshd_config.d/00-ubuntu-tweaks.conf`
-   has the expected text, `sshd_config` includes `sshd_config.d/*.conf`, and sshd's **effective**
-   value (the first one it reads, `Include` processed inline) is the wanted one: a
-   `PasswordAuthentication` above the `Include` line would win over the drop-in, which is a `manual` fact;
-3. only when sshd listens on tailscale addresses (a `ListenAddress` inside `100.64.0.0/10` or
-   `fd7a:115c:a1e0::/48`) and a `tailscaled.service` unit exists:
-   `/etc/systemd/system/ssh.service.d/10-ubuntu-tweaks-tailscale.conf` has the expected text;
-4. `ssh.socket` is neither enabled nor active: with socket activation (the Ubuntu 24.04+ default)
-   systemd, not sshd, holds the listening socket and ignores `sshd_config`'s `Port`/`ListenAddress`, so
-   the module runs sshd as a plain service (`systemctl disable --now ssh.socket`, the procedure Ubuntu
-   documents for a non-default port);
-5. `ssh.service` is enabled;
-6. ... and active;
-7. systemd has loaded the current unit files (`systemctl show -p NeedDaemonReload` is `no`): a
-   `daemon-reload` that failed after a drop-in was written is drift again, not forgotten;
-8. sshd accepts connections on every `(address, port)` its configuration names: the `Port` lines
-   (default 22) and the `ListenAddress` lines, read from `/etc/ssh/sshd_config` and its `Include`
-   chain (a `Match` block ends a file's global part), compared with `ss -H -ltn`; a wildcard
-   socket covers a named address of its own family (`*` covers both, `0.0.0.0` only IPv4, `::` only IPv6: sshd sets `IPV6_V6ONLY`), a host
-   *name* is matched by port only (`ss -n` shows numbers).
-
-The checker reads the same files sshd does. A file that exists but the desktop user cannot read (a
-`0600` `50-cloud-init.conf`) makes `check` fail with exit 1 and the file's name rather than guess a
-different configuration than the root install sees; make it readable (mode 644).
-
-**The module does not change `Port`, `AllowUsers`, `ListenAddress` or any other sshd setting that is
-already there**: a machine's own `sshd_config.d` is its business (this machine's
-`99-moshi-tailscale.conf` keeps working as it is). The stock Ubuntu `sshd_config` is already a sane
-default (port 22, every address, `Include` of the drop-in directory), so with no configuration the
-module writes none; it installs the package and enables and starts the service.
-
-*The boot failure it fixes.* With `ListenAddress 100.74.26.95` and Port 2223 in a drop-in, sshd
-starts before `tailscaled` has created the address, exits 255 (`Cannot assign requested address`) and
-`ssh.service` stays failed, because the unit says `RestartPreventExitStatus=255`. The fix is a
-systemd drop-in, not a change to sshd:
-
-```ini
-# /etc/systemd/system/ssh.service.d/10-ubuntu-tweaks-tailscale.conf
-[Unit]
-After=tailscaled.service
-Wants=tailscaled.service
-StartLimitIntervalSec=120
-StartLimitBurst=10
-
-[Service]
-Restart=on-failure
-RestartSec=5
-RestartPreventExitStatus=
-```
-
-`After=`/`Wants=` fix the order; the retry covers the short gap between `tailscaled` being up and the
-address being assigned (at most 10 starts in 2 minutes, so a real configuration error does not
-loop). *Decision*: not `net.ipv4.ip_nonlocal_bind` / `net.ipv6.ip_nonlocal_bind`: they would be
-system-wide for every process, while the problem is one unit's ordering. The drop-in has its own
-file name (`10-ubuntu-tweaks-tailscale.conf`, not `override.conf`) so the user's own overrides are
-never replaced.
-
-*Password policy, only when asked.* `[modules.ssh-server] password_auth = false` writes
-`/etc/ssh/sshd_config.d/00-ubuntu-tweaks.conf` with `PasswordAuthentication no` and
-`KbdInteractiveAuthentication no` (both: PAM keyboard-interactive would otherwise still take
-a password); `true` writes `PasswordAuthentication yes`. `00-` is read first and sshd keeps the first
-value it sees, so the profile wins over other drop-ins. Never locking the user out: `false` is refused
-(exit 10, `needs manual`) while the desktop user has no usable public key in `~/.ssh/authorized_keys`
-(a line with a key type and a base64 body, not a `command=` / `restrict` / `from=` key; `AuthorizedKeysFile` and `AllowUsers` are not consulted; the guard applies only when the file would be written, so repairs of an already converged policy still run), while
-the installer cannot tell which user to protect (a root shell without `sudo`), while `sshd_config` does not
-`Include` the drop-in directory (also when the file is already in place), or while a setting above the
-`Include` line overrides the drop-in (the file just written is removed again). Without the option an
-existing file is left as it is (disabling a module never uninstalls).
-
-*Install order and validation.* As root: `apt-get install -y openssh-server` when missing; write the
-password-policy drop-in (rolled back when `sshd -t` rejects it); `sshd -t` **before** anything is
-restarted or the unit drop-in is written, so a rejected run leaves no file behind and the next run still
-reloads systemd; the unit drop-in, then `systemctl daemon-reload` when systemd says it is needed;
-`disable --now ssh.socket` when socket activation is on; `enable ssh.service`; `reset-failed` + `start`
-when it is not active; otherwise `restart` when the socket was just switched off (the running sshd
-was started by the socket and holds systemd's listener, so it must re-exec to bind `sshd_config`'s
-addresses) or `reload` when only sshd's own config changed. A `reload` that fails removes the policy file
-it just wrote, so `check` never reports a policy that sshd did not take. The unit drop-in needs no
-restart of a healthy sshd; open sessions survive either way (`KillMode=process`).
-`ChallengeResponseAuthentication` is read as its alias `KbdInteractiveAuthentication` when looking for a
-shadowing line.
-
-*memguard's polkit rule.* `docs/specs/memguard.md` makes the polkit rule `50-memguard-swap-drain.rules`
-refuse `systemctl start ssh.service` for the **desktop user** (it grants only `swap-drain.service`; the
-rest falls through to the default policy). That is unchanged and not in the way: the module's mutating
-commands run as **root** through `sudo` (or `pkexec`), and polkit's `manage-units` check does not
-apply to uid 0; `check`/`status` use only read-only `systemctl is-enabled` / `is-active`, which need no
-authorization. The module never asks polkit for anything, and memguard's own guard needs no
-exception. (`sshd` is on memguard's protected list, so it is never frozen or killed either.)
-
-Real-root verification (what fake-root tests cannot prove; run once on a real machine, as root where
-marked):
-
-- In a terminal (the root step asks for a password): `ubuntu-tweak apply --only ssh-server` (preview
-  lists the drop-in and the service start), then `--commit`.
-- `systemctl status ssh.service` is `active (running)`; `systemctl is-enabled ssh.service` is `enabled`.
-- `ss -ltn` shows sshd on every address and port in `sshd_config`.
-- `ubuntu-tweak status --only ssh-server` exits 0; a second `apply --commit` reports `0 changed`.
-- Reboot: `ssh.service` is `active` after boot (`journalctl -b -u ssh.service` has no `Cannot assign
-  requested address`), and `ssh -p 2223 <tailscale-ip>` works from another tailnet host.
-- With `password_auth = false` and a key in `~/.ssh/authorized_keys`: a password login is refused, the
-  key login works; with no key the run stops with `needs manual` and the file does not exist.
-- `systemctl is-enabled ssh.socket` is `disabled` and `systemctl is-active ssh.socket` is `inactive`
-  (sshd runs as a service, so `Port`/`ListenAddress` apply); an unreadable drop-in makes `status` fail with
-  its name.
-- As the desktop user, `systemctl start --no-ask-password ssh.service` is still refused
-  (memguard's rule is intact).
+Full spec: [ssh-server.md](ssh-server.md) (moved out of this file to keep it under the lint gate's line ceiling).
 
 #### Disks (`disks`, root)
 

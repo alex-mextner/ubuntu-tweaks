@@ -1,15 +1,21 @@
 description = "audio-health: a desktop notification, naming the failed unit and its log line, when a plugged-in sound card has no PipeWire card of its own or wireplumber/pipewire failed"
-enabled = true
+manual = "run ubuntu-tweak apply --commit --only audio-health in the desktop user's own session (not ssh without a login session): the retirement needs the user manager to answer"
+enabled = false   # opt in per machine: [modules.audio-health] enabled = true in profile.toml or machine.toml
 order = 88   # after thumbnailers (86): user level, no root
 
 # User level: a checker script, a oneshot user service and a timer (at login, then every 5 minutes) under $HOME, and the
 # timer enabled in the user manager (spec, *Audio health*). The check is read-only and silent while audio is healthy.
+# Off by default; while it is off the retirement leaves none of it (timer disabled, units and script removed), so a
+# machine that had it installed ends in the declared state with one `apply`.
 [source]
 kind = "system"
 root = false
 install = "audio-health install"
 check = "audio-health check"
 preview = "audio-health plan"
+retire = "audio-health retire"
+retire_check = "audio-health retire-check"
+retire_preview = "audio-health retire-plan"
 
 [deps]
 apt = ["alsa-utils", "wireplumber", "libnotify-bin"]

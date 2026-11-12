@@ -21,7 +21,9 @@ Public API:
 - ``Account(name, home, uid)`` and ``invoking_account(env, *, lookup_name, lookup_uid, euid) -> Account``.
 - ``Finding(ok, subject, detail="", manual=False)``: one verified fact; ``manual`` marks an unmet fact
   that no installer run can fix (a missing signing key).
-- ``Module`` (ABC): ``findings()`` (read-only) and ``apply()``.
+- ``Module`` (ABC): ``findings()`` (read-only) and ``apply()``; a module that declares a retirement (``[source]
+  retire`` / ``retire_check`` / ``retire_preview``) also implements ``retired_findings()`` (what is left, read-only),
+  ``retire()`` and ``retire_plan()``; any other module answers those commands with ``ModuleError`` (exit 1).
 - ``NeedsManual(message)``, ``ModuleError(message)``.
 - ``write_file(path, data, mode)``: atomic write (``str`` or ``bytes``) whose final mode is set before the rename.
 - ``read_text_or_none(path)`` and ``unified_diff_lines(shown, old, new)``: the read and the diff every ``plan`` uses.
@@ -38,7 +40,8 @@ Public API:
 - ``keyring_secret(process, purpose) -> str | None``: ``secret-tool lookup application ubuntu-tweaks
   purpose <purpose>``; None when absent, empty or ``secret-tool`` is missing. Never printed or logged.
 - ``main(module, argv, *, out, err) -> int``: the ``check`` / ``status`` / ``plan`` / ``install`` dispatcher
-  (``--check`` and ``--dry-run`` are accepted as ``check`` and ``plan``);
+  (``--check`` and ``--dry-run`` are accepted as ``check`` and ``plan``) and the retirement's ``retire-check`` /
+  ``retire-plan`` / ``retire``, answered like ``check`` / ``plan`` / ``install``;
   ``Module.plan()`` (default: nothing) is the read-only preview of what ``install`` will do.
 - ``RootedModule(root, *, backup_dir, is_root, clock=None)``: ``Module`` subclass for a module that writes under a
   root that tests stage in a directory: ``_p(relative)``, ``_shown(path)`` (the ``/``-rooted display form),
@@ -83,7 +86,8 @@ EXIT_TEMPFAIL = 75
 
 CONFIG_ENV = "UBUNTU_TWEAK_MODULE_CONFIG"
 ALIASES = {"--check": "check", "--dry-run": "plan"}
-USAGE = "usage: {name} check|status|plan|install"
+USAGE = "usage: {name} check|status|plan|install|retire-check|retire-plan|retire"
+NO_RETIREMENT = "this module declares no retirement"
 KEYRING_APPLICATION = "ubuntu-tweaks"
 # What apt-get may not ask for or wait for: debconf, needrestart's dialog and restart, apt-listchanges' pager.
 APT_ENVIRONMENT = {
@@ -139,6 +143,18 @@ class Module(ABC):
     def plan(self) -> list[str]:
         """What ``install`` is going to do, one line each; read-only. Default: nothing to add to the action line."""
         return []
+
+    def retired_findings(self) -> list[Finding]:
+        """What of the install is left while the module is disabled, one unmet ``Finding`` each; read-only."""
+        raise ModuleError(NO_RETIREMENT)
+
+    def retire(self) -> None:
+        """Remove what ``apply()`` put in place so that ``retired_findings()`` is all ``ok``."""
+        raise ModuleError(NO_RETIREMENT)
+
+    def retire_plan(self) -> list[str]:
+        """What ``retire()`` is going to do, one line each; read-only."""
+        raise ModuleError(NO_RETIREMENT)
 
 
 class RootedModule(Module):
@@ -313,7 +329,15 @@ def keyring_secret(process: Process, purpose: str) -> str | None:
 def main(module: Module, argv: Sequence[str], *, out: TextIO, err: TextIO) -> int:
     script = module.name
     words = [ALIASES.get(word, word) for word in argv]
-    if len(words) != 1 or words[0] not in ("check", "status", "plan", "install"):
+    if len(words) != 1 or words[0] not in (
+        "check",
+        "status",
+        "plan",
+        "install",
+        "retire-check",
+        "retire-plan",
+        "retire",
+    ):
         err.write(USAGE.format(name=script) + "\n")
         return EXIT_USAGE
     command = words[0]
@@ -321,11 +345,14 @@ def main(module: Module, argv: Sequence[str], *, out: TextIO, err: TextIO) -> in
         if command == "install":
             module.apply()
             return EXIT_OK
-        if command == "plan":
-            for line in module.plan():
+        if command == "retire":
+            module.retire()
+            return EXIT_OK
+        if command in ("plan", "retire-plan"):
+            for line in module.plan() if command == "plan" else module.retire_plan():
                 out.write(line + "\n")
             return EXIT_OK
-        findings = module.findings()
+        findings = module.retired_findings() if command == "retire-check" else module.findings()
     except NeedsManual as blocked:
         out.write(f"needs manual: {blocked}\n")
         return EXIT_NEEDS_MANUAL

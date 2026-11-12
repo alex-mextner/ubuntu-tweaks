@@ -5,6 +5,9 @@
     audio-health status    the same facts, one line each
     audio-health plan      what install would change
     audio-health install   as the desktop user: the check script, its user service and timer, the timer enabled
+    audio-health retire-check | retire-plan | retire
+                           the retirement while the module is disabled: nothing left (exit 0 / 3), what it would
+                           remove, and the removal (the timer disabled and stopped, the units and the script gone)
 
 The check itself is `audio-health-check` (installed as ~/.local/bin/audio-health-check).
 Spec: docs/specs/ubuntu-tweak-cli.md, *Audio health*.
