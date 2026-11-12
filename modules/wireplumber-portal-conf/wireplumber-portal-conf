@@ -14,12 +14,14 @@ looks there: `type = module` components come from `/usr/lib/<arch>/wireplumber-0
 (CONFIG) on every start, PipeWire keeps only the Dummy Output, and the headset has no device.
 
 `check` reads the fragments wireplumber loads (`*.conf` of `/etc/xdg`, `/etc`, `/usr/local/share`, `/usr/share`, each +
-`/wireplumber/wireplumber.conf.d`; a name in a higher-priority directory masks the same name below it) and the
-elements of their `wireplumber.components` arrays: `{ name = X, type = module }` needs `/usr/lib/<arch>/wireplumber-0.5/X.so`,
+`/wireplumber/wireplumber.conf.d`; only regular files count, and a name in a higher-priority directory masks the same
+name below it: an empty regular file does, a link to `/dev/null` does not) and the
+elements of their `wireplumber.components` (and `override.wireplumber.components`) arrays: `{ name = X, type = module }` needs `/usr/lib/<arch>/wireplumber-0.5/X.so`,
 `type = pw-module` needs `/usr/lib/<arch>/pipewire-0.3/X.so`; an absolute `name` is a path of its own. It reports every
 conf with a module that is not there. A profile that disables the feature (`feature = disabled`) is not evaluated:
-such a conf still reports. `install` retires only the files named in `RETIRED_CONFS` of the /usr/local directory
-(rename to `<name>.conf.disabled`: wireplumber reads `*.conf` only, so renaming back undoes it) and only while a module
+such a conf still reports. `install` retires only the regular files named in `RETIRED_CONFS` of the /usr/local directory
+(a symlink is `needs manual`: a retired link is never restored) by renaming them to `<name>.conf.disabled` (a link then
+an unlink, never a replace; wireplumber reads `*.conf` only, so renaming back undoes it), and only while a module
 of theirs is missing; a conf whose module exists is never touched. A retired copy is never overwritten (a different
 `.disabled` there makes the new name `.disabled.<UTC stamp>`); the same bytes retired already make the conf the
 duplicate. Any other broken conf is the owner's: `install` ends in `needs manual` naming it. The module `.so` under
@@ -78,6 +80,9 @@ CONF_DIRS = (
 RETIRED_CONFS = ("10-xdg-desktop-portal.conf",)
 RETIRED_SUFFIX = ".disabled"
 COMPONENTS_KEY = "wireplumber.components"
+# `override.<section>` replaces the array of earlier fragments instead of extending it; either way its modules load
+COMPONENTS_KEYS = (COMPONENTS_KEY, f"override.{COMPONENTS_KEY}")
+RETIRE_ATTEMPTS = 5  # a name picked for the retired copy that is taken meanwhile is picked again, this many times
 # component type -> the directory (below /usr/lib/<arch>) of the process that loads it
 MODULE_DIRS = {"module": "wireplumber-0.5", "pw-module": "pipewire-0.3"}
 TOKEN = re.compile(
@@ -118,7 +123,7 @@ def required_modules(text: str) -> list[tuple[str, str]]:
         if kind == "punct":
             if value in "{[":
                 is_component = bool(stack) and stack[-1].components and value == "{"
-                is_list = value == "[" and not stack and key == COMPONENTS_KEY
+                is_list = value == "[" and not stack and key in COMPONENTS_KEYS
                 stack.append(Frame({} if value == "{" else None, components=is_list, element=is_component))
                 key = None
             elif value in "}]":
@@ -195,8 +200,10 @@ class WireplumberPortalConf(Module):
         return (self._module_dir(kind) / f"{name}.so").is_file()
 
     def _confs(self) -> Iterator[Path]:
-        """The fragments wireplumber loads: one per file name, from the highest-priority directory that has it (an
-        empty file of the same name in ``/etc`` masks a packaged fragment)."""
+        """The fragments wireplumber loads: one per file name, from the highest-priority directory that has it. Only a
+        regular file counts, as in wireplumber's own iterator (``wp_base_dirs_new_files_iterator`` skips everything else
+        before it shadows a lower-priority name): an empty file of the same name in ``/etc`` masks a packaged fragment, a
+        link to ``/dev/null`` does not (it is a character device)."""
         seen: set[str] = set()
         for relative in CONF_DIRS:
             directory = self._root / relative
@@ -221,6 +228,7 @@ class WireplumberPortalConf(Module):
                 result.facts.append(Finding(True, f"{shown} requires only modules that exist"))
                 continue
             retirable = path.parent == self._root / LOCAL_CONF_DIR and path.name in RETIRED_CONFS
+            retirable = retirable and not path.is_symlink()  # a retired link would never be restored
             broken = BrokenConf(path, missing, retirable)
             (result.retire if retirable else result.manual).append(broken)
             result.facts.append(
@@ -253,8 +261,15 @@ class WireplumberPortalConf(Module):
 
     def _manual_hint(self, path: Path) -> str:
         """A package's file is never deleted (dpkg restores it): an empty file of the same name in /etc masks it."""
+        if path.is_symlink():
+            return (
+                f"; it is a symlink to {os.readlink(path)}: retire or remove it by hand (install leaves a link alone)"
+            )
         if path.parent == self._root / "usr/share/wireplumber/wireplumber.conf.d":
-            return f"; fix it, or mask it with an empty /etc/wireplumber/wireplumber.conf.d/{path.name}"
+            return (
+                f"; fix it, or mask it with an empty regular file /etc/wireplumber/wireplumber.conf.d/{path.name} "
+                "(a link to /dev/null does not mask: wireplumber skips anything but a regular file)"
+            )
         return "; fix or remove it by hand"
 
     def _why(self, broken: BrokenConf) -> str:
@@ -359,6 +374,26 @@ class WireplumberPortalConf(Module):
                 return path.with_name(name), False
         raise ModuleError(f"{self._shown(path)}: too many retired copies next to it, remove some by hand")
 
+    def _retire(self, path: Path) -> Path:
+        """Retire ``path`` and return where it went. The name was picked with an exists-check, so it can be taken
+        before the rename: link then unlink (as ``_restore`` does) fails on a taken name where ``os.replace`` would
+        overwrite it, and the name is picked again."""
+        for _ in range(RETIRE_ATTEMPTS):
+            target, duplicate = self._destination(path)
+            if duplicate:  # the very same bytes are retired already: the conf is the duplicate
+                path.unlink()
+                return target
+            try:
+                os.link(path, target)
+            except FileExistsError:
+                continue
+            path.unlink()
+            return target
+        raise NeedsManual(
+            f"{self._shown(path)} could not be retired: the name for its copy keeps being taken meanwhile; "
+            "run apply again"
+        )
+
     def plan(self) -> list[str]:
         result = self.inspect()
         lines: list[str] = []
@@ -374,7 +409,9 @@ class WireplumberPortalConf(Module):
             lines.append(f"  restore {self._shown(restore.target)}: {self._found(restore.modules)}")
             lines.append(f"  rename {self._shown(restore.source)} to {self._shown(restore.target)}")
         for broken in result.manual:
-            lines.append(f"needs manual: {self._shown(broken.path)}: {self._why(broken)}{self._manual_hint(broken.path)}")
+            lines.append(
+                f"needs manual: {self._shown(broken.path)}: {self._why(broken)}{self._manual_hint(broken.path)}"
+            )
         for restore in result.restore_manual:
             lines.append(f"needs manual: {restore.blocked}")
         return lines or ["nothing to change"]
@@ -384,11 +421,7 @@ class WireplumberPortalConf(Module):
             raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
         retired = self.inspect().retire
         for broken in retired:
-            target, duplicate = self._destination(broken.path)
-            if duplicate:  # the very same bytes are retired already: the conf is the duplicate
-                broken.path.unlink()
-            else:
-                os.replace(broken.path, target)
+            target = self._retire(broken.path)
             sys.stdout.write(f"retired {self._shown(broken.path)} -> {self._shown(target)}\n")
         # after the retire: its name is free for an older copy whose module exists
         restored = self.inspect().restore
@@ -399,6 +432,11 @@ class WireplumberPortalConf(Module):
         remaining = self.inspect()
         problems = [
             f"{self._shown(broken.path)} requires a module wireplumber cannot find ({self._why(broken)})"
+            + (
+                f"; {self._shown(broken.path)} is a symlink: retire or remove it by hand"
+                if broken.path.is_symlink()
+                else ""
+            )
             for broken in remaining.manual
         ] + [restore.blocked for restore in remaining.restore_manual]
         if problems:

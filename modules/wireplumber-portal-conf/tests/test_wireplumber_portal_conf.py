@@ -748,5 +748,181 @@ class ReviewFindings(Staged):
         self.assertIn("/etc/wireplumber/wireplumber.conf.d/20-other.conf", result.stdout)
 
 
+class SymlinkedLiveConf(Staged):
+    """A link at the live name is not retired (a retired link is never restored): the owner settles it."""
+
+    def setUp(self):
+        super().setUp()
+        self.target = self.put("elsewhere/portal.conf", PORTAL_TEXT)
+        (self.root / LOCAL_CONFS).mkdir(parents=True)
+        (self.root / PORTAL_CONF).symlink_to(self.target)
+
+    def test_check_reports_it_as_manual_naming_the_link(self):
+        result = self.run_script("check")
+        self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+        self.assertIn("10-xdg-desktop-portal.conf", result.stdout)
+        self.assertIn("symlink", result.stdout)
+        self.assertIn("manual", result.stdout)
+
+    def test_install_leaves_the_link_alone_and_ends_in_needs_manual(self):
+        result = self.run_script("install")
+        self.assertEqual(result.returncode, 10, result.stderr + result.stdout)
+        self.assertIn("needs manual", result.stdout)
+        self.assertIn("10-xdg-desktop-portal.conf", result.stdout)
+        self.assertEqual(os.readlink(self.root / PORTAL_CONF), str(self.target))
+        self.assertEqual([p for p in self.tree() if ".disabled" in p], [])
+        self.assertEqual(self.target.read_text(), PORTAL_TEXT)
+
+    def test_the_plan_does_not_promise_a_rename(self):
+        plan = self.run_script("plan").stdout
+        self.assertIn("needs manual", plan)
+        self.assertNotIn("rename", plan)
+
+    def test_a_link_to_a_conf_whose_module_exists_is_fine(self):
+        self.put(f"{WP_MODULES}/libxdg-desktop-portal.so", "elf")
+        self.assertEqual(self.run_script("check").returncode, 0)
+        self.assertEqual(self.run_script("install").returncode, 0)
+        self.assertTrue((self.root / PORTAL_CONF).is_symlink())
+
+
+class OverrideComponents(Staged):
+    """``override.wireplumber.components`` replaces the array instead of extending it: its modules are still loaded."""
+
+    OVERRIDE = "override.wireplumber.components = [\n  { name = libgone, type = module }\n]\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = load_script()
+
+    def test_the_parser_reads_the_override_spelling(self):
+        self.assertEqual(self.script.required_modules(self.OVERRIDE), [("module", "libgone")])
+        quoted = '"override.wireplumber.components": [ { "name": "libgone", "type": "pw-module" } ]'
+        self.assertEqual(self.script.required_modules(quoted), [("pw-module", "libgone")])
+
+    def test_both_spellings_in_one_file_are_both_read(self):
+        text = self.OVERRIDE + component_conf("libother")
+        self.assertEqual(self.script.required_modules(text), [("module", "libgone"), ("module", "libother")])
+
+    def test_a_nested_key_of_the_same_name_is_not_a_components_array(self):
+        text = (
+            "wireplumber.profiles = { main = { override.wireplumber.components = [ { name = libx, type = module } ] } }"
+        )
+        self.assertEqual(self.script.required_modules(text), [])
+
+    def test_an_override_with_a_missing_module_is_drift_naming_the_conf(self):
+        self.put(f"{ETC_CONFS}/30-mine.conf", self.OVERRIDE)
+        check = self.run_script("check")
+        self.assertEqual(check.returncode, 3, check.stderr + check.stdout)
+        self.assertIn("30-mine.conf", check.stdout)
+        self.assertIn("libgone", check.stdout)
+        install = self.run_script("install")
+        self.assertEqual(install.returncode, 10, install.stderr + install.stdout)
+        self.assertIn("30-mine.conf", install.stdout)
+
+    def test_an_override_whose_module_exists_is_clean(self):
+        self.put(f"{ETC_CONFS}/30-mine.conf", self.OVERRIDE)
+        self.put(f"{WP_MODULES}/libgone.so", "elf")
+        self.assertEqual(self.run_script("check").returncode, 0)
+
+    def test_the_incident_conf_written_as_an_override_is_still_retired(self):
+        self.put(PORTAL_CONF, PORTAL_TEXT.replace("wireplumber.components = [", "override.wireplumber.components = ["))
+        self.assertEqual(self.run_script("install").returncode, 0)
+        self.assertFalse((self.root / PORTAL_CONF).exists())
+        self.assertTrue((self.root / f"{PORTAL_CONF}.disabled").exists())
+
+
+class RetireRace(Staged):
+    """The name picked for the retired copy can be taken between the pick and the rename: nothing is overwritten."""
+
+    def test_a_copy_that_appears_after_the_name_was_picked_is_not_overwritten(self):
+        script = load_script()
+        self.put(PORTAL_CONF, PORTAL_TEXT)
+        module = script.WireplumberPortalConf(
+            self.root, is_root=True, multiarch=MULTIARCH, clock=datetime(2026, 11, 12, 9, 0, 0, tzinfo=UTC)
+        )
+        pick = module._destination
+        raced = []
+
+        def losing_the_race(path):
+            target, duplicate = pick(path)
+            if not raced:  # someone creates the very name that was just picked
+                raced.append(target)
+                target.write_bytes(b"created in between\n")
+            return target, duplicate
+
+        module._destination = losing_the_race
+        with contextlib.redirect_stdout(io.StringIO()):
+            module.apply()
+        self.assertEqual(raced[0].read_bytes(), b"created in between\n")
+        self.assertFalse((self.root / PORTAL_CONF).exists())
+        kept = sorted(p.read_bytes() for p in (self.root / LOCAL_CONFS).iterdir())
+        self.assertEqual(kept, sorted([b"created in between\n", PORTAL_TEXT.encode()]))
+
+    def test_a_name_that_stays_taken_ends_in_needs_manual_without_losing_the_conf(self):
+        script = load_script()
+        self.put(PORTAL_CONF, PORTAL_TEXT)
+        module = script.WireplumberPortalConf(self.root, is_root=True, multiarch=MULTIARCH)
+        taken = self.root / LOCAL_CONFS / "taken"
+        taken.write_bytes(b"x")
+        module._destination = lambda path: (taken, False)
+        with self.assertRaises(script.NeedsManual):
+            module.apply()
+        self.assertEqual((self.root / PORTAL_CONF).read_bytes(), PORTAL_TEXT.encode())
+        self.assertEqual(taken.read_bytes(), b"x")
+
+
+class DevNullIsNoMask(Staged):
+    """A link to /dev/null masks nothing: wireplumber 0.5 (``lib/wp/base-dirs.c``, ``wp_base_dirs_new_files_iterator``)
+    skips every entry that is not a regular file (``g_file_test (path, G_FILE_TEST_IS_REGULAR)``, which follows the
+    link and sees a character device) before it shadows the lower-priority fragment of the same name. An empty regular
+    file is what masks, and what the hint asks for."""
+
+    def link_to_dev_null(self, relative):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to("/dev/null")
+
+    def test_a_link_to_dev_null_leaves_the_packaged_fragment_in_force(self):
+        self.put(f"{SYSTEM_CONFS}/40-distro.conf", component_conf("libmissing"))
+        self.link_to_dev_null(f"{ETC_CONFS}/40-distro.conf")
+        check = self.run_script("check")
+        self.assertEqual(check.returncode, 3, check.stderr + check.stdout)
+        self.assertIn("/usr/share/wireplumber/wireplumber.conf.d/40-distro.conf", check.stdout)
+        install = self.run_script("install")
+        self.assertEqual(install.returncode, 10, install.stderr + install.stdout)
+
+    def test_the_xdg_etc_directory_does_not_mask_through_a_link_either(self):
+        self.put(f"{SYSTEM_CONFS}/40-distro.conf", component_conf("libmissing"))
+        self.link_to_dev_null(f"{XDG_ETC_CONFS}/40-distro.conf")
+        self.assertEqual(self.run_script("check").returncode, 3)
+
+    def test_the_hint_names_an_empty_regular_file_and_says_a_dev_null_link_does_not_do_it(self):
+        self.put(f"{SYSTEM_CONFS}/40-distro.conf", component_conf("libmissing"))
+        check = self.run_script("check")
+        self.assertIn("empty regular file", check.stdout)
+        self.assertIn("/dev/null", check.stdout)
+
+    def test_an_empty_regular_file_does_mask(self):
+        self.put(f"{SYSTEM_CONFS}/40-distro.conf", component_conf("libmissing"))
+        self.put(f"{ETC_CONFS}/40-distro.conf", "")
+        self.assertEqual(self.run_script("check").returncode, 0)
+
+    def test_the_hand_built_portal_conf_is_still_retired_beside_a_dev_null_link_of_its_name(self):
+        self.put(PORTAL_CONF, PORTAL_TEXT)
+        self.link_to_dev_null(f"{ETC_CONFS}/10-xdg-desktop-portal.conf")
+        self.assertEqual(self.run_script("check").returncode, 3)
+        self.assertEqual(self.run_script("install").returncode, 0)
+        self.assertFalse((self.root / PORTAL_CONF).exists())
+
+    def test_a_link_to_something_else_is_a_fragment_not_a_mask(self):
+        self.put(f"{SYSTEM_CONFS}/40-distro.conf", component_conf("libmissing"))
+        self.put("elsewhere/40-distro.conf", component_conf("libmissing"))
+        (self.root / ETC_CONFS).mkdir(parents=True)
+        (self.root / ETC_CONFS / "40-distro.conf").symlink_to(self.root / "elsewhere/40-distro.conf")
+        check = self.run_script("check")
+        self.assertEqual(check.returncode, 3, check.stderr + check.stdout)
+        self.assertIn("/etc/wireplumber/wireplumber.conf.d/40-distro.conf", check.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
