@@ -12,8 +12,14 @@ the Dummy Output and a connected headset has no device.
 
 - **`check`** (read-only, no root) reads the fragments wireplumber loads: the `*.conf` files of `/etc/xdg`, `/etc`,
   `/usr/local/share` and `/usr/share` (each + `/wireplumber/wireplumber.conf.d`, in that priority order: a file name in
-  a higher directory masks the same name below it, even an empty one) and collects the elements of their top-level
-  `wireplumber.components` arrays: `name = X, type = module` needs the file `X.so` in `/usr/lib/<arch>/wireplumber-0.5`
+  a higher directory masks the same name below it, even an empty one). Only a **regular file** counts, as in
+  wireplumber's own iterator (`wp_base_dirs_new_files_iterator` in `lib/wp/base-dirs.c`, which skips every entry that fails
+  `g_file_test (path, G_FILE_TEST_IS_REGULAR)` before it shadows a lower-priority name): so an empty regular file masks a
+  packaged fragment and a link to `/dev/null` (the systemd way) does **not**, it is skipped and the packaged one stays in
+  force; a broken packaged fragment is `needs manual` with the hint to mask it with an empty regular file. The check collects the elements of their top-level
+  `wireplumber.components` arrays, and of `override.wireplumber.components` (WirePlumber's prefix for replacing the
+  array of earlier fragments instead of extending it; the module does not work out which fragment wins, so every
+  element of either spelling counts): `name = X, type = module` needs the file `X.so` in `/usr/lib/<arch>/wireplumber-0.5`
   (the host's own dpkg triplet only) and `type = pw-module` (the spelling of wireplumber's own `wireplumber.conf`)
   needs `X.so` in `/usr/lib/<arch>/pipewire-0.3`; an absolute `name` is a path of its own. Rule matches
   (`wireplumber.components.rules`) and profiles are not components. Each conf with a module that is not there is drift
@@ -23,8 +29,13 @@ the Dummy Output and a connected headset has no device.
   not `*.conf` and are never read. User confs under `~/.config/wireplumber` are out of scope (a root script cannot find
   them reliably).
 - **`install`** (root) retires, by renaming to `<name>.conf.disabled` (wireplumber reads only `*.conf`; rename it back to
-  undo), exactly the files of `RETIRED_CONFS` (`10-xdg-desktop-portal.conf`) in `/usr/local/share/wireplumber/wireplumber.conf.d`,
+  undo), exactly the regular files of `RETIRED_CONFS` (`10-xdg-desktop-portal.conf`) in `/usr/local/share/wireplumber/wireplumber.conf.d`,
   and only while a module of theirs is missing: a conf whose module exists (a proper install) is never touched. A
+  **symlink** of that name is not retired: a retired link would never be restored (a retired copy is a regular file), so
+  it is `needs manual` like any other broken conf, naming the link and where it points. The rename never replaces a file:
+  the copy is hard-linked to the name that was picked (fails when it exists) and then the conf is unlinked, so a name
+  taken between the exists-check and the rename (the directory is root-only, but a package script or another run can
+  race) makes the pick start over, five times at most, then `needs manual`; no byte is overwritten. A
   different `.disabled` file already there is kept and the new one gets `.disabled.<UTC timestamp>` (then `.<n>`): a
   retired file is never overwritten; a copy with the same bytes already there makes the conf the duplicate. The name is
   only retired in the `/usr/local` directory: the same file name in `/usr/share`, `/etc/xdg` or `/etc` is not ours.
@@ -44,7 +55,9 @@ the Dummy Output and a connected headset has no device.
   `needs manual` (drift with the `manual` mark for `check`, exit 10 for `install`) naming the files; the owner keeps the
   one they want as `<name>.conf` and removes the rest. A live conf retired in the same run frees its name, so an older
   restorable copy goes back in that run (`plan` lists both). The retire, restore and `needs manual` outcomes are tested
-  in `modules/wireplumber-portal-conf/tests/` (retire, module appears, restore, second run changes nothing).
+  in `modules/wireplumber-portal-conf/tests/` (retire, module appears, restore, second run changes nothing; a symlinked live
+  conf, `override.wireplumber.components`, a retired name taken between the pick and the rename, a `/dev/null` link that
+  masks nothing).
 - **`[[post]] wireplumber-start`** (user level, no root): after the installer, `systemctl --user reset-failed wireplumber.service`
   then `start`, then (3 s later) `is-active`: a unit that does not stay up (another config error) fails the post with
   the journal hint instead of passing as done. Its check is unsatisfied only for the incident's state: the unit's last
