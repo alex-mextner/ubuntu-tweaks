@@ -463,6 +463,7 @@ switchable per machine with `[modules.<name>] enabled = false` in `machines/<hos
 | 8b | Space previews the selected file in Files (Quick Look) | `quicklook` (85) |
 | 8c | thumbnails in Files, the file chooser and the dock for 3D and web-development files | `thumbnailers` (86) |
 | 8d | cursor lag under load: the shell never swaps and wins CPU contention | `session-priority` (87) |
+| 8e | a desktop notification, naming the failed unit and its log line, when a plugged-in sound card has no PipeWire card of its own | `audio-health` (88) |
 | 9 | GNOME settings and profile files | the settings and files phases (no module order: they follow the install phases) |
 | 10 | rig (opt-in: + tmux, omp, `ctmux`) | `rig` (100) |
 
@@ -499,6 +500,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `quicklook` | 85 | `packages` | on |
 | `thumbnailers` | 86 | `system` (user level, no root) | on |
 | `session-priority` | 87 | `system` (user level, no root) | on |
+| `audio-health` | 88 | `system` (user level, no root) | on |
 | `gsconnect` | 90 | `packages` | off |
 | `allowlockedremotedesktop` | 91 | local extension link, toggle | off |
 | `autoheal` | 95 | `base` (a user timer, never root; *Reconcile and failover*, *Self-heal*) | off |
@@ -669,6 +671,10 @@ unreachable user manager (no session bus) is an unmet fact (exit 3) for `check` 
 swappiness and zram are not changed without measurements. A tracker (localsearch) scope module was dropped: the schema's
 `ignored-directories-with-content` (`.git`) already skips repository trees, and the indexer already runs at nice 19 and the idle I/O class.
 Tests: `modules/session-priority/tests`.
+
+### Audio health (`audio-health`)
+
+A user-level `system` module (`root = false`, order 88, ticket #236) that sends a desktop notification when a plugged-in sound card has no PipeWire card of its own. Full spec: [audio-health.md](audio-health.md).
 
 ### Base modules
 

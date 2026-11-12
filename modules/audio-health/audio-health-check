@@ -1,0 +1,253 @@
+#!/usr/bin/python3 -B
+"""audio-health-check: tell the user when sound is gone although the card is plugged in.
+
+Run by audio-health.timer at login and every few minutes (installed as ~/.local/bin/audio-health-check by the
+audio-health module). It compares what the kernel sees with what PipeWire serves and what the audio services are doing:
+
+* a card that ALSA lists (``aplay -l``) and is not HDMI/DisplayPort audio, while PipeWire serves no card of that
+  identity: every such card is matched to the audio devices of ``wpctl status`` (``wpctl inspect``; ``pactl list cards``
+  too when pactl is installed) by its ALSA card index and name (``api.alsa.card`` / ``api.alsa.card.name``, or ``alsa.card`` / ``alsa.card_name`` of a plain PulseAudio), so a
+  missing headset is found although HDMI or the onboard codec is served; the notification names the missing cards;
+* wireplumber.service or pipewire.service failed, is in a restart loop, stopped after an error, or (wireplumber) is
+  not running although pipewire.service is.
+
+Either one sends ONE desktop notification that names the unit and the log line that explains it. Silent while audio is
+healthy. A problem is announced once per day (a stamp file in $XDG_STATE_HOME/audio-health, key = unit, kind, missing cards);
+a notification the notification daemon could not show (early in the login it is not running) leaves no stamp, so the
+next run tries again; a healthy run clears the stamps, so a recurrence is announced at once.
+
+Environment: AUDIO_HEALTH_RENOTIFY_MIN (minutes before the same problem is announced again, default 1440),
+XDG_STATE_HOME. Exit status: 0 whatever the verdict (a failing check must not become a failed unit of its own).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+WIREPLUMBER = "wireplumber.service"
+PIPEWIRE = "pipewire.service"
+COMMAND_TIMEOUT_S = 15
+LOG_LINES = 60
+MESSAGE_LIMIT = 300  # characters of one log line in the notification (the cause often ends a long line)
+HDMI_DEVICE = re.compile(r"HDMI|DisplayPort|\bDP\b", re.IGNORECASE)
+ALSA_DEVICE = re.compile(r"^card (\d+): .*?\[(.*?)\], device \d+: (.*?) \[")
+# PipeWire (and its pulse layer) set api.alsa.card / api.alsa.card.name; a real PulseAudio only alsa.card / alsa.card_name
+ALSA_CARD_INDEX = re.compile(r'^\W*(?:api\.)?alsa\.card = "(\d+)"', re.MULTILINE)
+ALSA_CARD_NAME = re.compile(r'^\W*(?:api\.)?alsa\.card[._]name = "(.*)"', re.MULTILINE)
+PULSE_CARD = re.compile(r"^Card #\d+", re.MULTILINE)  # `pactl list cards` starts each card with this line
+ERROR_WORDS = re.compile(r"fail|error|cannot|can't|unable|not found|denied|missing|locate", re.IGNORECASE)
+LOG_PREFIX = re.compile(r"^\S+ \S+ ")  # `journalctl -o short-iso`: timestamp and host
+BOOKKEEPING = re.compile(r"^\S+ \S+ systemd(?:-\w+)?\[\d+\]: ")  # the service manager's lines about the unit, not the program's
+
+
+def run(argv: list[str], *, untranslated: bool = True) -> tuple[int, str]:
+    """(exit status, stdout); 127 when the program is not installed or not runnable, 124 when it hangs. LC_ALL=C: aplay
+    and pactl translate the lines this script parses; notify-send gets the user's locale (under C it rejects the non-ASCII text
+    it is given)."""
+    try:
+        done = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_S,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "LC_ALL": "C"} if untranslated else None,
+        )
+    except OSError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    return done.returncode, done.stdout
+
+
+def plain(text: str) -> str:
+    """One printable line: control characters dropped (a log line must not drive the notification), clipped."""
+    text = "".join(ch for ch in text.replace("\t", " ") if ch.isprintable()).strip()
+    return text if len(text) <= MESSAGE_LIMIT else text[: MESSAGE_LIMIT - 1] + "…"
+
+
+def alsa_cards() -> dict[int, str]:
+    """ALSA cards (index -> name) that have a device other than HDMI/DisplayPort (a headset, the analog codec)."""
+    status, out = run(["aplay", "-l"])
+    cards: dict[int, str] = {}
+    for line in out.splitlines() if status == 0 else []:
+        match = ALSA_DEVICE.match(line)
+        if match and not HDMI_DEVICE.search(match.group(3)):
+            cards.setdefault(int(match.group(1)), match.group(2))
+    return cards
+
+
+def alsa_identity(properties: str) -> tuple[int, str] | None:
+    """(ALSA card index, ALSA card name) of the card a PipeWire object was made for; None for a non-ALSA object."""
+    index, name = ALSA_CARD_INDEX.search(properties), ALSA_CARD_NAME.search(properties)
+    return (int(index.group(1)), name.group(1)) if index and name else None
+
+
+def pipewire_cards() -> set[tuple[int, str]]:
+    """ALSA cards of the audio devices ``wpctl status`` lists, each read with ``wpctl inspect ID``."""
+    status, out = run(["wpctl", "status"])
+    cards: set[tuple[int, str]] = set()
+    if status != 0:
+        return cards
+    in_audio, in_devices = False, False
+    for line in out.splitlines():
+        stripped = line.strip(" │├└─*")
+        if not line.startswith((" ", "│")) and stripped:
+            in_audio, in_devices = stripped == "Audio", False
+        elif in_audio and stripped.endswith(":") and stripped[:-1] in ("Devices", "Sinks", "Sources", "Filters", "Streams"):
+            in_devices = stripped == "Devices:"
+        elif in_audio and in_devices and (device := re.match(r"(\d+)\.", stripped)):
+            inspected, properties = run(["wpctl", "inspect", device.group(1)])
+            if inspected == 0 and (identity := alsa_identity(properties)):
+                cards.add(identity)
+    return cards
+
+
+def pulse_cards() -> set[tuple[int, str]]:
+    """ALSA cards of ``pactl list cards`` (empty when pactl is missing or cannot connect)."""
+    status, out = run(["pactl", "list", "cards"])
+    blocks = PULSE_CARD.split(out) if status == 0 else []
+    return {identity for block in blocks if (identity := alsa_identity(block))}
+
+
+def served_cards() -> set[tuple[int, str]]:
+    """ALSA cards PipeWire serves, by identity: the kernel's card index AND card name, as PipeWire's own properties
+    ``api.alsa.card`` and ``api.alsa.card.name`` give them, i.e. what ``aplay -l`` prints as ``card N: ID [NAME]``.
+    The pair is the same for USB, PCI and onboard cards (the pulse card name only has the USB vendor/product/serial or
+    the PCI address, not the index), and the name rules out a stale device left for a card number the kernel gave to
+    another card since."""
+    return pipewire_cards() | pulse_cards()
+
+
+def unit_state(unit: str) -> dict[str, str]:
+    status, out = run(["systemctl", "--user", "show", "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "Result",
+                       "-p", "ExecMainStatus", "-p", "NRestarts", unit])
+    state = dict(line.split("=", 1) for line in out.splitlines() if "=" in line) if status == 0 else {}
+    return state if state.get("LoadState") == "loaded" else {}
+
+
+def problem_of(unit: str, state: dict[str, str], pipewire_active: bool) -> tuple[str, str] | None:
+    """(kind, what happened) when the unit is down for a reason, None when it is fine or still starting."""
+    active, sub, result = state.get("ActiveState", ""), state.get("SubState", ""), state.get("Result", "success")
+    exit_status = state.get("ExecMainStatus", "0")
+    if active == "failed":
+        return "failed", f"is failed (Result={result}, exit status {exit_status})"
+    if active == "activating" and sub == "auto-restart":
+        return "loop", f"is in a restart loop (restart {state.get('NRestarts', '?')}, exit status {exit_status})"
+    if active == "inactive" and result != "success":
+        return "stopped", f"stopped after an error (Result={result}, exit status {exit_status})"
+    if active == "inactive" and unit == WIREPLUMBER and pipewire_active:
+        tail = f", last exit status {exit_status}" if exit_status not in ("", "0") else ""
+        return "dead", f"is not running although pipewire.service is{tail}"
+    return None
+
+
+def log_line(unit: str) -> str:
+    """The line of the unit's journal that explains the failure: the program's own last error, else its last line."""
+    status, out = run(["journalctl", "--user", "-b", "-q", "-u", unit, "-n", str(LOG_LINES), "--no-pager", "-o", "short-iso"])
+    lines = [line for line in out.splitlines() if line.strip()] if status == 0 else []
+    own = [line for line in lines if not BOOKKEEPING.match(line)]
+    for pool in (list(filter(ERROR_WORDS.search, own)), own, lines):
+        if pool:
+            return plain(LOG_PREFIX.sub("", pool[-1], count=1))
+    return "(no log line)"
+
+
+def stamp_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(base) / "audio-health"
+
+
+def announce(title: str, body: str, signature: str) -> str:
+    """Show the notification unless this problem was announced within the window; returns what happened."""
+    stamp = stamp_dir() / f"notified-{signature}"
+    try:
+        window_s = int(os.environ.get("AUDIO_HEALTH_RENOTIFY_MIN", "1440")) * 60
+    except ValueError:
+        window_s = 1440 * 60
+    if window_s > 0 and stamp.exists() and time.time() - stamp.stat().st_mtime < window_s:
+        return "already announced"
+    shown, _ = run(
+        ["notify-send", "--app-name=audio-health", "--urgency=critical", "--icon=audio-card", "--", title, body],
+        untranslated=False,
+    )
+    if shown != 0:
+        return "not delivered (no notification daemon yet?), the next run tries again"
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        return "notified (the stamp could not be written, so the next run may repeat it)"
+    return "notified"
+
+
+def seen_before(signature: str) -> bool:
+    """True when the previous run saw this very problem too (it leaves a ``pending`` stamp now). A card PipeWire has not
+    published yet (right after wireplumber starts, right after a plug-in) must not be announced from one sample."""
+    stamp = stamp_dir() / f"pending-{signature}"
+    if stamp.exists():
+        return True
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        return True  # cannot count runs: announce rather than stay silent
+    return False
+
+
+def clear_stamps() -> None:
+    try:
+        for stamp in stamp_dir().glob("*"):
+            stamp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def check() -> int:
+    cards = alsa_cards()
+    served = served_cards()
+    wireplumber, pipewire = unit_state(WIREPLUMBER), unit_state(PIPEWIRE)
+    if wireplumber.get("ActiveState") == "activating" and wireplumber.get("SubState") != "auto-restart":
+        print("audio-health: wireplumber.service is starting, judged at the next run")
+        return 0
+    pipewire_active = pipewire.get("ActiveState") == "active"
+    problems = [
+        (unit, found)
+        for unit, state in ((WIREPLUMBER, wireplumber), (PIPEWIRE, pipewire))
+        if state and (found := problem_of(unit, state, pipewire_active))
+    ]
+    can_ask = bool(shutil.which("wpctl") or shutil.which("pactl"))  # neither installed: no verdict on cards (units still count)
+    missing_cards = [name for index, name in cards.items() if (index, name) not in served] if can_ask else []
+    if not problems and not missing_cards:
+        clear_stamps()
+        print("audio-health: ok")
+        return 0
+    unit, (kind, what) = problems[0] if problems else (WIREPLUMBER, ("silent", "serves no matching card"))
+    signature = hashlib.sha1("|".join([unit, kind, *sorted(missing_cards)]).encode()).hexdigest()[:16]
+    if missing_cards:
+        names = ", ".join(missing_cards)
+        if problems:
+            title = f"No audio device: {unit} {what}"
+            body = f"ALSA lists {names} but PipeWire serves no matching card. {unit} {what}. Log: {log_line(unit)}"
+        else:  # both services run: no unit to blame and no log line that explains anything
+            if not seen_before(signature):
+                print(f"audio-health: {names} has no PipeWire card yet, judged at the next run")
+                return 0
+            title = f"No audio device although {names} is plugged in"
+            body = f"ALSA lists {names} but PipeWire serves no matching card, and both audio services are running."
+    else:
+        title = f"Audio service down: {unit} {what}"
+        body = f"{unit} {what}. Log: {log_line(unit)}"
+    print(f"audio-health: {title}; {announce(title, body, signature)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(check())
