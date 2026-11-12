@@ -1,0 +1,22 @@
+description = "audio-health: a desktop notification, naming the failed unit and its log line, when a plugged-in sound card has no PipeWire card of its own or wireplumber/pipewire failed"
+enabled = true
+order = 88   # after thumbnailers (86): user level, no root
+
+# User level: a checker script, a oneshot user service and a timer (at login, then every 5 minutes) under $HOME, and the
+# timer enabled in the user manager (spec, *Audio health*). The check is read-only and silent while audio is healthy.
+[source]
+kind = "system"
+root = false
+install = "audio-health install"
+check = "audio-health check"
+preview = "audio-health plan"
+
+[deps]
+apt = ["alsa-utils", "wireplumber", "libnotify-bin"]
+
+[[coverage]]
+match = [
+  "unit:audio-health.service", "unit:audio-health.timer", "file:~/.local/bin/audio-health-check",
+]
+class = "tracked"
+reason = "written by modules/audio-health"

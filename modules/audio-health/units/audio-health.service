@@ -1,0 +1,9 @@
+[Unit]
+Description=audio-health: tell the user when a plugged-in sound card has no PipeWire device or an audio service failed
+# Written by the audio-health module (modules/audio-health). Started by audio-health.timer.
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/audio-health-check
+TimeoutStartSec=90
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin

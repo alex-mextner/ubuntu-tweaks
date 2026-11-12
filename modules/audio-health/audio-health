@@ -1,0 +1,41 @@
+#!/usr/bin/python3 -B
+"""audio-health module: a desktop notification when a plugged-in sound card has no PipeWire card of its own.
+
+    audio-health check     exit 0 satisfied, 3 unsatisfied (read-only)
+    audio-health status    the same facts, one line each
+    audio-health plan      what install would change
+    audio-health install   as the desktop user: the check script, its user service and timer, the timer enabled
+
+The check itself is `audio-health-check` (installed as ~/.local/bin/audio-health-check).
+Spec: docs/specs/ubuntu-tweak-cli.md, *Audio health*.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from audio_health_lib import AudioHealth  # noqa: E402
+
+from ubuntu_tweaks.module_script import ModuleError, invoking_account, main  # noqa: E402
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+
+def build() -> AudioHealth:
+    if os.geteuid() == 0:
+        raise ModuleError("audio-health installs into the desktop user's home: run it as that user, not as root")
+    return AudioHealth(invoking_account(os.environ).home, Process())
+
+
+if __name__ == "__main__":
+    try:
+        module = build()
+    except ModuleError as error:
+        sys.stderr.write(f"audio-health: {error}\n")
+        sys.exit(1)
+    sys.exit(main(module, sys.argv[1:], out=sys.stdout, err=sys.stderr))

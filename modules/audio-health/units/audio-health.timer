@@ -1,0 +1,13 @@
+[Unit]
+Description=audio-health: login check and periodic check for missing audio devices
+# Written by the audio-health module (modules/audio-health).
+
+[Timer]
+# The timer starts with the user manager, so OnActiveSec= is the login check; a minute gives wireplumber time to publish
+# the devices before "no card" is judged.
+OnActiveSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
