@@ -3,7 +3,7 @@
 The library is ``agenttools_subscriptions`` of agent-tools, imported from its checkout; its own fake machine
 (``tests/agent_sub_fakes.py``: tg-ctl omp-live + tmux behind one runner, a manual clock) stands in for tmux and omp,
 so no session, subscriber or message is ever real. The tests skip when no agent-tools checkout carries the library
-(``AGENT_TOOLS_DIR`` overrides the search).
+(``AGENT_TOOLS_DIR`` names it; with the variable unset the tests skip, and nothing under the real HOME is searched).
 
 Proves: the ingester publishes through ``agent-sub publish`` (in-process, same argv as the real launcher);
 with no subscriber the dry run prints the exact tmux/omp command that WOULD start and starts nothing; the real
@@ -24,21 +24,15 @@ from ei_fixtures import FAKE_TOKEN, REAL_CMDLINE, Case, crash_text
 
 from error_intercept import cli
 
-CANDIDATES = (
-    os.environ.get("AGENT_TOOLS_DIR", ""),
-    str(Path.home() / "xp/agent-tools/.worktrees/agent-sub-library"),
-    str(Path.home() / "xp/agent-tools"),
-    str(Path.home() / "dev/agent-tools"),
-)
-
 
 def find_agent_tools():
-    for candidate in filter(None, CANDIDATES):
-        root = Path(candidate)
-        if (root / "lib/agenttools_subscriptions/__init__.py").is_file() and (
-            root / "tests/agent_sub_fakes.py"
-        ).is_file():
-            return root
+    """The agent-tools checkout named by ``AGENT_TOOLS_DIR``; never a guess inside the real HOME."""
+    named = os.environ.get("AGENT_TOOLS_DIR")
+    if not named:
+        return None
+    root = Path(named)
+    if (root / "lib/agenttools_subscriptions/__init__.py").is_file() and (root / "tests/agent_sub_fakes.py").is_file():
+        return root
     return None
 
 

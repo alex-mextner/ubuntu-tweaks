@@ -288,5 +288,6 @@ no environment, maps, token or home path; classify; archive; apport-checkreports
 publisher and spool, the CLI, the installer against a fake `systemctl --user` / `agent-sub` (staged and live-style), and the
 end-to-end demo (`test_end_to_end_demo.py`) that runs the ingester against the **real** `agenttools_subscriptions` library with its
 fake tmux/omp machine: no subscriber + dry run prints the exact tmux command that would start; a critical crash starts exactly
-one agent, a nested shell one by default and none with the exemption on; a subscribed agent receives the sanitized event with a receipt and acks it. It skips when no
-agent-tools checkout has the library (`AGENT_TOOLS_DIR`).
+one agent, a nested shell one by default and none with the exemption on; a subscribed agent receives the sanitized event with a receipt and acks it. It skips when
+`AGENT_TOOLS_DIR` does not name an agent-tools checkout that has the library: nothing under the real HOME is searched, and
+`test_agent_tools_lookup.py` proves it with decoy checkouts in a scratch HOME (not found by walking HOME, found through the variable).
