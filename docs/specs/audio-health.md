@@ -3,12 +3,24 @@
 PipeWire without a card is silent: no dialog, only a *Dummy Output* in the sound settings. On 2026-11-11 a Jabra EVOLVE 20 MS headset was
 enumerated by the kernel (ALSA card 1) while PipeWire served nothing, because `wireplumber.service` exited with status 78 on every start (a
 hand-installed portal configuration named a module the distribution's wireplumber does not search), and nothing told the owner (ticket #236).
-A user-level `system` module (`root = false`, order 87, on by default; packages `alsa-utils`, `wireplumber`, `libnotify-bin`) installs
+A user-level `system` module (`root = false`, order 88, **off by default**: the owner decided it is opt-in, ticket #244; packages `alsa-utils`, `wireplumber`, `libnotify-bin`) installs
 `~/.local/bin/audio-health-check`, `~/.config/systemd/user/audio-health.service` (oneshot) and `audio-health.timer`
 (`OnActiveSec=1min`: the timer starts with the user manager, so this is the login check; then `OnUnitActiveSec=5min`) and enables the timer.
 `check` compares the files byte for byte (script mode 755) and that the timer is enabled and running (enabled alone means from the next login on); the install changes only what differs, runs
 `daemon-reload` when a unit changed, `enable --now` when the timer is off or stopped and `restart` when a unit changed under a running timer, so a second
 `apply` reports `0 changed`.
+
+**Off by default, on per machine.** `module.toml` says `enabled = false`; a machine that wants the check sets
+`[modules.audio-health] enabled = true` in `profile.toml` (every machine) or in `machines/<host>/machine.toml` (one machine), then runs
+`ubuntu-tweak apply --commit --only audio-health`. The engine only skips a disabled module, so the module declares a **retirement**
+(`retire`, `retire_check`, `retire_preview` in `[source]`; spec *Source kinds*, `system`): while the module is disabled the planner emits
+`retire audio-health`, whose end state is *the timer neither enabled nor running, `~/.config/systemd/user/audio-health.{service,timer}` and
+`~/.local/bin/audio-health-check` removed*. `retire` runs `systemctl --user disable --now audio-health.timer` first (while the unit file still exists; a timer that runs on after its unit
+file is gone is only `stop`ped, `disable` needs the file), removes what is there (the three files and the enable link
+`timers.target.wants/audio-health.timer`, a dangling symlink too) and runs `daemon-reload` only when a unit file or the link went; `retire-check`
+(exit 0 / 3) lists what is left, so a second `apply` reports nothing to do and an enabled timer, or a file that came back, is drift. Older systemd words a missing unit on stderr: that is an answer, not silence. A user manager that does not answer at all (no session bus: `ssh` without a login session, `su`, cron) is "state unknown":
+`retire-check` reports drift (exit 3, never a crash, which would abort the plan of every other module) while anything is left on disk, `retire` stops with a manual step (exit 10: run it in the desktop user's session) and removes nothing under a timer that may still run, and with nothing left on disk the retirement counts as converged (a timer that runs on after its files were deleted by hand, without a `daemon-reload`, is then only found by the next run inside the session). Only systemd's own wording of a missing unit file (`Failed to get unit file state ...`) counts as an answer; the no-bus error also ends in "No such file or directory" and does not. A machine on which none of these files exists changes nothing. (Whatever is at those paths is removed, whatever its content; narrowing that to files the module itself wrote is ticket #246.) The check's
+stamps under `$XDG_STATE_HOME/audio-health` and `$XDG_RUNTIME_DIR/audio-health` are not touched (they only record what was announced).
 
 The check script (Python standard library only, exit status 0 whatever the verdict) reads four facts: the non-HDMI cards of `aplay -l` (a card
 with at least one device that is not HDMI or DisplayPort audio), the ALSA cards behind the audio devices of `wpctl status` (each device read with `wpctl inspect ID`;

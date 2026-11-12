@@ -13,13 +13,17 @@ Public API:
   ``"submodule"``, ``"local"``, ``"builtin"``, ``"system"``). ``ego`` is reserved and rejected
   with ``not supported yet (#20)``.
 - ``SettingsMode``: ``ENFORCE`` (default) or ``SEED``.
-- ``Source(kind, path, install, check, root, preview, repo)``: ``path`` is set for submodule/local (relative to
-  the repo root); ``install``, ``check`` and ``preview`` (optional read-only plan command) are argv
+- ``Source(kind, path, install, check, root, preview, repo, retire, retire_check, retire_preview)``: ``path`` is set
+  for submodule/local (relative to the repo root); ``install``, ``check`` and ``preview`` (optional read-only plan
+  command) are argv
   tuples, set for ``system`` only, whose ``argv[0]`` is a path inside the module directory: a runner
   must execute ``manifest.directory / argv[0]`` with the rest as arguments, never a ``$PATH`` lookup;
   ``root`` (default True) says whether the installer needs sudo; ``repo`` (optional, system only) is the
   default git URL of the tool the module fetches: the planner hands it to the installer as the option
-  ``repo`` unless ``[modules.<name>] repo`` in the profile sets one.
+  ``repo`` unless ``[modules.<name>] repo`` in the profile sets one. ``retire`` and ``retire_check`` (both or
+  neither; ``retire_preview`` optional, needs them) are the declared retirement: the commands that remove what
+  the installer put in place and say, read-only, whether anything of it is left; the planner runs them while the
+  module is disabled (spec, *Source kinds*, ``system``).
 - ``ExtensionSpec(conflicts, retire, enable)``, ``SettingsFile(file, schema, mode)``,
   ``Seed(key, provider)``, ``Migration(from_uuid, from_path)``, ``Deps(apt)``.
 - ``Install(apt, provides)``, ``Step(name, args)`` and ``Post(name, run, check, needs_root, after,
@@ -97,6 +101,9 @@ class Source:
     root: bool = True
     preview: tuple[str, ...] = ()
     repo: str | None = None
+    retire: tuple[str, ...] = ()
+    retire_check: tuple[str, ...] = ()
+    retire_preview: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -332,7 +339,18 @@ def _parse_source(reader: _Reader) -> Source:
         _relative_path(reader, path, "path")
         return Source(kind, path=path)
     if kind is SourceKind.SYSTEM:
-        reader.only("kind", "install", "check", "root", "preview", "repo")
+        reader.only("kind", "install", "check", "root", "preview", "repo", "retire", "retire_check", "retire_preview")
+        retire, retire_check, retire_preview = (
+            _command(reader, key) if key in reader.table else () for key in ("retire", "retire_check", "retire_preview")
+        )
+        if retire and not retire_check:
+            raise reader.fail(
+                "'retire' needs 'retire_check' (the read-only command that says whether anything is left)"
+            )
+        if retire_check and not retire:
+            raise reader.fail("'retire_check' needs 'retire' (the command that removes what is left)")
+        if retire_preview and not retire:
+            raise reader.fail("'retire_preview' needs 'retire' and 'retire_check'")
         return Source(
             kind,
             install=_command(reader, "install"),
@@ -340,6 +358,9 @@ def _parse_source(reader: _Reader) -> Source:
             root=reader.boolean("root", True),
             preview=_command(reader, "preview") if "preview" in reader.table else (),
             repo=reader.string("repo"),
+            retire=retire,
+            retire_check=retire_check,
+            retire_preview=retire_preview,
         )
     reader.only("kind")
     return Source(kind)

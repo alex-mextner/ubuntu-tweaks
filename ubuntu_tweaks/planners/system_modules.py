@@ -15,16 +15,25 @@ by ``env`` so sudo's ``env_reset`` keeps it; they are visible in ``ps`` and in s
 option is never a secret. Installer exit ``NEEDS_MANUAL_EXIT`` (10) is a ``ManualStepRequired``, exit ``EX_TEMPFAIL``
 (75) a ``Transient`` (retried with backoff).
 
+A disabled module is skipped, never uninstalled (spec, *Modules*), except one that declares a retirement
+(``[source] retire`` / ``retire_check``): while it is disabled the planner emits a ``SystemModuleRetireAction``, whose
+``check`` is the module's read-only ``retire_check`` (same protocol: 0 nothing left, 3 something left) and whose
+``run`` is ``retire``, as the desktop user for ``root = false`` and through sudo otherwise. A disabled module without
+a retirement stays skipped.
+
 Public API:
 
-- ``build(ctx, backend, *, process=None) -> list[Action]``: one ``SystemModuleAction``
-  per enabled ``system`` module (module default < profile < machine overlay); disabled modules
-  produce nothing. ``backend`` is unused: system modules do not touch dconf.
+- ``build(ctx, backend, *, process=None) -> list[Action]``: per ``system`` module (module default < profile <
+  machine overlay) one ``SystemModuleAction`` while it is enabled, one ``SystemModuleRetireAction`` while it is
+  disabled and declares a retirement, nothing for a disabled one without. ``backend`` is unused: system modules do
+  not touch dconf.
 - ``SystemModuleAction(manifest, display_root, *, process=None, module_config=None)``: kind
   ``system-module``, phase ``SYSTEM``, ``needs_root`` from ``[source] root``, scope = module name.
   Commands go through ``process.Process`` (the one runner; its ``elevate`` adds ``sudo --`` unless
   root) so tests pass a ``FakeProcess``-style double. ``describe()`` appends the manifest's optional
   ``preview`` output (computed once).
+- ``SystemModuleRetireAction``: the same constructor; kind ``system-module-retire``, ``retire`` as the command,
+  ``retire_check`` as the checker, ``retire_preview`` as the preview, no fallbacks.
 """
 
 from __future__ import annotations
@@ -58,6 +67,9 @@ def _tail(text: str | None) -> str:
 class SystemModuleAction(Action):
     phase = Phase.SYSTEM
     kind = "system-module"
+    verb = "run"
+    key_prefix = "system-module"
+    actor = "installer"  # who exits 10: the word of "the installer needs a manual step"
 
     def __init__(
         self,
@@ -68,7 +80,7 @@ class SystemModuleAction(Action):
         module_config: str | None = None,
     ) -> None:
         self.scope = manifest.name
-        self.key = f"system-module:{manifest.name}"
+        self.key = f"{self.key_prefix}:{manifest.name}"
         self.needs_root = manifest.source.root
         self.stall_seconds = manifest.stall_seconds
         self._manifest = manifest
@@ -77,8 +89,20 @@ class SystemModuleAction(Action):
         self._module_config = module_config
         self._preview_text: str | None = None
 
+    def _install_command(self) -> tuple[str, ...]:
+        return self._manifest.source.install
+
+    def _check_command(self) -> tuple[str, ...]:
+        return self._manifest.source.check
+
+    def _preview_command(self) -> tuple[str, ...]:
+        return self._manifest.source.preview
+
+    def _fallbacks(self) -> tuple[Fallback, ...]:
+        return self._manifest.fallbacks
+
     def step_name(self) -> str:
-        return f"run {self._manifest.name}"
+        return f"{self.verb} {self._manifest.name}"
 
     def _argv(self, command: Sequence[str]) -> list[str]:
         directory = self._manifest.directory
@@ -89,7 +113,7 @@ class SystemModuleAction(Action):
         return ["env", f"{MODULE_CONFIG_ENV}={self._module_config}", *argv]
 
     def _install_argv(self) -> list[str]:
-        argv = self._argv(self._manifest.source.install)
+        argv = self._argv(self._install_command())
         if not self.needs_root:
             return argv
         try:
@@ -101,7 +125,7 @@ class SystemModuleAction(Action):
         try:
             shown = self._install_argv()
         except ActionFailed:
-            shown = ["sudo", "--", *self._argv(self._manifest.source.install)]  # run() reports the missing helper
+            shown = ["sudo", "--", *self._argv(self._install_command())]  # run() reports the missing helper
         for index, part in enumerate(shown):
             try:
                 shown[index] = str(Path(part).relative_to(self._display_root))
@@ -110,15 +134,15 @@ class SystemModuleAction(Action):
             break
         listed = "".join(
             f"\n        fallback{'' if fallback.root else ' (no root)'}: {shlex.join(fallback.install)}"
-            for fallback in self._manifest.fallbacks
+            for fallback in self._fallbacks()
         )
-        return f"run {self._manifest.name}: {shlex.join(shown)}" + self._preview() + listed
+        return f"{self.verb} {self._manifest.name}: {shlex.join(shown)}" + self._preview() + listed
 
     def _preview(self) -> str:
         """What the installer would do, from the manifest's read-only ``preview`` command, indented under
         the action line. Run once per action (``describe()`` is called several times per run). A failing
         preview shows its first stderr line and never fails the plan."""
-        command = self._manifest.source.preview
+        command = self._preview_command()
         if not command:
             return ""
         if self._preview_text is not None:
@@ -134,7 +158,7 @@ class SystemModuleAction(Action):
 
     def check(self) -> bool:
         name = self._manifest.name
-        argv = self._argv(self._manifest.source.check)
+        argv = self._argv(self._check_command())
         result = self._process.query(argv, timeout=CHECK_TIMEOUT_SECONDS, cwd=self._manifest.directory)
         if result.returncode == 0:
             return True
@@ -161,7 +185,7 @@ class SystemModuleAction(Action):
             if error.returncode == NEEDS_MANUAL_EXIT:
                 hint = f": {self._manifest.manual}" if self._manifest.manual else ""
                 raise ManualStepRequired(
-                    f"{self._manifest.name}: the installer needs a manual step (exit {NEEDS_MANUAL_EXIT}; "
+                    f"{self._manifest.name}: the {self.actor} needs a manual step (exit {NEEDS_MANUAL_EXIT}; "
                     f"its output above says which){hint}"
                 ) from error
             if error.returncode == EX_TEMPFAIL:
@@ -169,7 +193,7 @@ class SystemModuleAction(Action):
             raise ActionFailed(f"{self._manifest.name}: {error}") from error
 
     def alternatives(self) -> Sequence[Action]:
-        return [_FallbackInstall(self, fallback) for fallback in self._manifest.fallbacks]
+        return [_FallbackInstall(self, fallback) for fallback in self._fallbacks()]
 
     def run_fallback(self, fallback: Fallback) -> None:
         argv = self._argv(fallback.install)
@@ -179,6 +203,29 @@ class SystemModuleAction(Action):
             except CommandError as error:
                 raise ActionFailed(f"{self._manifest.name}: {error}") from error
         self._execute(argv)
+
+
+class SystemModuleRetireAction(SystemModuleAction):
+    """The declared retirement of a disabled ``system`` module (spec, *Source kinds*): ``retire`` removes what the
+    installer put in place, ``retire_check`` says read-only whether anything is left. A converged machine, one that
+    never had the module included, is satisfied, so a second ``apply`` has nothing to do."""
+
+    kind = "system-module-retire"
+    verb = "retire"
+    key_prefix = "system-module-retire"
+    actor = "retirement"
+
+    def _install_command(self) -> tuple[str, ...]:
+        return self._manifest.source.retire
+
+    def _check_command(self) -> tuple[str, ...]:
+        return self._manifest.source.retire_check
+
+    def _preview_command(self) -> tuple[str, ...]:
+        return self._manifest.source.retire_preview
+
+    def _fallbacks(self) -> tuple[Fallback, ...]:
+        return ()
 
 
 class _FallbackInstall(Action):
@@ -207,13 +254,22 @@ class _FallbackInstall(Action):
 def build(ctx: Context, backend: SettingsBackend, *, process: Process | None = None) -> list[Action]:
     manifests = ctx.manifests()
     config = ctx.profile.load_config(module_defaults(manifests))
-    return [
-        SystemModuleAction(
-            manifest,
-            ctx.repo_root,
-            process=process,
-            module_config=module_config_json(config, manifest.name, manifest.source.repo),
+    actions: list[Action] = []
+    for manifest in manifests:
+        if manifest.source.kind is not SourceKind.SYSTEM:
+            continue
+        if config.module_enabled(manifest.name):
+            action_class = SystemModuleAction
+        elif manifest.source.retire:
+            action_class = SystemModuleRetireAction
+        else:
+            continue
+        actions.append(
+            action_class(
+                manifest,
+                ctx.repo_root,
+                process=process,
+                module_config=module_config_json(config, manifest.name, manifest.source.repo),
+            )
         )
-        for manifest in manifests
-        if manifest.source.kind is SourceKind.SYSTEM and config.module_enabled(manifest.name)
-    ]
+    return actions

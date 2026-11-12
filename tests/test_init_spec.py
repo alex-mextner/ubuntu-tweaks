@@ -57,6 +57,15 @@ class ManualStepsTableTests(unittest.TestCase):
                 manifest = next(m for m in discover_modules(REPO_ROOT / "modules") if m.name == name)
                 self.assertTrue(manifest.manual, f"{name}'s installer can exit 10 but its module.toml has no `manual`")
 
+    def test_a_retirement_that_can_exit_10_has_a_hint_even_when_the_lib_next_to_the_script_raises_it(self) -> None:
+        for manifest in discover_modules(REPO_ROOT / "modules"):
+            if not manifest.source.retire:
+                continue
+            text = "".join(path.read_text(encoding="utf-8") for path in sorted(manifest.directory.glob("*.py")))
+            text += (manifest.directory / manifest.source.retire[0]).read_text(encoding="utf-8")
+            if "NeedsManual" in text:
+                self.assertTrue(manifest.manual, f"{manifest.name}'s retirement can exit 10 but has no `manual`")
+
 
 if __name__ == "__main__":
     unittest.main()

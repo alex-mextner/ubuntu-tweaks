@@ -105,6 +105,19 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(manifest.source.install, ("install.sh",))
         self.assertEqual(manifest.source.check, ("install.sh", "--check"))
 
+    def test_system_retirement_is_three_commands_inside_the_module(self) -> None:
+        manifest = parse(
+            SYSTEM
+            + 'retire = "tool retire"\nretire_check = "tool retire-check"\nretire_preview = "tool retire-plan"\n',
+            "tool",
+        )
+
+        self.assertEqual(manifest.source.retire, ("tool", "retire"))
+        self.assertEqual(manifest.source.retire_check, ("tool", "retire-check"))
+        self.assertEqual(manifest.source.retire_preview, ("tool", "retire-plan"))
+        bare = parse(SYSTEM, "tool").source
+        self.assertEqual((bare.retire, bare.retire_check, bare.retire_preview), ((), (), ()))
+
     def test_minimal_local_and_builtin(self) -> None:
         local = parse('[source]\nkind = "local"\npath = "gnome-extensions/english-in-overview@ubuntu-tweaks"\n')
         self.assertEqual((local.source.kind, local.description, local.extension), (SourceKind.LOCAL, "", None))
@@ -166,6 +179,14 @@ class ValidationTests(unittest.TestCase):
             self.assertInvalid(
                 f'[source]\nkind = "system"\ninstall = {empty}\ncheck = "x"\n', "must name a program inside the module"
             )
+
+    def test_a_retirement_needs_both_its_command_and_its_check_and_a_preview_needs_a_retirement(self) -> None:
+        base = '[source]\nkind = "system"\ninstall = "i.sh"\ncheck = "i.sh --check"\n'
+        self.assertInvalid(base + 'retire = "i.sh retire"\n', "'retire' needs 'retire_check'")
+        self.assertInvalid(base + 'retire_check = "i.sh retire-check"\n', "'retire_check' needs 'retire'")
+        self.assertInvalid(base + 'retire_preview = "i.sh retire-plan"\n', "'retire_preview' needs 'retire'")
+        self.assertInvalid(base + 'retire = "../x"\nretire_check = "i.sh c"\n', "without '..'")
+        self.assertInvalid('[source]\nkind = "builtin"\nretire = "x"\n', "unknown key")
 
     def test_system_takes_no_extension_settings_seeds_or_migrations(self) -> None:
         base = '[source]\nkind = "system"\ninstall = "i.sh"\ncheck = "i.sh --check"\n'

@@ -38,6 +38,22 @@ class FixedModule(kit.Module):
         self.applied = True
 
 
+class RetiringModule(FixedModule):
+    def __init__(self, left):
+        super().__init__([])
+        self.left = left
+        self.retired = False
+
+    def retired_findings(self):
+        return self.left
+
+    def retire(self):
+        self.retired = True
+
+    def retire_plan(self):
+        return ["    remove thing"]
+
+
 class ModuleConfig(unittest.TestCase):
     def test_unset_and_blank_mean_no_options(self):
         self.assertEqual(kit.module_config({}), {})
@@ -115,6 +131,25 @@ class Dispatcher(unittest.TestCase):
         module = FixedModule([kit.Finding(False, "b")])
         self.assertEqual(self.run_main(module, ["--check"]), (kit.EXIT_DRIFT, "missing b\n", ""))
         self.assertEqual(self.run_main(module, ["--dry-run"]), (kit.EXIT_OK, "", ""))
+
+    def test_retire_check_prints_what_is_left_and_exits_with_the_checker_protocol(self):
+        module = RetiringModule([kit.Finding(True, "a"), kit.Finding(False, "b", "still there")])
+        code, out, _ = self.run_main(module, ["retire-check"])
+        self.assertEqual((code, out), (kit.EXIT_DRIFT, "missing b: still there\n"))
+        self.assertEqual(
+            self.run_main(RetiringModule([kit.Finding(True, "a")]), ["retire-check"]), (kit.EXIT_OK, "", "")
+        )
+
+    def test_retire_and_retire_plan(self):
+        module = RetiringModule([])
+        self.assertEqual(self.run_main(module, ["retire"])[0], kit.EXIT_OK)
+        self.assertTrue(module.retired)
+        self.assertEqual(self.run_main(module, ["retire-plan"]), (kit.EXIT_OK, "    remove thing\n", ""))
+
+    def test_a_module_without_a_retirement_refuses_the_retire_words(self):
+        for word in ("retire", "retire-check", "retire-plan"):
+            code, _, err = self.run_main(FixedModule([]), [word])
+            self.assertEqual((code, err), (kit.EXIT_FAILED, "fixed: this module declares no retirement\n"), word)
 
     def test_usage(self):
         for argv in ([], ["nope"], ["check", "extra"]):
