@@ -2787,6 +2787,16 @@ machine's `hci0` the step prints `local adapter(s) found: hci0 - nothing to do`;
   new D-Bus activation files. Firefox is not restarted: the policy is in place and the extension installs
   at its next start. With an older checkout that has no `--yes`, the module reports `needs manual: run
   <installer> install interactively`; it never runs the installer without `--yes` and never fakes success.
+  A root step of the installer (the `sudo` install of the patched portal into `/usr/local`) needs a password. When
+  the installer exits 1 and its stderr (`CommandError.stderr`, the last 2000 characters; the message keeps only three
+  lines) holds `command failed (exit 1): sudo ...`, the run has no way to ask (no controlling terminal, and no
+  `SUDO_ASKPASS` with a display; this is `autoheal`'s `apply --commit --no-sudo`) and `sudo -n true` fails, the
+  module reports `needs manual: a root step of the installer needs a password ...: run ubuntu-tweak apply --commit
+  --only firefox-passkey-qr in a terminal` instead of an error, so the unattended run keeps exit 0
+  ([#251](https://github.com/alex-mextner/ubuntu-tweaks/issues/251)). The engine itself still never looks at sudo
+  in a `--no-sudo` run; only this module probes it, after the installer failed. Every other failure (another exit
+  status, no exit status, a failure that is not a `sudo` step, a terminal, passwordless sudo) stays an error; so
+  does a `command failed` line pushed out of the 2000-character window by a very long command.
   The feature is detected from the installer's `--help`, not from a version number.
 - *Check*: the installer's `check` (exit 0/3, read-only, no log file): Firefox deb, a Bluetooth adapter, the
   build dependencies, `credentialsd`, libdex and the patched portal installed, the portal answering with the

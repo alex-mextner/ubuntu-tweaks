@@ -68,6 +68,17 @@ STUB = textwrap.dedent(
         if "--dry-run" in argv:
             print("== 1. Build and runtime packages ==\\n  $ sudo apt-get install -y meson")
             sys.exit(0)
+        if os.path.exists(os.path.join(here, "root_step_failed")):
+            # the installer's stderr: a failed root step with a long apt command, then its re-run hint, the log
+            # path and one line per pending note: the command line is well outside the last three lines
+            packages = " ".join("libbuild%d-dev" % n for n in range(40))
+            print("command failed (exit 1): sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y " + packages,
+                  file=sys.stderr)
+            print("Re-run `passkey-qr install` after fixing it: finished actions are skipped.", file=sys.stderr)
+            print("Full log: /tmp/x/20261113-001214-install-1.log", file=sys.stderr)
+            print("still waiting for you: Bluetooth: needs a long-lived admin token", file=sys.stderr)
+            print("still waiting for you: log out and in once", file=sys.stderr)
+            sys.exit(1)
         waiting = os.path.join(here, "waiting")
         if os.path.exists(waiting):  # the file holds the exit code (default 3 = something waits for a person)
             print("Not finished:\\n  waiting for you: 3. Bluetooth: needs a long-lived admin token")
@@ -85,12 +96,17 @@ class KeyringProcess(Process):
     def __init__(self, keyring):
         self.keyring = keyring
         self.git = []
+        self.sudo_without_password = False
+        self.sudo_probes = 0
 
     def query(self, argv, *, timeout=60.0, cwd=None):
         argv = list(argv)
         if argv[:2] == ["secret-tool", "lookup"]:
             value = self.keyring.get(argv[argv.index("purpose") + 1])
             return CommandResult(0 if value else 1, value or "", "")
+        if argv == ["sudo", "-n", "true"]:
+            self.sudo_probes += 1
+            return CommandResult(0 if self.sudo_without_password else 1, "", "")
         return super().query(argv, timeout=timeout, cwd=cwd)
 
     def execute(self, argv, *, input_text=None, cwd=None):
@@ -116,9 +132,11 @@ class Base(unittest.TestCase):
         self.tools = {"git": "/usr/bin/git"}
         self.process = KeyringProcess({})
 
-    def module(self, options=None, *, is_root=False):
+    def module(self, options=None, *, is_root=False, can_prompt=True):
         options = {"repo": REPO, **(options or {})}
-        return pq.PasskeyQR(self.process, self.home, options, is_root=is_root, which=self.tools.get)
+        return pq.PasskeyQR(
+            self.process, self.home, options, is_root=is_root, can_prompt=can_prompt, which=self.tools.get
+        )
 
     def stub(self, **kw):
         make_stub(self.checkout, **{"has_yes": True, "has_check": True, **kw})
@@ -270,6 +288,53 @@ class Install(Base):
         self.assertEqual(raised.exception.returncode, 1)
         self.assertEqual(self.log()[-1]["argv"], ["--yes", "install"])  # it was the install that failed
 
+    def test_a_root_step_that_cannot_ask_for_a_password_is_needs_manual_with_the_apply_command(self):
+        self.stub()
+        (self.checkout / "root_step_failed").touch()
+        with self.assertRaisesRegex(NeedsManual, r"no terminal.*ubuntu-tweak apply --commit --only firefox-passkey-qr"):
+            self.module(can_prompt=False).apply()
+        self.assertFalse(self.installed())
+
+    def test_sudo_is_probed_only_after_a_root_step_failed_without_a_terminal(self):
+        self.stub()
+        self.module(can_prompt=False).apply()  # success
+        self.assertEqual(self.process.sudo_probes, 0)
+        (self.checkout / "waiting").write_text("3")  # waits for a person
+        with self.assertRaises(NeedsManual):
+            self.module(can_prompt=False).apply()
+        (self.checkout / "waiting").unlink()
+        (self.checkout / "root_step_failed").touch()
+        with self.assertRaises(CommandError):
+            self.module(can_prompt=True).apply()
+        self.module(can_prompt=False).findings()
+        self.assertEqual(self.process.sudo_probes, 0)
+
+    def test_a_root_step_failure_stays_an_error_in_a_terminal(self):
+        self.stub()
+        (self.checkout / "root_step_failed").touch()
+        with self.assertRaises(CommandError):  # sudo asked and the person answered wrong
+            self.module(can_prompt=True).apply()
+
+    def test_a_root_step_failure_stays_an_error_when_sudo_works_without_a_password(self):
+        self.stub()
+        (self.checkout / "root_step_failed").touch()
+        self.process.sudo_without_password = True  # the failure is not about elevation
+        with self.assertRaises(CommandError):
+            self.module(can_prompt=False).apply()
+
+    def test_without_a_terminal_a_failure_that_is_not_a_root_step_stays_an_error(self):
+        self.stub()
+        for code in ("1", "2", "137"):  # the installer failed in a user step, was refused, was killed
+            (self.checkout / "waiting").write_text(code)
+            with self.assertRaises(CommandError, msg=code):
+                self.module(can_prompt=False).apply()
+
+    def test_without_a_terminal_an_installer_that_cannot_start_stays_an_error(self):
+        self.stub()
+        self.process.execute = mock.Mock(side_effect=CommandError("passkey-qr: cannot run: no such interpreter"))
+        with self.assertRaises(CommandError):  # no exit status at all: nothing to do with sudo
+            self.module(can_prompt=False).apply()
+
     def test_an_installer_without_yes_is_reported_as_needs_manual_never_run(self):
         self.stub(has_yes=False)
         with self.assertRaisesRegex(NeedsManual, "interactively"):
@@ -283,7 +348,7 @@ class Install(Base):
         self.assertTrue(self.installed())
 
     def test_an_unset_repo_is_manual_when_there_is_nothing_to_clone(self):
-        unset = pq.PasskeyQR(self.process, self.home, {}, is_root=False, which=self.tools.get)
+        unset = pq.PasskeyQR(self.process, self.home, {}, is_root=False, can_prompt=True, which=self.tools.get)
         manual = [f for f in unset.findings() if f.manual]
         self.assertEqual(len(manual), 1)
         self.assertIn("[modules.firefox-passkey-qr] repo", manual[0].line())
