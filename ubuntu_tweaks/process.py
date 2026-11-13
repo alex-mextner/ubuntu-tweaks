@@ -12,7 +12,8 @@ arrive, so the session log sees what the child shows) and raises ``CommandError`
 Public API:
 
 - ``CommandResult(returncode, stdout, stderr)`` with ``ok``.
-- ``CommandError`` (exit 1); ``returncode`` is the failed command's exit status (``None`` when it never ran).
+- ``CommandError`` (exit 1); ``returncode`` is the failed command's exit status (``None`` when it never ran); ``stderr`` is the last
+  ``_TAIL`` characters of the child's stderr (set by ``execute`` only, ``""`` elsewhere).
 - ``Process``: ``execute`` raises ``CommandError`` ``<argv>: exited with status N`` plus, when the child wrote to stderr, ``: <its last line>``
   (so a retry classifier can read ``could not resolve host``); ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
   missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
@@ -84,11 +85,13 @@ class CommandResult:
 
 class CommandError(UbuntuTweakError):
     """An external command failed or a required helper (sudo, pkexec) is missing; ``returncode`` is the
-    command's exit status when it ran and failed."""
+    command's exit status when it ran and failed; ``stderr`` is the last ``_TAIL`` characters of the child's stderr
+    (set by ``execute`` only, ``""`` elsewhere), where the message keeps only its last three lines."""
 
-    def __init__(self, message: str, returncode: int | None = None) -> None:
+    def __init__(self, message: str, returncode: int | None = None, stderr: str = "") -> None:
         super().__init__(message)
         self.returncode = returncode
+        self.stderr = stderr
 
 
 _root_prefix: tuple[str, ...] | None = None
@@ -436,7 +439,7 @@ class Process:
         if returncode != 0:
             lines = [line.strip() for line in "".join(tail).splitlines() if line.strip()]
             detail = f": {' / '.join(lines[-3:])[-_DETAIL:]}" if lines else ""
-            raise CommandError(f"{' '.join(argv)}: exited with status {returncode}{detail}", returncode)
+            raise CommandError(f"{' '.join(argv)}: exited with status {returncode}{detail}", returncode, "".join(tail))
 
     def elevate(self, argv: Sequence[str]) -> list[str]:
         return elevate(argv)
