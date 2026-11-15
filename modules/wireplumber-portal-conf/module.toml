@@ -21,8 +21,8 @@ needs_root = false
 check = ["/bin/sh", "-c", "[ \"$(systemctl --user show -p ExecMainStatus --value wireplumber.service 2>/dev/null)\" != 78 ] || systemctl --user is-active --quiet wireplumber.service || ! systemctl --user is-enabled --quiet wireplumber.service"]
 run = ["/bin/sh", "-c", "systemctl --user reset-failed wireplumber.service; systemctl --user start wireplumber.service; sleep 3; systemctl --user is-active --quiet wireplumber.service || { echo 'wireplumber.service did not stay up: see journalctl --user -u wireplumber -n 20' >&2; exit 1; }"]
 
-# No coverage adapter scans /usr/local yet (ticket #235): these rules are declarative until one does; they are exact
-# paths (the multiarch triplet of the machine this was written on), never globs over the library directories.
+# The `usr-local` coverage adapter (ticket #235) lists these ids; the rules are exact paths (the multiarch triplet of
+# the machine this was written on), never globs over the library directories.
 [[coverage]]
 match = ["etc:/usr/local/share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf*"]
 class = "tracked"

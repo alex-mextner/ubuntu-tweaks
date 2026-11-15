@@ -4,7 +4,8 @@ Accessed via: ``commands/coverage.py``, ``commands/status.py`` and ``commands/ca
 
 Contract for an adapter module (names starting with ``_`` are skipped):
 
-- ``NAME: str``: the item-id scheme the adapter owns (``dconf``, ``file``, ``apt``...).
+- ``NAME: str``: the adapter's name, the section of ``ubuntu-tweak coverage``; usually the item-id scheme it owns
+  (``dconf``, ``file``, ``apt``...), but ``usr-local`` lists ``etc:/usr/local/...`` and ``etc:/opt/...`` items.
 - ``discover(ctx: Context) -> Iterable[Item]`` (required): what exists on the machine; read-only, no root, never
   a secret value; an area that cannot be read (needs root, tool missing) yields one ``Item`` whose ``detail``
   says so instead of raising.

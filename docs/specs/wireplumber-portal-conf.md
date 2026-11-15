@@ -71,8 +71,9 @@ the Dummy Output and a connected headset has no device.
   `etc:/usr/local/lib/x86_64-linux-gnu/wireplumber-0.5/libxdg-desktop-portal.so` and
   `etc:/usr/local/lib/x86_64-linux-gnu/pipewire-0.3/libxdg-desktop-portal.so` (the hand-built module the module leaves in
   place: inert there, since wireplumber loads modules from `/usr/lib/<arch>` only) as `tracked`, each with a reason; other
-  `/usr/local` wireplumber or library files are not its. No coverage adapter scans `/usr/local` yet (ticket #235), so
-  these ids are never produced today and the rules are declarative: they keep the files tracked the day one does. The
+  `/usr/local` wireplumber or library files are not its. The `usr-local` coverage adapter (ticket #235) produces these
+  ids (one per file under `share/<program>/*.d` and the WirePlumber and PipeWire plugin directories), so the rules claim
+  the files for real: `ubuntu-tweak coverage` shows them `tracked` with this module as owner. The
   rules are unit-tested against the ids they must (and must not) match.
 
 `WIREPLUMBER_PORTAL_CONF_ROOT=DIR` stages every path below `DIR` and `WIREPLUMBER_PORTAL_CONF_MULTIARCH` names its dpkg

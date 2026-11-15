@@ -5,10 +5,13 @@ Nothing here reads the real $HOME or /etc, runs a real tool or touches the live 
 
 import gzip
 import hashlib
+import inspect
 import os
+import sys
 import unittest
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from unittest import mock
 
 try:
     import gi  # noqa: F401
@@ -17,7 +20,7 @@ except ModuleNotFoundError as error:
 
 from tests.util import TempDirCase, write
 from ubuntu_tweaks.adapters import discover_adapters, scan
-from ubuntu_tweaks.adapters import dconf, etc, extensions, files, packages, units
+from ubuntu_tweaks.adapters import dconf, etc, extensions, files, packages, units, usr_local
 from ubuntu_tweaks.adapters._system import System, system, use
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.coverage import ITEM_PREFIXES, Coverage, Finding, Item, Rules
@@ -75,7 +78,7 @@ class AdapterCase(TempDirCase):
 class DiscoveryTests(unittest.TestCase):
     def test_every_adapter_is_found_by_dropping_a_file(self) -> None:
         names = [module.NAME for module in discover_adapters()]
-        self.assertEqual(names, ["dconf", "disk", "etc", "extensions", "files", "packages", "units"])
+        self.assertEqual(names, ["dconf", "disk", "etc", "extensions", "files", "packages", "units", "usr-local"])
 
     def test_the_machine_seam_defaults_to_the_real_one_and_is_restorable(self) -> None:
         before = system()
@@ -1186,6 +1189,524 @@ class SchemeTests(AdapterCase):
                 seen.add(item.id.split(":", 1)[0])
                 self.assertTrue(item.id.startswith(ITEM_PREFIXES), item.id)
         self.assertGreaterEqual(seen, {"dconf", "file", "etc", "apt", "snap", "unit", "extension"})
+
+
+class OwnedByPackages(FakeProcess):
+    """``dpkg-query -S``: the paths in ``owned`` belong to a package, the others are not found (exit 1)."""
+
+    def __init__(self, owned: Iterable[str] = ()) -> None:
+        super().__init__()
+        self.owned = set(owned)
+
+    def query(self, argv, *, timeout: float = 60.0, cwd=None) -> CommandResult:
+        self.queries.append(tuple(argv))
+        if tuple(argv[:3]) != ("dpkg-query", "-S", "--"):
+            return CommandResult(127, "", f"{argv[0]}: command not found")
+        found = [f"somepkg: {path}\n" for path in argv[3:] if path in self.owned]
+        return CommandResult(0 if len(found) == len(argv[3:]) else 1, "".join(found), "")
+
+
+class UsrLocalTests(AdapterCase):
+    """Hand-installed configuration under /usr/local and /opt (spec, *Coverage*, the ``usr-local`` adapter)."""
+
+    ARCH = "usr/local/lib/x86_64-linux-gnu"
+
+    def lay_out(self) -> None:
+        local = self.rootfs / "usr/local"
+        # config-ish places: one item per file
+        write(local / "etc/tool/tool.conf", "x")
+        write(local / "share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf", "x")
+        write(local / "share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf.disabled", "x")
+        write(local / "share/pipewire/pipewire.conf.d/20-mine.conf", "x")
+        write(local / "share/dbus-1/services/org.example.Svc.service", "x")
+        write(local / "share/xdg-desktop-portal/portals/mine.portal", "x")
+        write(local / "lib/systemd/user/mine.service", "x")
+        write(self.rootfs / self.ARCH / "wireplumber-0.5/libxdg-desktop-portal.so", "elf")
+        write(self.rootfs / self.ARCH / "pipewire-0.3/libxdg-desktop-portal.so", "elf")
+        # a data tree the config areas do not reach, in a directory that is listed through its files: not listed again
+        write(local / "share/dbus-1/interfaces/org.example.Iface.xml", "x")
+        # a hand-installed tree nothing above lists: one directory item
+        write(local / "share/credentialsd/a.xml", "x")
+        write(local / "share/credentialsd/b.zip", "x")
+        write(local / "lib/mytool/helper.py", "x")
+        os.symlink("/opt/vendor", local / "share/vendor-link")
+        # plain data, libraries, headers and binaries: never listed
+        write(local / "share/locale/de/LC_MESSAGES/x.mo", "x")
+        write(local / "share/man/man1/x.1", "x")
+        write(local / "share/icons/hicolor/48x48/apps/x.png", "x")
+        write(self.rootfs / self.ARCH / "libdex-1.so", "elf")
+        write(self.rootfs / self.ARCH / "pkgconfig/libdex-1.pc", "x")
+        write(local / "include/libdex-1/dex.h", "x")
+        write(local / "bin/tool", "x")
+        write(local / "sbin/tool-admin", "x")
+        write(local / "libexec/helper", "x")
+        # /opt: one item per top-level entry
+        write(self.rootfs / "opt/vendor/bin/app", "x")
+        write(self.rootfs / "opt/vendor/lib/libapp.so", "x")
+        write(self.rootfs / "opt/from-a-package/bin/pkgapp", "x")
+
+    def discover(self, owned: Iterable[str] = ()) -> dict[str, Item]:
+        self.lay_out()
+        self.process = OwnedByPackages(owned)
+        manager = use(System(self.process, self.home, self.rootfs, None))
+        manager.__enter__()
+        self.addCleanup(manager.__exit__, None, None, None)
+        return {item.id: item for item in usr_local.discover(self.ctx)}
+
+    def test_config_files_and_unlisted_trees_are_items_and_data_libraries_and_binaries_are_not(self) -> None:
+        found = self.discover(owned=["/opt/from-a-package"])
+        self.assertEqual(
+            sorted(found),
+            [
+                "etc:/opt/vendor",
+                "etc:/usr/local/etc/tool/tool.conf",
+                "etc:/usr/local/lib/mytool",
+                "etc:/usr/local/lib/systemd/user/mine.service",
+                "etc:/usr/local/lib/x86_64-linux-gnu/pipewire-0.3/libxdg-desktop-portal.so",
+                "etc:/usr/local/lib/x86_64-linux-gnu/wireplumber-0.5/libxdg-desktop-portal.so",
+                "etc:/usr/local/share/credentialsd",
+                "etc:/usr/local/share/dbus-1/services/org.example.Svc.service",
+                "etc:/usr/local/share/pipewire/pipewire.conf.d/20-mine.conf",
+                "etc:/usr/local/share/vendor-link",
+                "etc:/usr/local/share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf",
+                "etc:/usr/local/share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf.disabled",
+                "etc:/usr/local/share/xdg-desktop-portal/portals/mine.portal",
+            ],
+        )
+
+    def test_a_config_next_to_a_listed_drop_in_is_not_hidden_by_it(self) -> None:
+        """WirePlumber reads share/wireplumber/wireplumber.conf from XDG_DATA_DIRS before /usr/share: it is a finding too."""
+        local = self.rootfs / "usr/local"
+        write(local / "share/wireplumber/wireplumber.conf", "x")
+        write(local / "share/wireplumber/scripts/main.lua", "x")
+        write(local / "share/xdg-desktop-portal/gnome-portals.conf", "x")
+        found = self.discover()
+        self.assertEqual(found["etc:/usr/local/share/wireplumber/wireplumber.conf"].kind, "file")
+        self.assertEqual(found["etc:/usr/local/share/wireplumber/scripts"].detail, "hand-installed directory, 1 files")
+        self.assertIn("etc:/usr/local/share/xdg-desktop-portal/gnome-portals.conf", found)
+        # what the areas already listed is not listed a second time, and plain data under a listed tree stays out
+        self.assertNotIn("etc:/usr/local/share/wireplumber", found)
+        self.assertNotIn("etc:/usr/local/share/wireplumber/wireplumber.conf.d", found)
+        self.assertNotIn("etc:/usr/local/share/dbus-1/interfaces", found)
+
+    def test_a_systemd_drop_in_directory_next_to_a_listed_unit_is_an_item(self) -> None:
+        local = self.rootfs / "usr/local"
+        write(local / "lib/systemd/user/mine.service.d/override.conf", "x")
+        os.symlink("../mine.service", local / "lib/systemd/user/default.target.wants-mine")
+        found = self.discover()
+        self.assertEqual(
+            found["etc:/usr/local/lib/systemd/user/mine.service.d"].detail, "hand-installed directory, 1 files"
+        )
+        self.assertEqual(found["etc:/usr/local/lib/systemd/user/default.target.wants-mine"].kind, "link")
+        self.assertIn("etc:/usr/local/lib/systemd/user/mine.service", found)
+        self.assertNotIn("etc:/usr/local/lib/systemd", found)
+        self.assertNotIn("etc:/usr/local/lib/systemd/user", found)
+
+    def test_libraries_installed_straight_into_usr_local_lib_are_not_listed(self) -> None:
+        """An autotools or CMake build with the default prefix puts libfoo.so* there, not in a triplet directory."""
+        lib = self.rootfs / "usr/local/lib"
+        for name in ("libfoo.so.1.2.3", "libfoo.a", "libfoo.la"):
+            write(lib / name, "elf")
+        os.symlink("libfoo.so.1.2.3", lib / "libfoo.so.1")
+        os.symlink("libfoo.so.1.2.3", lib / "libfoo.so")
+        found = self.discover()
+        self.assertEqual([item for item in found if "libfoo" in item], [])
+        self.assertIn("etc:/usr/local/lib/mytool", found)
+
+    def test_a_directory_link_in_an_area_is_not_followed(self) -> None:
+        """share/foo -> a packaged tree: the link is the finding, never the packaged files behind it."""
+        local = self.rootfs / "usr/local"
+        write(self.rootfs / "srv/foo-data/foo.d/10-packaged.conf", "x")
+        (local / "share").mkdir(parents=True, exist_ok=True)
+        os.symlink("../../../srv/foo-data", local / "share/foo")
+        found = self.discover()
+        self.assertEqual(found["etc:/usr/local/share/foo"].kind, "link")
+        self.assertEqual([item for item in found if item.startswith("etc:/usr/local/share/foo/")], [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list every directory")
+    def test_an_area_directory_this_user_cannot_list_is_one_item_saying_so(self) -> None:
+        """A hand-built sudo leaves /usr/local/etc/sudoers.d at 0750: the adapter contract says an unreadable area is an item."""
+        locked = self.rootfs / "usr/local/etc/sudoers.d"
+        write(locked / "50-me", "x")
+        locked.chmod(0o000)
+        self.addCleanup(locked.chmod, 0o700)
+        found = self.discover()
+        self.assertEqual(
+            found["etc:/usr/local/etc/sudoers.d"].detail, "needs root to read: sudo ls -lR /usr/local/etc/sudoers.d"
+        )
+
+    def test_a_link_that_loops_back_to_itself_is_a_link_item_and_does_not_stop_the_scan(self) -> None:
+        local = self.rootfs / "usr/local"
+        (local / "lib").mkdir(parents=True, exist_ok=True)
+        os.symlink("vendor", local / "lib/vendor")
+        found = self.discover()
+        self.assertEqual(found["etc:/usr/local/lib/vendor"].kind, "link")
+
+    def test_a_link_standing_for_a_config_directory_is_an_item(self) -> None:
+        """/usr/local/etc -> a directory elsewhere: the link is the finding, whatever pattern step it sits on."""
+        write(self.rootfs / "srv/config/tool.conf", "x")
+        (self.rootfs / "usr/local").mkdir(parents=True)
+        os.symlink("../../srv/config", self.rootfs / "usr/local/etc")
+        self.machine()
+        found = {item.id: item.kind for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local/etc": "link"})
+
+    def test_a_tree_holding_only_directory_links_is_not_empty(self) -> None:
+        os.makedirs(self.rootfs / "etc/vendor-config")
+        os.makedirs(self.rootfs / "opt/linked")
+        os.symlink("../../etc/vendor-config", self.rootfs / "opt/linked/config")
+        self.machine()
+        found = {item.id: item.detail for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found["etc:/opt/linked"], "hand-installed directory, 1 files")
+
+    def test_a_linked_share_is_reported_as_the_link_and_not_followed(self) -> None:
+        local = self.rootfs / "usr/local"
+        write(self.rootfs / "srv/shared/credentialsd/a.xml", "x")
+        local.mkdir(parents=True)
+        os.symlink("../../srv/shared", local / "share")
+        self.machine()
+        found = {item.id: item.kind for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local/share": "link"})
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list every directory")
+    def test_an_opt_this_user_cannot_list_is_one_item_saying_so(self) -> None:
+        write(self.rootfs / "opt/vendor/x", "x")
+        (self.rootfs / "opt").chmod(0o000)
+        self.addCleanup((self.rootfs / "opt").chmod, 0o700)
+        self.machine()
+        found = {item.id: item.detail for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found["etc:/opt"], "needs root to read: sudo ls -lR /opt")
+
+    def test_a_file_name_that_is_not_utf8_is_listed_and_never_sent_to_dpkg(self) -> None:
+        odd = os.fsdecode(b"odd-\xff.conf")
+        write(self.rootfs / "usr/local/etc" / odd, "x")
+        write(self.rootfs / "usr/local/etc/plain.conf", "x")
+        found = self.discover()
+        self.assertIn(f"etc:/usr/local/etc/{odd}", found)
+        (query,) = self.process.queries
+        self.assertIn("/usr/local/etc/plain.conf", query)
+        self.assertEqual([path for path in query if "\udcff" in path], [])
+
+    def test_a_linked_multiarch_directory_is_an_item(self) -> None:
+        write(self.rootfs / "srv/arch/wireplumber-0.5/libxdg-desktop-portal.so", "elf")
+        (self.rootfs / "usr/local/lib").mkdir(parents=True)
+        os.symlink("../../../srv/arch", self.rootfs / self.ARCH)
+        self.machine()
+        found = {item.id: item.kind for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local/lib/x86_64-linux-gnu": "link"})
+
+    def test_a_linked_usr_local_is_reported_as_the_link_and_not_followed(self) -> None:
+        write(self.rootfs / "srv/local/share/applications/mine.desktop", "x")
+        (self.rootfs / "usr").mkdir(exist_ok=True)
+        os.symlink("../srv/local", self.rootfs / "usr/local")
+        self.machine()
+        found = {item.id: item.kind for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local": "link"})
+
+    def test_details_say_what_each_item_is(self) -> None:
+        found = self.discover()
+        self.assertEqual(found["etc:/usr/local/etc/tool/tool.conf"].detail, "hand-installed file")
+        self.assertEqual(found["etc:/usr/local/etc/tool/tool.conf"].kind, "file")
+        self.assertEqual(found["etc:/opt/vendor"].detail, "hand-installed directory, 2 files")
+        self.assertEqual(found["etc:/opt/vendor"].kind, "dir")
+        self.assertEqual(found["etc:/usr/local/share/credentialsd"].detail, "hand-installed directory, 2 files")
+        self.assertEqual(found["etc:/usr/local/share/vendor-link"].detail, "hand-installed link -> /opt/vendor")
+
+    def test_what_a_package_owns_is_not_hand_installed(self) -> None:
+        found = self.discover(owned=["/usr/local/etc/tool/tool.conf", "/opt/vendor"])
+        self.assertNotIn("etc:/usr/local/etc/tool/tool.conf", found)
+        self.assertNotIn("etc:/opt/vendor", found)
+
+    def test_candidates_beyond_the_argument_budget_are_asked_in_batches_and_every_answer_counts(self) -> None:
+        etc = self.rootfs / "usr/local/etc"
+        names = [f"{index:04d}-{'x' * 200}.conf" for index in range(700)]
+        for name in names:
+            write(etc / name, "x")
+        found = self.discover(owned=[f"/usr/local/etc/{names[0]}", f"/usr/local/etc/{names[-1]}"])
+        self.assertGreater(len(self.process.queries), 1)
+        for query in self.process.queries:
+            self.assertLessEqual(sum(len(path) + 1 for path in query[3:]), 120_000)
+        self.assertNotIn(f"etc:/usr/local/etc/{names[0]}", found)
+        self.assertNotIn(f"etc:/usr/local/etc/{names[-1]}", found)
+        self.assertIn(f"etc:/usr/local/etc/{names[1]}", found)
+
+    def test_a_link_that_vanishes_during_the_scan_is_not_an_item_and_does_not_stop_it(self) -> None:
+        write(self.rootfs / "opt/vendor/x", "x")
+        os.symlink("/srv/x", self.rootfs / "opt/flaky")
+        self.machine()
+        real = os.readlink
+
+        def racing(path, *args, **kwargs):
+            if str(path).endswith("opt/flaky"):
+                raise FileNotFoundError(path)
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(usr_local.os, "readlink", racing):
+            found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/opt/vendor"})
+
+    def test_config_beside_the_plugins_in_a_multiarch_directory_is_listed(self) -> None:
+        arch = self.rootfs / self.ARCH
+        write(arch / "wireplumber-0.5/libknown.so", "elf")
+        write(arch / "wireplumber-0.5/scripts/local.lua", "x")
+        write(arch / "libdex-1.so", "elf")
+        write(arch / "pkgconfig/libdex-1.pc", "x")
+        self.machine()
+        found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertEqual(
+            found,
+            {
+                "etc:/usr/local/lib/x86_64-linux-gnu/wireplumber-0.5/libknown.so",
+                "etc:/usr/local/lib/x86_64-linux-gnu/wireplumber-0.5/scripts",
+            },
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list every directory")
+    def test_an_unreadable_area_is_one_item_and_not_also_its_parent(self) -> None:
+        services = self.rootfs / "usr/local/share/dbus-1/services"
+        write(services / "x.service", "x")
+        services.chmod(0o000)
+        self.addCleanup(services.chmod, 0o700)
+        self.machine()
+        found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local/share/dbus-1/services"})
+
+    def test_a_file_name_that_differs_from_a_packaged_one_by_whitespace_is_still_hand_installed(self) -> None:
+        write(self.rootfs / "usr/local/etc/test.conf", "x")
+        write(self.rootfs / "usr/local/etc/test.conf ", "x")
+        found = self.discover(owned=["/usr/local/etc/test.conf "])
+        self.assertIn("etc:/usr/local/etc/test.conf", found)
+        self.assertNotIn("etc:/usr/local/etc/test.conf ", found)
+
+    def test_very_deep_trees_do_not_hit_the_recursion_limit(self) -> None:
+        depth = 300  # one file descriptor per level while the scratch tree is removed: stay below `ulimit -n`
+        deep = "/".join(["d"] * depth)
+        for tree, name in (("etc", "x.conf"), ("share/ca-certificates", "x.crt")):
+            level = self.rootfs / "usr/local" / tree
+            level.mkdir(parents=True)
+            for _ in range(depth):
+                level /= "d"
+                level.mkdir()
+            (level / name).write_text("x", encoding="utf-8")
+        self.machine()
+        self.addCleanup(sys.setrecursionlimit, sys.getrecursionlimit())
+        sys.setrecursionlimit(len(inspect.stack(0)) + 150)  # a walk that recurses once per level needs 300+
+        found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertIn(f"etc:/usr/local/etc/{deep}/x.conf", found)
+        self.assertIn(f"etc:/usr/local/share/ca-certificates/{deep}/x.crt", found)
+
+    def test_a_file_that_vanishes_during_the_package_query_is_not_an_item(self) -> None:
+        gone = self.rootfs / "usr/local/etc/gone.conf"
+        write(gone, "x")
+        write(self.rootfs / "usr/local/etc/stays.conf", "x")
+        self.machine()
+
+        def removing(_paths):
+            gone.unlink()
+            return set()
+
+        with mock.patch.object(usr_local, "_owned_by_packages", removing):
+            found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local/etc/stays.conf"})
+
+    @unittest.skipIf(os.geteuid() == 0, "root can search every directory")
+    def test_a_directory_that_can_be_listed_but_not_searched_is_a_needs_root_item(self) -> None:
+        locked = self.rootfs / "usr/local/etc/locked"
+        write(locked / "tool.conf", "x")
+        locked.chmod(0o400)
+        self.addCleanup(locked.chmod, 0o700)
+        self.machine()
+        found = {item.id: item.detail for item in usr_local.discover(self.ctx)}
+        self.assertEqual(
+            found["etc:/usr/local/etc/locked/tool.conf"],
+            "needs root to read: sudo ls -ld /usr/local/etc/locked/tool.conf",
+        )
+
+    def test_a_parent_replaced_by_a_file_during_the_package_query_does_not_stop_the_scan(self) -> None:
+        write(self.rootfs / "usr/local/etc/tool/tool.conf", "x")
+        write(self.rootfs / "usr/local/etc/stays.conf", "x")
+        self.machine()
+
+        def replacing(_paths):
+            (self.rootfs / "usr/local/etc/tool/tool.conf").unlink()
+            (self.rootfs / "usr/local/etc/tool").rmdir()
+            write(self.rootfs / "usr/local/etc/tool", "now a file")
+            return set()
+
+        with mock.patch.object(usr_local, "_owned_by_packages", replacing):
+            found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertIn("etc:/usr/local/etc/stays.conf", found)
+
+    def test_data_trees_are_not_findings_below_lib_either(self) -> None:
+        write(self.rootfs / "usr/local/lib/locale/de/LC_MESSAGES/tool.mo", "x")
+        write(self.rootfs / "usr/local/share/locale/de/LC_MESSAGES/tool.mo", "x")
+        self.machine()
+        self.assertEqual(list(usr_local.discover(self.ctx)), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can search every directory")
+    def test_pathlib_probes_that_raise_on_a_permission_error_do_not_stop_the_scan(self) -> None:
+        """Python 3.12 and 3.13 let ``Path.is_dir`` and ``Path.is_symlink`` raise PermissionError (3.14 does not)."""
+        locked = self.rootfs / "usr/local/etc/locked"
+        write(locked / "tool.conf", "x")
+        locked.chmod(0o400)
+        self.addCleanup(locked.chmod, 0o700)
+        self.machine()
+
+        def raising(self, *args, **kwargs):
+            if "locked" in self.parts and self.name == "tool.conf":
+                raise PermissionError(13, "Permission denied", str(self))
+            return False
+
+        with mock.patch.object(Path, "is_dir", raising), mock.patch.object(Path, "is_symlink", raising):
+            found = {item.id: item.detail for item in usr_local.discover(self.ctx)}
+        self.assertEqual(
+            found["etc:/usr/local/etc/locked/tool.conf"],
+            "needs root to read: sudo ls -ld /usr/local/etc/locked/tool.conf",
+        )
+
+    def test_a_local_diversion_is_not_package_ownership(self) -> None:
+        write(self.rootfs / "usr/local/etc/tool.conf", "x")
+        self.machine(
+            {
+                (
+                    "dpkg-query",
+                    "-S",
+                    "--",
+                    "/usr/local/etc/tool.conf",
+                ): CommandResult(
+                    1,
+                    "local diversion from: /usr/local/etc/tool.conf\nlocal diversion to: /usr/local/etc/tool.conf.d\n",
+                    "",
+                )
+            }
+        )
+        found = {item.id for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found, {"etc:/usr/local/etc/tool.conf"})
+
+    def test_one_dpkg_query_asks_about_every_candidate(self) -> None:
+        self.discover()
+        (query,) = self.process.queries
+        self.assertEqual(query[:3], ("dpkg-query", "-S", "--"))
+        self.assertIn("/opt/vendor", query)
+        self.assertIn("/usr/local/etc/tool/tool.conf", query)
+        self.assertEqual(list(query[3:]), sorted(query[3:]))
+
+    def test_without_dpkg_everything_found_is_listed_and_nothing_fails(self) -> None:
+        self.lay_out()
+        self.machine()
+        ids = self.ids(usr_local.discover(self.ctx))
+        self.assertIn("etc:/opt/vendor", ids)
+        self.assertIn("etc:/opt/from-a-package", ids)
+
+    def test_a_machine_without_either_tree_has_nothing_and_asks_dpkg_nothing(self) -> None:
+        self.machine()
+        self.assertEqual(list(usr_local.discover(self.ctx)), [])
+        self.assertEqual(self.process.queries, [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list every directory")
+    def test_a_directory_this_user_cannot_list_is_one_item_saying_so(self) -> None:
+        locked = self.rootfs / "opt/locked"
+        write(locked / "x", "x")
+        locked.chmod(0o000)
+        self.addCleanup(locked.chmod, 0o700)
+        self.machine()
+        found = {item.id: item.detail for item in usr_local.discover(self.ctx)}
+        self.assertEqual(found["etc:/opt/locked"], "needs root to read: sudo ls -lR /opt/locked")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list every directory")
+    def test_a_package_directory_this_user_cannot_list_is_not_reported_as_unreadable(self) -> None:
+        locked = self.rootfs / "opt/pkg-locked"
+        write(locked / "x", "x")
+        locked.chmod(0o000)
+        self.addCleanup(locked.chmod, 0o700)
+        self.process = OwnedByPackages(["/opt/pkg-locked"])
+        manager = use(System(self.process, self.home, self.rootfs, None))
+        manager.__enter__()
+        self.addCleanup(manager.__exit__, None, None, None)
+        self.assertNotIn("etc:/opt/pkg-locked", self.ids(usr_local.discover(self.ctx)))
+
+    def scan_with_modules(self, *modules: str) -> dict[str, Finding]:
+        from ubuntu_tweaks.adapters import scan
+        from ubuntu_tweaks.context import REPO_ROOT
+        from ubuntu_tweaks.coverage_rules import load_rules
+
+        write(self.rootfs / "usr/local/lib/memguard/memguard_swap.py", "x")
+        write(self.rootfs / "usr/local/share/ubuntu-tweaks/apfs-fuse.commit", "x")
+        write(self.rootfs / "usr/local/share/glib-2.0/schemas/gschemas.compiled", "x")
+        write(self.rootfs / "usr/local/share/glib-2.0/schemas/org.example.gschema.xml", "x")
+        for name in modules:
+            write(
+                self.repo / "modules" / name / "module.toml",
+                (REPO_ROOT / "modules" / name / "module.toml").read_text(encoding="utf-8"),
+            )
+        self.machine(backend=FakeBackend([INTERFACE]))
+        return {f.item.id: f for f in scan(self.ctx, load_rules(self.ctx)) if f.item.adapter == "usr-local"}
+
+    def test_the_modules_that_install_there_claim_their_files(self) -> None:
+        found = self.scan_with_modules("memguard", "disks")
+        self.assertEqual(found["etc:/usr/local/lib/memguard"].coverage, Coverage.TRACKED)
+        self.assertEqual(found["etc:/usr/local/lib/memguard"].owner, "memguard")
+        self.assertEqual(found["etc:/usr/local/share/ubuntu-tweaks"].coverage, Coverage.TRACKED)
+        self.assertEqual(found["etc:/usr/local/share/ubuntu-tweaks"].owner, "disks")
+
+    def test_without_those_modules_the_same_entries_are_untracked(self) -> None:
+        found = self.scan_with_modules()
+        self.assertEqual(found["etc:/usr/local/lib/memguard"].coverage, Coverage.UNTRACKED)
+        self.assertEqual(found["etc:/usr/local/share/ubuntu-tweaks"].coverage, Coverage.UNTRACKED)
+
+    def test_the_compiled_schema_cache_is_excluded_and_the_schema_source_is_not(self) -> None:
+        found = self.scan_with_modules()
+        cache = found["etc:/usr/local/share/glib-2.0/schemas/gschemas.compiled"]
+        self.assertEqual(cache.coverage, Coverage.EXCLUDED)
+        self.assertIn("glib-compile-schemas", cache.reason)
+        source = found["etc:/usr/local/share/glib-2.0/schemas/org.example.gschema.xml"]
+        self.assertEqual(source.coverage, Coverage.UNTRACKED)
+
+    def test_a_scan_with_the_wireplumber_module_claims_its_files_and_leaves_the_rest_untracked(self) -> None:
+        from ubuntu_tweaks.adapters import scan
+        from ubuntu_tweaks.context import REPO_ROOT
+        from ubuntu_tweaks.coverage_rules import load_rules
+
+        self.lay_out()
+        write(
+            self.repo / "modules/wireplumber-portal-conf/module.toml",
+            (REPO_ROOT / "modules/wireplumber-portal-conf/module.toml").read_text(encoding="utf-8"),
+        )
+        self.machine(backend=FakeBackend([INTERFACE]))
+        found = {f.item.id: f for f in scan(self.ctx, load_rules(self.ctx)) if f.item.adapter == "usr-local"}
+        tracked = {id_ for id_, finding in found.items() if finding.coverage is Coverage.TRACKED}
+        self.assertEqual(
+            tracked,
+            {
+                "etc:/usr/local/share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf",
+                "etc:/usr/local/share/wireplumber/wireplumber.conf.d/10-xdg-desktop-portal.conf.disabled",
+                "etc:/usr/local/lib/x86_64-linux-gnu/wireplumber-0.5/libxdg-desktop-portal.so",
+                "etc:/usr/local/lib/x86_64-linux-gnu/pipewire-0.3/libxdg-desktop-portal.so",
+            },
+        )
+        untracked = {id_ for id_, finding in found.items() if finding.coverage is Coverage.UNTRACKED}
+        self.assertIn("etc:/usr/local/etc/tool/tool.conf", untracked)
+        self.assertIn("etc:/opt/vendor", untracked)
+
+    def test_a_profile_rule_can_exclude_an_entry_with_a_reason(self) -> None:
+        from ubuntu_tweaks.adapters import scan
+        from ubuntu_tweaks.coverage_rules import load_rules
+
+        self.lay_out()
+        write(
+            self.profile_root / "coverage.toml",
+            '[[coverage]]\nmatch = ["etc:/opt/vendor"]\nclass = "excluded"\nreason = "a vendor tarball, not configuration"\n',
+        )
+        self.machine(backend=FakeBackend([INTERFACE]))
+        found = {f.item.id: f for f in scan(self.ctx, load_rules(self.ctx)) if f.item.adapter == "usr-local"}
+        self.assertEqual(found["etc:/opt/vendor"].coverage, Coverage.EXCLUDED)
+
+    def test_discovery_changes_nothing(self) -> None:
+        self.lay_out()
+        self.machine()
+        before = sorted(str(p) for p in self.tmp.rglob("*"))
+        list(usr_local.discover(self.ctx))
+        self.assertEqual(sorted(str(p) for p in self.tmp.rglob("*")), before)
 
 
 class ItemTests(unittest.TestCase):

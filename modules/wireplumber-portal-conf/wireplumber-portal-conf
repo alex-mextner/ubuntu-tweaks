@@ -25,8 +25,8 @@ an unlink, never a replace; wireplumber reads `*.conf` only, so renaming back un
 of theirs is missing; a conf whose module exists is never touched. A retired copy is never overwritten (a different
 `.disabled` there makes the new name `.disabled.<UTC stamp>`); the same bytes retired already make the conf the
 duplicate. Any other broken conf is the owner's: `install` ends in `needs manual` naming it. The module `.so` under
-/usr/local/lib stays (no coverage adapter scans /usr/local yet, #235: the module.toml `[[coverage]]` rules that name
-it and the conf are declarative until one does).
+/usr/local/lib stays (the `usr-local` coverage adapter lists it, #235: the module.toml `[[coverage]]` rules that name
+it and the conf claim them).
 
 The other direction: the retirement is only as good as the module's absence. When every module a retired copy
 (`<name>.conf.disabled`, `.disabled.<UTC stamp>`, a regular file of `RETIRED_CONFS` in the /usr/local directory)
