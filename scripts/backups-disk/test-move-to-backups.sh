@@ -149,11 +149,11 @@ check "(d) unprivileged default dir: created 0700 under ~/.local/state, file mad
 # main <phase> tees its output into that file
 out=$(main cleanup 2>&1)
 check "(d) main cleanup writes the output into a log file in that dir too" "1" "$(grep -l 'regenerable caches' "$HOME_DIR"/.local/state/move-to-backups/*.log | wc -l)"
-HOME_DIR=/home/ultra; LOG_DIR=$T/logs
+HOME_DIR=/home/owner; LOG_DIR=$T/logs
 
 # ---- (e) destination symlinks are refused BEFORE rsync/mkdir/chown (#231 finding: root's rsync through a planted link)
 # move_item against a scratch HOME/backup tree; mount-table, busy check, rsync, mount, chown are stubs.
-HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-ultra; FSTAB=$T/fstab; : >"$FSTAB"
+HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-owner; FSTAB=$T/fstab; : >"$FSTAB"
 is_bind_mounted() { return 1; }; nested_mounts() { :; }; busy() { return 1; }
 mount() { :; }; umount() { :; }; chown() { :; }; systemctl() { :; }
 mk_e() { rm -rf "$HOME_DIR" "$MNT" "$T/elsewhere"; mkdir -p "$HOME_DIR/proj" "$DEST" "$T/elsewhere"; echo x >"$HOME_DIR/proj/f"; CALLS=0; }
@@ -162,7 +162,7 @@ move_item proj; rc=$?
 check "(e) destination itself is a symlink: refused, rsync never started" "1 0" "$rc $CALLS"
 check "(e)   the link target was not written to" "0" "$(find "$T/elsewhere" -mindepth 1 | wc -l)"
 check "(e)   the source is untouched" "yes" "$([[ -f $HOME_DIR/proj/f ]] && echo yes)"
-mk_e; rm -rf "$MNT/home-ultra"; ln -s "$T/elsewhere" "$MNT/home-ultra"
+mk_e; rm -rf "$MNT/home-owner"; ln -s "$T/elsewhere" "$MNT/home-owner"
 move_item proj; rc=$?
 check "(e) a PARENT of the destination is a symlink: refused, rsync never started" "1 0" "$rc $CALLS"
 check "(e)   nothing created through the link" "0" "$(find "$T/elsewhere" -mindepth 1 | wc -l)"
@@ -192,7 +192,7 @@ fstab_add_bind "$T/dst" "$T/mp"; rc=$?
 check "(f) fstab_add_bind writes one bind line" "0 1" "$rc $(awk -v p="$T/mp" '$2 == p && $4 ~ /bind/' "$FSTAB" | wc -l)"
 fstab_add_bind "$T/dst" "$T/mp"; check "(f)   a second add keeps one line" "1" "$(awk -v p="$T/mp" '$2 == p' "$FSTAB" | wc -l)"
 # move_item: a failed fstab write must not end in DONE; the bind is taken down again and the item reports failure
-HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-ultra; FSTAB=$T/fstab3; : >"$FSTAB"
+HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-owner; FSTAB=$T/fstab3; : >"$FSTAB"
 is_bind_mounted() { return 1; }; nested_mounts() { :; }; busy() { return 1; }
 mount() { cp -a "$2/." "$3/"; }; umount() { UMOUNTED+=("$1"); }; chown() { :; }; systemctl() { :; }
 eval "$(declare -f fstab_add_bind | sed '1s/^fstab_add_bind/real_fstab_add_bind/')"
@@ -351,7 +351,7 @@ check "(l) lock file is mode 600" "600" "$(stat -c %a "$FSTAB.lock")"
 FSTAB=$T/fstab6
 
 # ---- (m) a bind that exists without its fstab line gets the line on the next run (#231 review: failed rollback umount)
-HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-ultra; FSTAB=$T/fstab6; : >"$FSTAB"; FSTAB_BACKED_UP=1
+HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-owner; FSTAB=$T/fstab6; : >"$FSTAB"; FSTAB_BACKED_UP=1
 mk_e
 is_bind_mounted() { return 0; }; nested_mounts() { printf 'bind\t%s\n' "$HOME_DIR/proj"; }; systemctl() { :; }
 move_item proj; rc=$?
@@ -364,7 +364,7 @@ check "(m)   line cannot be written: the item FAILS instead of being skipped sil
 unset -f systemctl; reload_script; log() { :; }; warn() { WARNED+=("$*"); }   # reload puts back the real is_bind_mounted/nested_mounts/fstab_add_bind
 
 # ---- (n) a destination swapped for a symlink during the final busy re-check is still refused (#231 review: TOCTOU)
-HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-ultra; FSTAB=$T/fstab7; : >"$FSTAB"; FSTAB_BACKED_UP=1
+HOME_DIR=$T/h; MNT=$T/m; DEST=$MNT/home-owner; FSTAB=$T/fstab7; : >"$FSTAB"; FSTAB_BACKED_UP=1
 is_bind_mounted() { return 1; }; nested_mounts() { :; }; mount() { :; }; umount() { :; }; chown() { :; }; systemctl() { :; }
 BUSY_CALLS=0
 busy() { BUSY_CALLS=$((BUSY_CALLS + 1)); if (( BUSY_CALLS == 2 )); then rm -rf "$DEST/proj"; ln -s "$T/elsewhere" "$DEST/proj"; fi; return 1; }
