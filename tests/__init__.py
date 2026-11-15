@@ -10,6 +10,11 @@ removes it where resolution is the subject). A test that wants a terminal passes
 
 Also points the session log of ``cli.main`` at a temporary directory (``UBUNTU_TWEAK_LOG_DIR``): every ``main`` call
 writes a log, and none may land in the developer's real ``~/.local/state``.
+
+Scratch directories stay outside the real HOME: the planners show a path under it as ``~/...``, so a test that
+compares the text of a path built in a temporary directory fails when ``TMPDIR`` is inside the home (a checkout
+under ``~/work`` on the offload server, a developer's ``~/tmp``). Such a ``TMPDIR`` is replaced by ``/tmp``;
+one outside the home is kept (``tests/test_scratch_outside_home.py``).
 """
 
 import atexit
@@ -20,6 +25,15 @@ from pathlib import Path
 from typing import TextIO
 
 from ubuntu_tweaks import ui
+
+
+def _scratch_outside_home() -> None:
+    if Path(tempfile.gettempdir()).resolve().is_relative_to(Path.home().resolve()):
+        os.environ["TMPDIR"] = "/tmp"
+        tempfile.tempdir = None  # tempfile looked TMPDIR up once: look again
+
+
+_scratch_outside_home()
 
 
 def _only_fake_ttys(stream: TextIO) -> bool:
