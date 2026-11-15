@@ -582,8 +582,8 @@ class InProcess(Staged):
 
 
 class Coverage(unittest.TestCase):
-    """The module's `[[coverage]]` rules account for what it retires, restores and leaves in place. No coverage adapter
-    scans /usr/local yet (#235), so these are declarative: the rules are checked against the ids they must match."""
+    """The module's `[[coverage]]` rules account for what it retires, restores and leaves in place. The `usr-local`
+    coverage adapter produces these ids; here the rules are checked against the ids they must match."""
 
     @classmethod
     def setUpClass(cls):

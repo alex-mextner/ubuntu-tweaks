@@ -5,3 +5,8 @@ enabled = true
 kind = "system"
 install = "install.sh"
 check = "install.sh --check"
+
+[[coverage]]
+match = ["etc:/usr/local/lib/memguard"]
+class = "tracked"
+reason = "memguard_swap.py, installed into /usr/local/lib/memguard by the module's install.sh (checked by install.sh --check)"

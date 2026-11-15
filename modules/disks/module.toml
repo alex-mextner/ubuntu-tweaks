@@ -7,3 +7,8 @@ kind = "system"
 install = "disks install"
 check = "disks check"
 preview = "disks plan"
+
+[[coverage]]
+match = ["etc:/usr/local/share/ubuntu-tweaks"]
+class = "tracked"
+reason = "the apfs-fuse.commit stamp the module writes after it builds the apfs-fuse driver (the commit the installed driver was built from)"

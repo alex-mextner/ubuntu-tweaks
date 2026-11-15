@@ -201,6 +201,11 @@ reason = "written by the package's debconf / maintainer scripts at install time,
 # /etc/default/grub is deliberately NOT here: editing it is a real choice (kernel parameters, boot menu), so it stays a
 # finding until the profile claims it (a system module, or a `tracked` / `untracked` rule with a ticket).
 
+[[coverage]]
+match = ["etc:/usr/local/share/glib-2.0/schemas/gschemas.compiled"]
+class = "excluded"
+reason = "generated: glib-compile-schemas builds it from the .gschema.xml files next to it (those stay findings)"
+
 # ---------------------------------------------------------------- dconf keys (same intent as capture's defaults)
 
 [[coverage]]
