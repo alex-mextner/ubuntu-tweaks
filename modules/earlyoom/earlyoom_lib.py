@@ -555,8 +555,9 @@ class SystemEarlyoom(Module):
             raise ModuleError("must run as root (ubuntu-tweak runs it through sudo)")
         try:
             if not self._installed():
-                # --force-confold: a later package upgrade must not stop to ask about the file this module owns
-                apt_get(self._process, "install", "-y", "-o", "Dpkg::Options::=--force-confold", PACKAGE)
+                # apt_get keeps the file on disk at a conffile conflict: a later upgrade must not stop to ask about
+                # the file this module owns
+                apt_get(self._process, "install", "-y", PACKAGE)
             previous = _read(self.defaults_path)
             changed = previous != render_defaults(self._options)
             if changed:

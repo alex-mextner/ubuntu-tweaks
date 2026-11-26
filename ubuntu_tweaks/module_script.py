@@ -33,8 +33,9 @@ Public API:
   it and restores the previous values on exit (also on failure).
 - ``apt_get(process, *arguments, cwd=None)``: the one way a module script runs ``apt-get``: stdin at EOF (never the
   terminal: under sudo-rs a grandchild that touches the pty is stopped for ever, ticket #126) and
-  ``APT_ENVIRONMENT`` (``DEBIAN_FRONTEND=noninteractive``, ``NEEDRESTART_MODE=a``, ``NEEDRESTART_SUSPEND=1``,
-  ``APT_LISTCHANGES_FRONTEND=none``) for the child, restored afterwards.
+  ``APT_ENVIRONMENT`` (``apt_command``: ``DEBIAN_FRONTEND=noninteractive``, ``NEEDRESTART_MODE=a``,
+  ``NEEDRESTART_SUSPEND=1``, ``APT_LISTCHANGES_FRONTEND=none``) for the child, restored afterwards; an install or
+  upgrade also carries dpkg's ``--force-confdef --force-confold``.
 - ``read_owned_file(path, uid, limit)``: what a root script may read from the desktop user's tree: a regular
   file (no symlink at the end), owned by ``uid``, at most ``limit`` bytes; anything else is ``ModuleError``.
 - ``keyring_secret(process, purpose) -> str | None``: ``secret-tool lookup application ubuntu-tweaks
@@ -73,6 +74,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
+from ubuntu_tweaks.apt_command import APT_ENVIRONMENT, noninteractive_arguments
 from ubuntu_tweaks.errors import UbuntuTweakError
 from ubuntu_tweaks.process import Process
 
@@ -89,13 +91,6 @@ ALIASES = {"--check": "check", "--dry-run": "plan"}
 USAGE = "usage: {name} check|status|plan|install|retire-check|retire-plan|retire"
 NO_RETIREMENT = "this module declares no retirement"
 KEYRING_APPLICATION = "ubuntu-tweaks"
-# What apt-get may not ask for or wait for: debconf, needrestart's dialog and restart, apt-listchanges' pager.
-APT_ENVIRONMENT = {
-    "DEBIAN_FRONTEND": "noninteractive",
-    "NEEDRESTART_MODE": "a",
-    "NEEDRESTART_SUSPEND": "1",
-    "APT_LISTCHANGES_FRONTEND": "none",
-}
 
 
 class ModuleError(Exception):
@@ -290,12 +285,13 @@ def environment(**overrides: str) -> Iterator[None]:
 
 
 def apt_get(process: Process, *arguments: str, cwd: Path | None = None) -> None:
-    """Run ``apt-get <arguments>`` so that it never reads or reconfigures a terminal.
+    """Run ``apt-get <arguments>`` so that it never reads or reconfigures a terminal and never asks a question.
 
     Empty ``input_text`` makes stdin a pipe that is at EOF at once: apt's pty handling (``tcsetattr`` on stdin at
-    the end of an install) is skipped, and nothing it starts can wait for an answer. Streaming output and the
-    ``CommandError`` of a failure are the process seam's, unchanged."""
-    argv = ["apt-get", *arguments]
+    the end of an install) is skipped, and nothing it starts can wait for an answer. An install or upgrade also gets
+    dpkg's ``--force-confdef --force-confold`` (``apt_command.noninteractive_arguments``): a conffile conflict keeps
+    the file on disk. Streaming output and the ``CommandError`` of a failure are the process seam's, unchanged."""
+    argv = ["apt-get", *noninteractive_arguments(arguments)]
     with environment(**APT_ENVIRONMENT):
         process.execute(argv, input_text="", cwd=cwd)
 

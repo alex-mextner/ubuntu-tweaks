@@ -19,6 +19,7 @@ try:
     from ubuntu_tweaks.commands import _support, apply, doctor, init, status, update
     from ubuntu_tweaks.commands import coverage as coverage_command
     from ubuntu_tweaks import process
+    from ubuntu_tweaks.apt_command import install_command
     from ubuntu_tweaks.process import CommandError
     from ubuntu_tweaks.context import Context
     from ubuntu_tweaks.elevation import RootSession
@@ -627,7 +628,7 @@ class DoctorTests(CommandScenario):
                 mock.patch.object(process.os, "geteuid", return_value=1000),
             ):
                 doctor.install(absent)
-            run_command.assert_called_once_with([*prefix, "apt-get", "install", "-y", "tmux"])
+            run_command.assert_called_once_with([*prefix, *install_command(["tmux"])], terminal=True)
 
     def test_install_uses_sudo_unless_root(self) -> None:
         absent = [
@@ -640,13 +641,13 @@ class DoctorTests(CommandScenario):
             mock.patch.object(process.shutil, "which", return_value="/usr/bin/sudo"),
         ):
             doctor.install(absent)
-        run_command.assert_called_once_with(["sudo", "--", "apt-get", "install", "-y", "git", "tmux"])
+        run_command.assert_called_once_with(["sudo", "--", *install_command(["git", "tmux"])], terminal=True)
         with (
             mock.patch.object(doctor, "run_command") as run_command,
             mock.patch.object(process.os, "geteuid", return_value=0),
         ):
             doctor.install(absent)
-        run_command.assert_called_once_with(["apt-get", "install", "-y", "git", "tmux"])
+        run_command.assert_called_once_with(install_command(["git", "tmux"]), terminal=True)
 
 
 class UpdateTests(CommandScenario):

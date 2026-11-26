@@ -17,6 +17,7 @@ sys.path.insert(0, str(MODULE.parents[1]))
 sys.dont_write_bytecode = True
 
 from ubuntu_tweaks import disks as lib  # noqa: E402
+from ubuntu_tweaks.apt_command import DPKG_OPTIONS  # noqa: E402
 from ubuntu_tweaks.errors import ConfigError  # noqa: E402
 from ubuntu_tweaks.module_script import (  # noqa: E402
     APT_ENVIRONMENT,
@@ -312,7 +313,8 @@ class ApplyTest(DisksCase):
             lib.PINNED_APFS_FUSE[1] + " root-build",
         )
         self.assertTrue(os.access(self.root / "usr/local/bin/apfs-fuse", os.X_OK))
-        self.assertEqual(machine.executed[0][:3], ("apt-get", "install", "-y"))
+        self.assertEqual(machine.executed[0][:2], ("apt-get", "install"))
+        self.assertEqual(machine.executed[0][2 : 2 + len(DPKG_OPTIONS)], DPKG_OPTIONS)
         self.assertIn(
             ("git", "-C", machine.executed[2][2], "checkout", "--detach", lib.PINNED_APFS_FUSE[1]), machine.executed
         )
@@ -784,7 +786,10 @@ class KernelDriverTest(DisksCase):
     def test_the_kernel_driver_installs_ubuntus_dkms_package_and_mounts_apfs_read_only(self):
         machine = self.machine()
         self.module(machine, self.options()).apply()
-        self.assertIn(("apt-get", "install", "-y", "apfs-dkms", "linux-headers-7.0.0-38-generic"), machine.executed)
+        self.assertIn(
+            ("apt-get", "install", *DPKG_OPTIONS, "-y", "apfs-dkms", "linux-headers-7.0.0-38-generic"),
+            machine.executed,
+        )
         self.assertIn(
             f"/dev/disk/by-uuid/{APFS_UUID} /mnt/mac-backups apfs ro,uid=1000,gid=1000,nosuid,nodev,nofail",
             self.fstab(),
@@ -971,7 +976,7 @@ class OtherFilesystemsTest(DisksCase):
             "mounts": {"win": {"label": "Windows 11", "fstype": "ntfs", "driver": "ntfs-3g", "read_only": False}}
         }
         self.module(machine, options).apply()
-        self.assertIn(("apt-get", "install", "-y", "ntfs-3g"), machine.executed)
+        self.assertIn(("apt-get", "install", *DPKG_OPTIONS, "-y", "ntfs-3g"), machine.executed)
         self.assertIn(
             "/dev/disk/by-label/Windows\\134x2011 /mnt/win ntfs-3g rw,uid=1000,gid=1000,umask=022,nosuid,nodev,nofail,x-systemd.automount",
             self.fstab(),

@@ -15,6 +15,7 @@ from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError
 from ubuntu_tweaks.planners import packages as packages_planner
 from ubuntu_tweaks.planners import system_root as system_planner
+from ubuntu_tweaks.apt_command import install_command
 from ubuntu_tweaks.process import CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Profile
 from ubuntu_tweaks.settings import FakeBackend
@@ -54,14 +55,23 @@ class Machine(FakeProcess):
                 return CommandResult(0, "".join(f"{n}\n" for n in sorted(self.flatpaks)))
         return CommandResult(127)
 
-    def execute(self, argv: Sequence[str], *, input_text: str | None = None) -> None:
-        super().execute(argv, input_text=input_text)
+    def execute(self, argv: Sequence[str], *, input_text: str | None = None, terminal: bool = False) -> None:
+        super().execute(argv, input_text=input_text, terminal=terminal)
         words = list(argv)
         if words[:2] == ["sudo", "--"]:
             words = words[2:]
+        if words[:1] == ["env"]:  # the variables the apt command carries through sudo
+            words = words[1:]
+            while "=" in words[0]:
+                words = words[1:]
         match words[:2]:
             case ["apt-get", "install"]:
-                self.apt |= {w for w in words[2:] if not w.startswith("-")}
+                options = iter(words[2:])
+                for word in options:
+                    if word == "-o":
+                        next(options)  # the value of the option
+                    elif not word.startswith("-"):
+                        self.apt.add(word)
             case ["snap", "install"]:
                 self.snaps |= {w for w in words[2:] if not w.startswith("-")}
             case ["flatpak", "install"]:
@@ -263,7 +273,7 @@ class PackagesTests(ProfileCase):
         self.assertEqual(
             [argv for argv, _ in self.machine.executed],
             [
-                ("sudo", "--", "apt-get", "install", "-y", "tmux", "ripgrep"),
+                ("sudo", "--", *install_command(["tmux", "ripgrep"])),
                 ("sudo", "--", "snap", "install", "firefox"),
                 ("flatpak", "install", "-y", "--noninteractive", "flathub", "org.gnome.Extensions"),
             ],
@@ -329,9 +339,7 @@ class PackagesTests(ProfileCase):
         write(self.root / "packages.toml", 'apt = ["tmux", "curl"]\n')
         self.machine.apt = {"curl"}
         Plan.build(self.build()).execute()
-        self.assertEqual(
-            [argv for argv, _ in self.machine.executed], [("sudo", "--", "apt-get", "install", "-y", "tmux")]
-        )
+        self.assertEqual([argv for argv, _ in self.machine.executed], [("sudo", "--", *install_command(["tmux"]))])
 
         write(self.root / "packages.toml", 'apt = ["tmux", "curl", "htop"]\napt_update = true\n')
         self.machine.executed.clear()
@@ -341,7 +349,7 @@ class PackagesTests(ProfileCase):
         plan.execute()
         self.assertEqual(
             [argv for argv, _ in self.machine.executed],
-            [("sudo", "--", "apt-get", "update"), ("sudo", "--", "apt-get", "install", "-y", "htop")],
+            [("sudo", "--", "apt-get", "update"), ("sudo", "--", *install_command(["htop"]))],
         )
 
     def test_apt_update_does_not_run_when_nothing_is_missing(self) -> None:

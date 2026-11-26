@@ -54,7 +54,8 @@ class BootstrapTests(TempDirCase):
             self.run_script(),
             [
                 "sudo apt-get update",
-                "sudo apt-get install -y git curl ca-certificates python3-gi",
+                "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confdef "
+                "-o Dpkg::Options::=--force-confold git curl ca-certificates python3-gi",
                 f"git clone --recurse-submodules {REPO} {self.checkout}",
                 "ubuntu-tweak init",
             ],

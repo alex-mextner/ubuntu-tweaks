@@ -300,7 +300,19 @@ class AptGet(unittest.TestCase):
         kit.apt_get(machine, "install", "-y", "earlyoom")
 
         argv, stdin, cwd, seen = machine.calls[0]
-        self.assertEqual(argv, ["apt-get", "install", "-y", "earlyoom"])
+        self.assertEqual(
+            argv,
+            [
+                "apt-get",
+                "install",
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+                "-y",
+                "earlyoom",
+            ],
+        )
         self.assertEqual(stdin, "")  # a pipe that is at EOF at once, never the terminal
         self.assertIsNone(cwd)
         self.assertEqual(

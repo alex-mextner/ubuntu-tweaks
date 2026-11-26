@@ -9,7 +9,7 @@ that an enabled module installs itself (``[install] apt``: ``git`` by ``base-too
 module's dependency) is reported ``planned``, not ``MISSING``: ``init`` / ``apply`` install it, so
 ``doctor`` does not fail on tools the pipeline is about to install. Read-only unless ``--yes``, which
 first obtains root once (``elevation.RootSession``: exit 6 with the command to run when it cannot) and
-installs the missing apt packages with ``sudo apt-get install -y`` (without sudo when already root).
+installs the missing apt packages with ``sudo apt-get install -y`` (without sudo when already root; non-interactive, on the terminal).
 Exit 0 when nothing is missing, 3 when something is (still missing after ``--yes`` counts too). Does
 not import PyGObject: it must work without it.
 
@@ -27,7 +27,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from ubuntu_tweaks import ui
+from ubuntu_tweaks import apt_command, ui
 from ubuntu_tweaks.actions import Phase
 from ubuntu_tweaks.commands._support import has_gi, root_session, say
 from ubuntu_tweaks.context import Context
@@ -113,7 +113,7 @@ def install(absent: Sequence[Requirement]) -> None:
     packages = sorted({item.apt for item in absent})
     if not packages:
         return
-    run_command(elevate(["apt-get", "install", "-y", *packages]))
+    run_command(elevate(apt_command.install_command(packages)), terminal=True)
 
 
 def _state(item: Requirement, absent_labels: set[str]) -> str:
