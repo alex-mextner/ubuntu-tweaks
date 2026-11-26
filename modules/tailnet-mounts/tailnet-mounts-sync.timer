@@ -1,0 +1,12 @@
+# installed by ubuntu-tweaks/tailnet-mounts -> /etc/systemd/system/tailnet-mounts-sync.timer
+# One minute after boot, then five minutes after each run. A monotonic timer that is enabled late fires at once.
+[Unit]
+Description=tailnet-mounts: refresh the sshfs units every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

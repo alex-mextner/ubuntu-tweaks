@@ -31,3 +31,9 @@ scripts/integration.sh | live extension uuid of english-in-overview (see its met
 ubuntu_tweaks/panels.toml | tool reference: dconf path of passwords-app's settings, a panel rule
 ubuntu_tweaks/show/descriptions_ru.toml | tool reference: explanations of passwords-app's settings keys
 tests/golden/init_empty_machine.txt | tool reference: the default [source] repo URLs of passwords-app and firefox-passkey-qr shown in the init preview
+modules/tailnet-mounts/tests/fake_host.py | verbatim recorded data: host names of the owner's tailnet in the fake machine
+modules/tailnet-mounts/tests/fixtures/odroidn2.txt | verbatim recorded data: lsblk output of a real peer (its user name in the home path)
+modules/tailnet-mounts/tests/fixtures/tailscale-status.json | verbatim recorded data: `tailscale status --json` of the owner's tailnet (host names)
+modules/tailnet-mounts/tests/fixtures/ubuntu-pc.txt | verbatim recorded data: lsblk output of a real peer (its udisks mount points under the user name)
+modules/tailnet-mounts/tests/test_tailnet_mounts.py | verbatim recorded data: expectations over the recorded tailnet and lsblk fixtures
+docs/specs/tailnet-mounts.md | project reference: the issue link; verbatim request and the owner's hosts and user name in examples

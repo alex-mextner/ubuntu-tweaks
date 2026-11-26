@@ -1,0 +1,63 @@
+#!/usr/bin/python3 -B
+"""tailnet-mounts-sync: the program of tailnet-mounts-sync.service (root, every five minutes and after boot).
+
+Reads /etc/tailnet-mounts/config.json (written by `tailnet-mounts install` from [modules.tailnet-mounts]), asks the
+online Linux peers of the tailnet for their disks and brings the managed sshfs units in line. Exit 0 also when some
+peer cannot be reached (the warning goes to the journal and into /var/lib/tailnet-mounts/state.json); exit 1 when
+the tailnet itself cannot be read or a systemd call failed, so `systemctl status` shows a failed sync.
+
+The installed copy lives in /usr/local/lib/tailnet-mounts next to tailnet_mounts_lib.py and its ubuntu_tweaks/ stub
+(disks.py and errors.py only); run from the repository it finds the real ubuntu_tweaks package instead.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import NamedTuple
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+if not (HERE / "ubuntu_tweaks").is_dir():
+    sys.path.insert(1, str(HERE.parents[1]))
+
+import tailnet_mounts_lib as lib  # noqa: E402
+
+CONFIG = Path("/etc/tailnet-mounts/config.json")
+
+
+class Done(NamedTuple):
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run(argv, timeout):
+    try:
+        done = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return Done(127, "", f"{argv[0]}: not found")
+    except subprocess.TimeoutExpired:
+        return Done(124, "", f"{argv[0]}: timed out after {timeout}s")
+    return Done(done.returncode, done.stdout, done.stderr)
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        sys.stderr.write("tailnet-mounts-sync: must run as root\n")
+        return 1
+    try:
+        config = lib.Config.from_json(CONFIG.read_text())
+        report = lib.Syncer(Path("/"), config, run).sync()
+    except (OSError, ValueError, KeyError, lib.SyncError) as error:
+        sys.stderr.write(f"tailnet-mounts-sync: {error}\n")
+        return 1
+    for line in report.lines:
+        sys.stdout.write(line + "\n")
+    sys.stdout.write(f"tailnet-mounts-sync: {report.changed} change(s), {len(report.warnings)} warning(s)\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

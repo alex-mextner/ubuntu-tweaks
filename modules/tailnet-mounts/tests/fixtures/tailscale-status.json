@@ -1,0 +1,133 @@
+{
+  "BackendState": "Running",
+  "Self": {
+    "HostName": "home",
+    "OS": "linux",
+    "TailscaleIPs": [
+      "100.74.26.95",
+      "fd7a:115c:a1e0::1233:1a5f"
+    ]
+  },
+  "Peer": {
+    "nodekey:bananapi-m4": {
+      "HostName": "bananapi-m4",
+      "DNSName": "bananapi-m4.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": true,
+      "TailscaleIPs": [
+        "100.75.167.123",
+        "fd7a:115c:a1e0::2930:a77d"
+      ]
+    },
+    "nodekey:prrr-guest": {
+      "HostName": "prrr-guest",
+      "DNSName": "prrr-guest.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.91.116.28",
+        "fd7a:115c:a1e0::4330:741d"
+      ]
+    },
+    "nodekey:ultra-win": {
+      "HostName": "Ultra-win",
+      "DNSName": "ultra-win.tailbfe8ea.ts.net.",
+      "OS": "windows",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.114.74.100",
+        "fd7a:115c:a1e0::8a30:4a65"
+      ]
+    },
+    "nodekey:clvm": {
+      "HostName": "clvm",
+      "DNSName": "clvm.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": true,
+      "TailscaleIPs": [
+        "100.111.201.85",
+        "fd7a:115c:a1e0::dc30:c956"
+      ]
+    },
+    "nodekey:ubuntu-pc": {
+      "HostName": "ubuntu-pc",
+      "DNSName": "ubuntu-pc.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": true,
+      "TailscaleIPs": [
+        "100.75.131.84",
+        "fd7a:115c:a1e0::ed30:8355"
+      ]
+    },
+    "nodekey:ubuntu-hyper": {
+      "HostName": "ubuntu-hyper",
+      "DNSName": "ubuntu-hyper.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": true,
+      "TailscaleIPs": [
+        "100.73.50.83",
+        "fd7a:115c:a1e0::2833:3254"
+      ]
+    },
+    "nodekey:localhost": {
+      "HostName": "localhost",
+      "DNSName": "iphone.tailbfe8ea.ts.net.",
+      "OS": "iOS",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.66.116.100",
+        "fd7a:115c:a1e0::6433:7464"
+      ]
+    },
+    "nodekey:odroidn2": {
+      "HostName": "odroidn2",
+      "DNSName": "odroidn2.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": true,
+      "TailscaleIPs": [
+        "100.116.57.66",
+        "fd7a:115c:a1e0::d430:3943"
+      ]
+    },
+    "nodekey:do-edge": {
+      "HostName": "do-edge",
+      "DNSName": "do-edge.tailbfe8ea.ts.net.",
+      "OS": "linux",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.113.21.91",
+        "fd7a:115c:a1e0::b30:155c"
+      ]
+    },
+    "nodekey:pixel 7": {
+      "HostName": "Pixel 7",
+      "DNSName": "pixel-7.tailbfe8ea.ts.net.",
+      "OS": "android",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.109.42.116",
+        "fd7a:115c:a1e0::e30:2a75"
+      ]
+    },
+    "nodekey:iphone-andrey": {
+      "HostName": "iPhone-Andrey",
+      "DNSName": "iphone-andrey.tailbfe8ea.ts.net.",
+      "OS": "iOS",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.89.129.93",
+        "fd7a:115c:a1e0::9d33:815d"
+      ]
+    },
+    "nodekey:Анна’s macbook air": {
+      "HostName": "Анна’s MacBook Air",
+      "DNSName": "s-macbook-air.tailbfe8ea.ts.net.",
+      "OS": "macOS",
+      "Online": false,
+      "TailscaleIPs": [
+        "100.115.162.72",
+        "fd7a:115c:a1e0::8f30:a24a"
+      ]
+    }
+  }
+}

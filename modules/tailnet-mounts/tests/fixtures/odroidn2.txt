@@ -1,0 +1,83 @@
+{
+   "blockdevices": [
+      {
+         "name": "sda",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "children": [
+            {
+               "name": "sda1",
+               "type": "part",
+               "fstype": "ext4",
+               "label": "owner-storage",
+               "mountpoints": [
+                   "/mnt/storage"
+               ]
+            }
+         ]
+      },{
+         "name": "sdb",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": []
+      },{
+         "name": "sdc",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "children": [
+            {
+               "name": "sdc1",
+               "type": "part",
+               "fstype": "ext4",
+               "label": "WD500",
+               "mountpoints": [
+                   "/var/www/actions-runner", "/var/www/ExpenseSyncBot-stage", "/var/www/ExpenseSyncBot", "/var/lib/docker", "/var/lib/containerd", "/home/ultra", "/mnt/wd500"
+               ]
+            }
+         ]
+      },{
+         "name": "mmcblk0",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "children": [
+            {
+               "name": "mmcblk0p1",
+               "type": "part",
+               "fstype": "ext4",
+               "label": "armbi_root",
+               "mountpoints": [
+                   "/"
+               ]
+            }
+         ]
+      },{
+         "name": "zram0",
+         "type": "disk",
+         "fstype": "swap",
+         "label": null,
+         "mountpoints": [
+             "[SWAP]"
+         ]
+      },{
+         "name": "zram1",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": []
+      },{
+         "name": "zram2",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": []
+      }
+   ]
+}
+HOME=/home/ultra
