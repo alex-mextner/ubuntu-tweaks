@@ -116,6 +116,20 @@ class AptBatchTests(BaseCase):
             action.run()
         self.assertIn("kept your /etc/zsh/zshrc", out.getvalue())
 
+    def test_a_conffile_dpkg_kept_is_named_even_when_the_install_then_fails(self) -> None:
+        self.module("base-tools", self.TOOLS)
+        runner = FakeProcess(kept=["/etc/zsh/zshrc"])
+
+        def fail(_argv: object, _input: object) -> None:
+            raise ActionFailed("a later package failed to configure")
+
+        runner._effects = fail  # noqa: SLF001
+        (action,) = self.plan(runner).actions
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(ActionFailed):
+            action.run()
+        self.assertIn("kept your /etc/zsh/zshrc", out.getvalue())
+
     def test_a_command_on_path_counts_as_the_package(self) -> None:
         self.module(
             "git-gh",

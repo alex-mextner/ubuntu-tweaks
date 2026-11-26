@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 APT_ENVIRONMENT: Mapping[str, str] = {
@@ -45,10 +45,12 @@ DPKG_OPTIONS: tuple[str, ...] = (
     "Dpkg::Options::=--force-confold",
 )
 DPKG_LOG = Path("/var/log/dpkg.log")
-_INSTALLING = frozenset({"install", "upgrade", "dist-upgrade", "full-upgrade", "reinstall"})
+_INSTALLING = frozenset({"install", "upgrade", "dist-upgrade", "full-upgrade", "reinstall", "build-dep", "satisfy"})
+_VALUE_OPTIONS = frozenset(
+    {"-o", "--option", "-c", "--config-file", "-t", "--target-release", "-a", "--host-architecture"}
+)
 _LOG_TIME = "%Y-%m-%d %H:%M:%S"
 _CONFFILE_KEPT = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d conffile (\S+) keep$")
-_CLOCK_SLACK = timedelta(seconds=2)  # the log is stamped in whole seconds, by a clock that is ours
 
 
 def install_command(packages: Sequence[str]) -> list[str]:
@@ -68,9 +70,14 @@ def noninteractive_arguments(arguments: Sequence[str]) -> list[str]:
     """``arguments`` of an ``apt-get`` call, with the dpkg options placed right after the subcommand when it installs
     or upgrades (``apt-get update``, ``download``, ``indextargets`` run no dpkg and are returned as they are)."""
     words = list(arguments)
-    if not words or words[0] not in _INSTALLING:
+    position = 0
+    while position < len(words) and words[position].startswith("-"):  # options before the subcommand
+        if words[position] == "--":  # nothing after it is an option: do not put ours among the operands
+            return words
+        position += 2 if words[position] in _VALUE_OPTIONS else 1
+    if position >= len(words) or words[position] not in _INSTALLING:
         return words
-    return [words[0], *DPKG_OPTIONS, *words[1:]]
+    return [*words[: position + 1], *DPKG_OPTIONS, *words[position + 1 :]]
 
 
 def kept_conffiles(since: datetime, log: Path = DPKG_LOG) -> list[str]:
@@ -80,7 +87,7 @@ def kept_conffiles(since: datetime, log: Path = DPKG_LOG) -> list[str]:
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
-    earliest = since - _CLOCK_SLACK
+    earliest = since.replace(microsecond=0)  # the log is stamped in whole seconds
     kept: list[str] = []
     for line in reversed(lines):  # the log only grows: stop at the first line older than the run
         if _older(line, earliest):
@@ -102,5 +109,8 @@ def _older(line: str, earliest: datetime) -> bool:
 def conffile_note(path: str) -> str:
     """The line printed for a conffile dpkg kept: what happened to the file and where the package's own copy is."""
     shipped = Path(f"{path}.dpkg-dist")
-    where = f"; the package's version is {shipped}" if shipped.exists() else ""
+    try:
+        where = f"; the package's version is {shipped}" if shipped.exists() else ""
+    except OSError:  # an unreadable directory: the note matters more than where the other copy is
+        where = ""
     return f"apt: kept your {path} (dpkg conffile conflict, answered keep-old{where})"

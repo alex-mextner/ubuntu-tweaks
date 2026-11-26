@@ -77,7 +77,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
     if not _is_git_checkout(ctx):
         _note(f"{ctx.repo_root} is not a git checkout: skipping the pull and the submodule update.", kind="manual")
-        return run_streamed(apply_command(ctx, no_sudo=args.no_sudo))
+        return run_streamed(apply_command(ctx, no_sudo=args.no_sudo), terminal=True)
     before = _code_state(ctx)
     if ui.rich():
         _note(f"Step 1/2: {' '.join(PULL)}; {' '.join(SUBMODULES)}")
@@ -85,7 +85,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     run_command(SUBMODULES, cwd=ctx.repo_root)
     if ui.rich():
         _note("Step 2/2: apply --commit with the updated code")
-    code = run_streamed(apply_command(ctx, no_sudo=args.no_sudo))
+    code = run_streamed(apply_command(ctx, no_sudo=args.no_sudo), terminal=True)
     if _code_state(ctx) != before:
         _note(RELOGIN_HINT, kind="manual")
     return code

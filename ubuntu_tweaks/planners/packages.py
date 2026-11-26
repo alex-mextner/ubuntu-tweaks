@@ -122,13 +122,15 @@ class PackageAction(Action):
             self._process.execute(self._process.elevate(list(before)) if self.needs_root else list(before))
         argv = self._install_argv(missing)
         started = datetime.now()
-        if self.needs_root:  # may need the keyboard (snap, a polkit prompt): it gets the terminal, not pipes
-            self._process.execute(self._process.elevate(argv), terminal=True)
-        else:
-            self._process.execute(argv)
-        if self._manager == "apt":
-            for path in self._process.kept_conffiles(started):
-                print(apt_command.conffile_note(path))
+        try:
+            if self.needs_root:  # may need the keyboard (snap, a polkit prompt): it gets the terminal, not pipes
+                self._process.execute(self._process.elevate(argv), terminal=True)
+            else:
+                self._process.execute(argv)
+        finally:  # a later package failing must not hide that dpkg already kept the owner's file
+            if self._manager == "apt":
+                for path in self._process.kept_conffiles(started):
+                    print(apt_command.conffile_note(path))
 
 
 class ManagerMissing(Action):

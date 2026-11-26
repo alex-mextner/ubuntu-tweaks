@@ -142,7 +142,7 @@ def _run_apply(ctx: Context) -> int:
     code here too, not a traceback that ends the walk."""
     try:
         with finish.child_owns_ctrl_c():  # the apply child decides what Ctrl-C means; we wait for it
-            return run_streamed(apply_command(ctx))
+            return run_streamed(apply_command(ctx), terminal=True)  # its prompts need the tty
     except OSError as error:
         print(f"apply: cannot run: {error.strerror or error}", file=sys.stderr)
         return 127 if isinstance(error, FileNotFoundError) else 126

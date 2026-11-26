@@ -605,6 +605,16 @@ class TerminalStepTests(unittest.TestCase):
 
         self.assertNotEqual(seen[1], ours.split()[1])
 
+    def test_a_child_on_the_terminal_is_not_told_it_is_nested_in_our_session_log(self) -> None:
+        with (
+            mock.patch.object(process_module, "_on_terminal", return_value=True),
+            mock.patch.dict(os.environ, {process_module.SESSION_ENV: "/x/y.log"}),
+            mock.patch.object(process_module.subprocess, "Popen") as popen,
+        ):
+            popen.return_value.wait.return_value = 0
+            process_module.run_streamed(["true"], terminal=True)
+        self.assertNotIn(process_module.SESSION_ENV, popen.call_args.kwargs["env"])
+
     def test_a_terminal_step_has_no_input_text(self) -> None:
         with self.assertRaises(ValueError):
             process_module.run_streamed(["true"], input_text="x", terminal=True)

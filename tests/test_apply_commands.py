@@ -699,6 +699,7 @@ class UpdateTests(CommandScenario):
             [(["git", "pull", "--ff-only"], self.repo), (list(update.SUBMODULES), self.repo)],
         )
         (command,) = spawn.call_args.args
+        self.assertIs(spawn.call_args.kwargs["terminal"], True)  # the child apply owns the tty, or no package step can
         self.assertEqual(command[1:3], [str(Path(self.repo) / "bin" / "ubuntu-tweak"), "apply"])
         self.assertIn("--commit", command)
         self.assertIn("--no-sudo", command)

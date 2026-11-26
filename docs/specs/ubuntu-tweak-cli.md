@@ -956,7 +956,7 @@ safe: done steps are only listed.
 
 Request 13. `scripts/bootstrap.sh` (POSIX `sh`, at most 40 lines) takes a stock Ubuntu with neither `curl` nor
 `git` to a running `init`: when `git`, `curl`, the CA bundle or `python3-gi` is missing it runs `sudo apt-get update`
-and `sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confdef -o
+and `sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 APT_LISTCHANGES_FRONTEND=none apt-get install -y -o Dpkg::Options::=--force-confdef -o
 Dpkg::Options::=--force-confold git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
 without them), clones this project's repository (`$UBUNTU_TWEAKS_REPO`, default `alex-mextner/ubuntu-tweaks`) with its submodules into `~/ubuntu-tweaks` (or
 `$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated; that directory is the stable
@@ -2141,8 +2141,9 @@ same family) and leaves the owner's terminal in cooked mode, so a prompt could b
 package step (`apt`, `snap`) and `doctor --yes` therefore pass `terminal=True`: when stdin, stdout and stderr are all
 terminals the child inherits them and stays in the engine's foreground process group (no new session, no pipes), and
 sudo, apt and dpkg behave as in a plain shell. Costs, by design: the child's output is not in the session log (its
-footer carries a `# terminal: <step>` note), a failure has no stderr tail (so it is not retried as transient) and there
-is no watchdog or heartbeat for it (they read the pipes; the stop they exist for needs a pipe). Without terminals
+footer carries a `# terminal: <step>` note), a failure has no stderr tail (so it is not retried as transient, so an install that finds the apt lock held fails at once and the owner runs it again) and there
+is no watchdog or heartbeat for it (they read the pipes; the stop they exist for needs a pipe). `finish` and `update --commit` run their child `apply` with `terminal=True` too (otherwise the child's stdout would be a pipe and
+nothing above would reach it; the child gets an environment without the session-log variable, so it opens a session log of its own). Without terminals
 (CI, a pipe, the agent sessions) `terminal=True` falls back to the pipes. `apt-get update` keeps the pipes: it asks
 nothing.
 
@@ -2447,7 +2448,10 @@ place a dry run may write.
   files in the directory are deleted (never `latest.log`, never the file it points at, never any other file).
 - **Nested runs.** `update --commit` runs `apply --commit` in a child `ubuntu-tweak`. The outer run exports
   `UBUNTU_TWEAK_SESSION_LOG=<its log>` for its lifetime; a process that finds it set and its directory writable
-  writes no log of its own (its output already flows through the outer run's pipes into the outer log).
+  writes no log of its own (its output already flows through the outer run's pipes into the outer log). The
+  exception is a child that owns the terminal (`finish`, `update --commit`: `run_streamed(..., terminal=True)`): its output
+  bypasses the outer log, so `run_streamed` starts it without the variable (only when it really takes the terminal path) and it writes a log of its
+  own; the outer log carries the `# terminal:` note (the failure text is on the screen).
 - **Test seam.** `UBUNTU_TWEAK_LOG_DIR` names the log directory itself (replacing the path above); `tests/__init__.py`
   points it at a temporary directory so no test writes into the real state directory. It is not an opt-out for
   users: unset it and every run is logged.

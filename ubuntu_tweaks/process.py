@@ -61,7 +61,7 @@ from typing import IO
 
 from ubuntu_tweaks import apt_command, watchdog
 from ubuntu_tweaks.errors import UbuntuTweakError
-from ubuntu_tweaks.sessionlog import LineMasker, note
+from ubuntu_tweaks.sessionlog import SESSION_ENV, LineMasker, note
 
 _CHUNK = 65536
 _TAIL = 2000  # characters of a child's stderr kept for the error message of a failure
@@ -312,7 +312,9 @@ def _run_on_terminal(
     watch = _watch
     step = (watch.label if watch is not None and watch.label else shlex.join(map(str, argv)))[:_STEP_LABEL]
     note(f"terminal: {step}", "its output went to the terminal only, not to this log")
-    process = subprocess.Popen(list(argv), cwd=cwd, env=dict(os.environ if env is None else env))
+    # Its output bypasses our session log, so a child ubuntu-tweak must not believe it is nested in one: it logs itself.
+    environment = {name: value for name, value in (os.environ if env is None else env).items() if name != SESSION_ENV}
+    process = subprocess.Popen(list(argv), cwd=cwd, env=environment)
     try:
         return process.wait(timeout)
     except SystemExit:  # SIGTERM to us: do not kill the child, as on the pipe path
