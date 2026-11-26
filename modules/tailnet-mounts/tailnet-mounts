@@ -1,0 +1,304 @@
+#!/usr/bin/python3 -B
+"""tailnet-mounts module: the disks of every online Linux machine on the Tailscale network, mounted on demand over sshfs.
+
+    tailnet-mounts check     exit 0 satisfied, 3 unsatisfied (read-only, no root)
+    tailnet-mounts status    the same facts, one line each, with a warning line per peer that cannot be reached
+    tailnet-mounts plan      what install is going to do, with the disks the peers report now (read-only, runs ssh)
+    tailnet-mounts install   as root: sshfs, the sync program and its timer, then one sync
+
+Nothing is declared per machine or per disk: ``tailnet-mounts-sync`` (a systemd timer, root) reads
+``tailscale status --json``, asks every online Linux peer over ssh for its mounted disks and writes one
+``mnt-tailnet-<host>-<disk>.mount`` and ``.automount`` pair per disk, so ``/mnt/tailnet/<host>/<disk>`` mounts on first
+access and unmounts after ``idle_timeout``. The engine is ``tailnet_mounts_lib.py``; ``install`` copies it (with
+``ubuntu_tweaks/disks.py`` and ``errors.py``) to ``/usr/local/lib/tailnet-mounts`` because the timer must run root-owned code.
+
+Options (``[modules.tailnet-mounts]``): ``exclude_hosts``, ``identity_file``, ``idle_timeout``, ``roots``, ``home``; see
+the lib. A peer that cannot be reached (key refused, host key changed, dead) is a warning in ``status``, never drift: only
+this module's own files and units can drift. TAILNET_MOUNTS_ROOT=DIR stages every path below DIR (tests). Spec:
+docs/specs/ubuntu-tweak-cli.md, *Tailnet mounts*.
+"""
+
+from __future__ import annotations
+
+import os
+import pwd
+import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE))
+
+import tailnet_mounts_lib as lib  # noqa: E402
+
+from ubuntu_tweaks.errors import ConfigError  # noqa: E402
+from ubuntu_tweaks.module_script import (  # noqa: E402
+    Account,
+    Finding,
+    ModuleError,
+    NeedsManual,
+    RootedModule,
+    apt_get,
+    invoking_account,
+    module_config,
+    read_text_or_none,
+    run_cli,
+    staged_root,
+    unified_diff_lines,
+)
+from ubuntu_tweaks.process import Process  # noqa: E402
+
+ROOT_ENV = "TAILNET_MOUNTS_ROOT"
+PACKAGE = "sshfs"
+FUSERMOUNT = "usr/bin/fusermount3"
+INSTALLED = "usr/local/lib/tailnet-mounts"
+CONFIG_FILE = "etc/tailnet-mounts/config.json"
+TIMER = "tailnet-mounts-sync.timer"
+SERVICE = "tailnet-mounts-sync.service"
+HUNG_AFTER = 5
+ENGINE = Path("ubuntu_tweaks")
+
+
+class TailnetMounts(RootedModule):
+    name = "tailnet-mounts"
+
+    def __init__(
+        self,
+        root: Path,
+        options: Mapping[str, object],
+        account: Account,
+        process: Process,
+        *,
+        is_root: bool,
+        gid: int | None = None,
+        source: Path = HERE,
+    ) -> None:
+        super().__init__(root, backup_dir="var/backups/ubuntu-tweaks/tailnet-mounts", is_root=is_root)
+        self._process = process
+        self._source = source
+        self._account = account
+        self._config = lib.parse_config(
+            options,
+            user=account.name,
+            uid=account.uid,
+            gid=gid if gid is not None else _group_of(account.uid),
+            home=str(account.home),
+        )
+
+    # -- facts about the machine ------------------------------------------------------------------
+
+    def _runner(self, argv: Sequence[str], timeout: float) -> lib.Result:
+        return self._process.query(list(argv), timeout=timeout)
+
+    def _query(self, *argv: str) -> tuple[int, str]:
+        result = self._process.query(list(argv), timeout=30)
+        return result.returncode, (result.stdout or "").strip()
+
+    def _package_installed(self) -> bool:
+        code, out = self._query("dpkg-query", "-W", "-f=${Status}", PACKAGE)
+        return code == 0 and "install ok installed" in out
+
+    def _unit_is(self, verb: str, unit: str, wanted: str) -> bool:
+        code, out = self._query("systemctl", verb, unit)
+        return code == 0 and out.splitlines()[:1] == [wanted]
+
+    def _timer_running(self) -> bool:
+        return self._unit_is("is-enabled", TIMER, "enabled") and self._unit_is("is-active", TIMER, "active")
+
+    def _files(self) -> list[tuple[str, bytes, int]]:
+        """``(destination below the root, content, mode)`` of everything ``install`` puts in place."""
+        engine = self._source.parents[1] / ENGINE
+        read = lambda path: path.read_bytes()  # noqa: E731
+        return [
+            (f"{INSTALLED}/tailnet_mounts_lib.py", read(self._source / "tailnet_mounts_lib.py"), 0o644),
+            (f"{INSTALLED}/tailnet-mounts-sync", read(self._source / "tailnet-mounts-sync"), 0o755),
+            (f"{INSTALLED}/ubuntu_tweaks/__init__.py", b"", 0o644),
+            (f"{INSTALLED}/ubuntu_tweaks/disks.py", read(engine / "disks.py"), 0o644),
+            (f"{INSTALLED}/ubuntu_tweaks/errors.py", read(engine / "errors.py"), 0o644),
+            (f"{lib.UNIT_DIR}/{SERVICE}", read(self._source / SERVICE), 0o644),
+            (f"{lib.UNIT_DIR}/{TIMER}", read(self._source / TIMER), 0o644),
+            (CONFIG_FILE, self._config.to_json().encode(), 0o644),
+        ]
+
+    def _stale_files(self) -> list[tuple[str, bytes, int]]:
+        stale = []
+        for relative, data, mode in self._files():
+            path = self._p(relative)
+            try:
+                same = path.read_bytes() == data and (path.stat().st_mode & 0o7777) == mode
+            except OSError:
+                same = False
+            if not same:
+                stale.append((relative, data, mode))
+        return stale
+
+    # -- findings ---------------------------------------------------------------------------------
+
+    def findings(self) -> list[Finding]:
+        found = [
+            Finding(self._package_installed(), f"package {PACKAGE}"),
+            Finding(self._p(FUSERMOUNT).exists(), f"/{FUSERMOUNT} (package fuse3)"),
+        ]
+        key = self._config.identity_file
+        found.append(
+            Finding(
+                self._p(key.lstrip("/")).is_file(),
+                f"ssh key {key}",
+                "" if self._p(key.lstrip("/")).is_file() else "the peers are asked with it: create it and ssh-copy-id it",
+                manual=not self._p(key.lstrip("/")).is_file(),
+            )
+        )
+        stale = {relative for relative, _, _ in self._stale_files()}
+        found += [Finding(relative not in stale, f"/{relative} is the installed copy") for relative, _, _ in self._files()]
+        found.append(Finding(self._timer_running(), f"{TIMER} enabled and active"))
+        code, result = self._query("systemctl", "show", "-p", "Result", "--value", SERVICE)
+        found.append(
+            Finding(code == 0 and result in ("success", ""), f"last sync of {SERVICE} succeeded", "" if result == "success" else f"Result={result}")
+        )
+        return found + self._state_findings()
+
+    def _state_findings(self) -> list[Finding]:
+        state = lib.read_state(self._root)
+        if state is None:
+            return [Finding(False, f"first sync done (/{lib.STATE_FILE})", "install runs it")]
+        found: list[Finding] = []
+        automounts: list[str] = []
+        for host, peer in sorted((state.get("peers") or {}).items()):
+            if peer.get("error"):
+                found.append(Finding(True, f"peer {host}", f"WARNING not mounted, not drift: {peer['error']}"))
+            elif peer.get("state") in ("offline", "absent"):
+                found.append(Finding(True, f"peer {host}", f"{peer['state']}: its units are kept as they are"))
+            for share in peer.get("shares") or []:
+                found += self._share_findings(host, peer, lib.Share(share["name"], share["path"]))
+                automounts.append(f"{lib.unit_stem(host, share['name'])}.automount")
+        found += self._active_findings(automounts)
+        return found + self._hung_findings()
+
+    def _share_findings(self, host: str, peer: Mapping[str, object], share: lib.Share) -> list[Finding]:
+        stem = lib.unit_stem(host, share.name)
+        address = peer.get("address")
+        expected = {}
+        if peer.get("state") == "ok" and isinstance(address, str):
+            expected = {
+                f"{stem}.mount": lib.render_mount(host, address, share, self._config),
+                f"{stem}.automount": lib.render_automount(host, share, self._config),
+            }
+        found = []
+        for file in (f"{stem}.mount", f"{stem}.automount"):
+            text = read_text_or_none(self._p(f"{lib.UNIT_DIR}/{file}"))
+            subject = f"{host}/{share.name}: /{lib.UNIT_DIR}/{file}"
+            if text is None:
+                found.append(Finding(False, subject, "missing; the next sync (or install) writes it"))
+            elif file in expected and text != expected[file]:
+                found.append(Finding(False, subject, "differs from the generated unit; the next sync rewrites it"))
+            else:
+                found.append(Finding(True, subject))
+        return found
+
+    def _active_findings(self, automounts: list[str]) -> list[Finding]:
+        if not automounts:
+            return []
+        code, out = self._query("systemctl", "is-active", *automounts)
+        states = out.split()
+        if len(states) != len(automounts):
+            states = ["unknown"] * len(automounts)
+        return [Finding(state == "active", f"{unit} active", "" if state == "active" else state) for unit, state in zip(automounts, states, strict=True)]
+
+    def _hung_findings(self) -> list[Finding]:
+        """An sshfs mount that does not answer ``stat`` in five seconds. An idle automount is never touched (stat would
+        mount it), so only points where an sshfs filesystem is already mounted are asked."""
+        code, out = self._query("findmnt", "-rn", "-t", "fuse.sshfs", "-o", "TARGET")
+        found = []
+        for target in out.splitlines() if code == 0 else []:
+            if not target.startswith(lib.MOUNT_BASE + "/"):
+                continue
+            answer = self._process.query(["timeout", str(HUNG_AFTER), "stat", "-c", "%i", target], timeout=HUNG_AFTER + 3)
+            if answer.returncode != 0:
+                found.append(
+                    Finding(
+                        False,
+                        f"{target} answers within {HUNG_AFTER} s",
+                        f"hung or broken (exit {answer.returncode}): the peer is probably down; ServerAlive ends it in under a minute, "
+                        "or `fusermount3 -uz` it",
+                        manual=True,
+                    )
+                )
+        return found
+
+    # -- plan -------------------------------------------------------------------------------------
+
+    def plan(self) -> list[str]:
+        lines: list[str] = []
+        if not self._package_installed():
+            lines.append(f"apt-get install {PACKAGE}")
+        for relative, data, _ in self._stale_files():
+            lines.append(f"write /{relative}")
+            if relative == CONFIG_FILE:
+                lines += unified_diff_lines(f"/{relative}", read_text_or_none(self._p(relative)), data.decode())
+        if not self._timer_running():
+            lines.append(f"systemctl daemon-reload; systemctl enable --now {TIMER}")
+        # The preview asks the peers as the desktop user, so it cannot write the root-owned known_hosts file.
+        syncer = lib.Syncer(self._root, self._config, self._runner, known_hosts="/dev/null")
+        try:
+            observation = syncer.observe()
+        except lib.SyncError as error:
+            return lines + [f"needs manual: {error}"]
+        for view in sorted(observation.views.values(), key=lambda item: item.host):
+            if view.state == "ok":
+                lines.append(f"peer {view.host}: {len(view.shares)} share(s)")
+                lines += [
+                    f"  {self._config.user}@{view.address}:{share.path} -> {lib.MOUNT_BASE}/{view.host}/{share.name}"
+                    for share in view.shares
+                ]
+            elif view.state == "offline":
+                lines.append(f"peer {view.host}: offline, its units are kept")
+        return lines + syncer.plan(observation).lines()
+
+    # -- install (root) ---------------------------------------------------------------------------
+
+    def apply(self) -> None:
+        if not self._is_root:
+            if not self._package_installed():
+                raise NeedsManual(f"install {PACKAGE} (sudo apt-get install {PACKAGE}); ubuntu-tweak apply --commit does it as root")
+            self._require_root()
+        if not self._package_installed():
+            apt_get(self._process, "install", "-y", PACKAGE)
+        written = {relative for relative, data, mode in self._stale_files() if lib.write_if_changed(self._p(relative), data, mode)}
+        if written & {f"{lib.UNIT_DIR}/{SERVICE}", f"{lib.UNIT_DIR}/{TIMER}"}:
+            self._run("systemctl", "daemon-reload")
+        if not self._timer_running():
+            self._run("systemctl", "enable", "--now", TIMER)
+        try:
+            report = lib.Syncer(self._root, self._config, self._runner).sync()
+        except lib.SyncError as error:
+            raise ModuleError(f"first sync failed: {error}") from error
+        for warning in report.warnings:
+            sys.stdout.write(f"warning: {warning}\n")
+
+    def _run(self, *argv: str) -> None:
+        self._process.execute(list(argv))
+
+
+def _group_of(uid: int) -> int:
+    try:
+        return pwd.getpwuid(uid).pw_gid
+    except KeyError:
+        return uid
+
+
+def build(env: Mapping[str, str]) -> TailnetMounts:
+    root, is_root = staged_root(env, ROOT_ENV)
+    try:
+        return TailnetMounts(root, module_config(env), invoking_account(env), Process(), is_root=is_root)
+    except ConfigError as error:
+        raise ModuleError(str(error)) from error
+
+
+def cli(argv: list[str]) -> int:
+    return run_cli("tailnet-mounts", build, argv)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

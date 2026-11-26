@@ -1,0 +1,25 @@
+description = "Disks of every online Linux machine on the Tailscale network, mounted on demand over sshfs under /mnt/tailnet/<host>/<disk> (discovered at run time, refreshed by a timer)"
+enabled = true
+order = 56   # after ssh-server (50) and docker-daemon (55): needs sshfs, tailscale and the owner's ssh key
+manual = "the owner's ssh key (~/.ssh/id_ed25519, or identity_file) must exist and be accepted by the peers (ssh-copy-id); a peer that refuses it is only a warning in `tailnet-mounts status`"
+
+[source]
+kind = "system"
+install = "tailnet-mounts install"
+check = "tailnet-mounts check"
+preview = "tailnet-mounts plan"
+
+[[coverage]]
+match = ["etc:/etc/tailnet-mounts", "etc:/usr/local/lib/tailnet-mounts", "etc:/var/lib/tailnet-mounts"]
+class = "tracked"
+reason = "the sync program, its settings and its state, written by modules/tailnet-mounts"
+
+[[coverage]]
+match = ["etc:/etc/systemd/system/tailnet-mounts-sync.service", "etc:/etc/systemd/system/tailnet-mounts-sync.timer"]
+class = "tracked"
+reason = "the sync service and its timer, installed by modules/tailnet-mounts"
+
+[[coverage]]
+match = ["etc:/etc/systemd/system/mnt-tailnet-*"]
+class = "tracked"
+reason = "the sshfs mount and automount units tailnet-mounts generates for the disks it discovers (header: managed by ubuntu-tweaks tailnet-mounts)"

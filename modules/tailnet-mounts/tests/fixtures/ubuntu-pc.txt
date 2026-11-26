@@ -1,0 +1,137 @@
+{
+   "blockdevices": [
+      {
+         "name": "loop0",
+         "type": "loop",
+         "fstype": "squashfs",
+         "label": null,
+         "mountpoints": [
+            "/snap/1password/239"
+         ]
+      },
+      {
+         "name": "loop1",
+         "type": "loop",
+         "fstype": "squashfs",
+         "label": null,
+         "mountpoints": [
+            "/snap/bare/5"
+         ]
+      },
+      {
+         "name": "loop2",
+         "type": "loop",
+         "fstype": "squashfs",
+         "label": null,
+         "mountpoints": [
+            "/snap/telegram-desktop/7190"
+         ]
+      },
+      {
+         "name": "sda",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "children": [
+            {
+               "name": "sda1",
+               "type": "part",
+               "fstype": "ext4",
+               "label": "backups",
+               "mountpoints": [
+                  "/run/media/ultra/backups"
+               ]
+            }
+         ]
+      },
+      {
+         "name": "sdb",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": []
+      },
+      {
+         "name": "nvme1n1",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "children": [
+            {
+               "name": "nvme1n1p1",
+               "type": "part",
+               "fstype": "vfat",
+               "label": null,
+               "mountpoints": []
+            },
+            {
+               "name": "nvme1n1p2",
+               "type": "part",
+               "fstype": null,
+               "label": null,
+               "mountpoints": []
+            },
+            {
+               "name": "nvme1n1p3",
+               "type": "part",
+               "fstype": "ntfs",
+               "label": "Windows 11",
+               "mountpoints": []
+            },
+            {
+               "name": "nvme1n1p4",
+               "type": "part",
+               "fstype": "ext4",
+               "label": null,
+               "mountpoints": [
+                  "/run/media/ultra/cc32a44a-ace1-43ae-8bcc-607e0f3de823"
+               ]
+            }
+         ]
+      },
+      {
+         "name": "nvme0n1",
+         "type": "disk",
+         "fstype": null,
+         "label": null,
+         "mountpoints": [],
+         "children": [
+            {
+               "name": "nvme0n1p1",
+               "type": "part",
+               "fstype": "vfat",
+               "label": null,
+               "mountpoints": [
+                  "/boot/efi"
+               ]
+            },
+            {
+               "name": "nvme0n1p2",
+               "type": "part",
+               "fstype": null,
+               "label": null,
+               "mountpoints": []
+            },
+            {
+               "name": "nvme0n1p3",
+               "type": "part",
+               "fstype": "ntfs",
+               "label": "Windows 11",
+               "mountpoints": []
+            },
+            {
+               "name": "nvme0n1p4",
+               "type": "part",
+               "fstype": "ext4",
+               "label": null,
+               "mountpoints": [
+                  "/"
+               ]
+            }
+         ]
+      }
+   ]
+}
+HOME=/home/ultra

@@ -1,0 +1,14 @@
+# installed by ubuntu-tweaks/tailnet-mounts -> /etc/systemd/system/tailnet-mounts-sync.service
+# Started by tailnet-mounts-sync.timer: asks every online Linux peer of the tailnet for its disks and rewrites the
+# managed sshfs units under /etc/systemd/system (it never mounts anything itself).
+[Unit]
+Description=tailnet-mounts: refresh the sshfs units of the tailnet's disks
+Wants=tailscaled.service network-online.target
+After=tailscaled.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /usr/local/lib/tailnet-mounts/tailnet-mounts-sync
+SyslogIdentifier=tailnet-mounts-sync
+TimeoutStartSec=300
+Nice=10

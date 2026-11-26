@@ -504,6 +504,7 @@ covers all of them; `tests/test_init_pipeline.py` fails when this table and a `m
 | `brew` | 40 | `base` | on |
 | `ssh-server` | 50 | `system` | on |
 | `docker-daemon` | 55 | `system` | off |
+| `tailnet-mounts` | 56 | `system` | on |
 | `wireplumber-portal-conf` | 57 | `system` | on |
 | `passwords-app` | 60 | `system` | on |
 | `passwords-app-polkit` | 61 | `system` | on |
@@ -802,6 +803,7 @@ After doing one, run `ubuntu-tweak apply --commit` again.
 | user manager unreachable, or a foreign override of a setting | `session-priority` | the module reloads the user manager and reads the kernel's cgroup files back; without a session bus (ssh without a login session, a sandbox) it cannot, and an override by another drop-in or `set-property` survives a reload | run `systemctl --user daemon-reload` from the desktop session; if a value still differs, `systemctl --user cat session.slice org.gnome.Shell@ubuntu.service` shows the overriding drop-in |
 | user manager silent while audio-health is switched off | `audio-health` | the retirement (`retire`) leaves the timer and the files alone when no user manager answers (ssh without a login session, `su`, cron): removing the units under a running timer would leave it firing at a missing script | run `ubuntu-tweak apply --commit --only audio-health` in the desktop user's own session (*Audio health*) |
 | `ssh-server` lock-out guard | `ssh-server` | `password_auth = false` with no key would lock you out | add a public key to `~/.ssh/authorized_keys` (`ssh-copy-id`) |
+| ssh key for the tailnet peers | `tailnet-mounts` | the private key belongs to you and the module never creates or copies one | have `~/.ssh/id_ed25519` (or set `[modules.tailnet-mounts] identity_file`) and `ssh-copy-id` it to each peer; a peer that refuses it is only a warning in `tailnet-mounts status` |
 | FileVault volume, or the kernel module under Secure Boot | `disks` | an encrypted APFS volume needs a password no unit can type and the module never stores; a DKMS module needs a signing key enrolled with a reboot | mount it by hand (`apfs-fuse -r <password> <device> <dir>`); or `sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`, reboot, confirm; or keep the default `driver = "fuse"` (*Disks*) |
 | `agent-sub` missing | `error-intercept` | the `agent-tools` package that provides `agent-sub` comes from a repository the module does not fetch | install agent-tools, or set `[modules.error-intercept] agent_tools_dir` to its directory (*Error interception*) |
 | iCloud sign-in | `passwords-app` | Apple ID, password and 2FA code | `passwords-app signin` |
@@ -982,6 +984,7 @@ and says it is not cloned yet, and the *Manual steps* block lists the gh login i
 | `apple-hid-battery` | `system` (livepatch kernel module) | only for machines with Apple HID: `enabled = false` by default, a machine overlay enables it |
 | `ssh-server` | `system` (root) | openssh-server installed, enabled, running and listening; orders `ssh.service` after `tailscaled.service` when sshd listens on tailscale addresses (*SSH server*) |
 | `disks` | `system` (root) | the disks the profile declares: driver, `/etc/fstab` block, mount point, systemd automount; plans nothing without `[modules.disks.mounts.*]`, so it is on by default and belongs to no init step (*Disks*) |
+| `tailnet-mounts` | `system` (root) | the disks of every online Linux peer of the tailnet, found at run time over ssh and mounted on demand with sshfs under `/mnt/tailnet/<host>/<disk>` by generated `.mount` / `.automount` units that a timer refreshes; order 56 (*Tailnet mounts*) |
 | `error-intercept` | `system`, user (`root = false`) | apport crash dialogs replaced by publishing the sanitized report to the agent subscribed to `errors` (agent-sub): a drop-in for `update-notifier-crash.service`, scan/spool/journal user units, `~/.local/bin` links, the `errors` topic; `enabled = false` by default (opt in per machine); full design, safety and rollback in [`error-intercept.md`](error-intercept.md) |
 | `passwords-app` | `system`, user (`root = false`) | clone `~/dev/passwords-app`, run its `scripts/install.sh`, enable `passwords-appd.service`, verify D-Bus (*Passwords*) |
 | `passwords-app-polkit` | `system` (root) | the one root step `install.sh` only prints: the polkit action for unlocking with the login password |
@@ -2610,6 +2613,64 @@ declaration stops the automount and restores the original fstab. The real `syste
 systemd and udev; these are checked after the user's `apply --commit`: the first access to `/mnt/mac-backups` mounting it,
 the mount coming back after a reboot and after re-plugging the disk (`systemctl status mnt-mac\x2dbackups.automount`,
 `ls /mnt/mac-backups/root`, `findmnt /mnt/mac-backups`).
+
+#### Tailnet mounts (`tailnet-mounts`, root)
+
+Ticket [#265](https://github.com/alex-mextner/ubuntu-tweaks/issues/265). The owner: *the disks of all my Linux computers on
+the Tailscale network are mounted automatically on `home` and on `ubuntu-pc`, with no host or disk list anywhere.* No
+per-machine or per-disk declaration exists: every machine that enables the module (on by default) skips itself and finds its
+peers and their disks at run time. A root timer (`tailnet-mounts-sync.timer`, one minute after boot, then every five minutes)
+runs `tailnet-mounts-sync`, which reads `tailscale status --json`, asks every online Linux peer over ssh (`lsblk`, key
+auth as the desktop user) for the block-backed mount points below `/mnt`, `/media` and `/run/media` plus its `$HOME`, and writes
+one `mnt-tailnet-<host>-<disk>.mount` + `.automount` pair (`sshfs`, `TimeoutIdleSec`, `nofail`) per share for
+`/mnt/tailnet/<host>/<disk>` (`/mnt/tailnet` is `0700` for the desktop user). Units of a peer that is offline or whose ssh
+failed are kept; a disk a reachable peer no longer reports is removed; units without the header `# managed by ubuntu-tweaks
+tailnet-mounts` are never touched. `check` / `status` read the sync's state file (they never run ssh): an unreachable peer is a
+`WARNING` line, never drift. Options `exclude_hosts`, `identity_file`, `idle_timeout`, `roots`, `home`. The full design (layout,
+sync algorithm, the validation of untrusted peer output, unit text, findings, tests) is
+[`docs/specs/tailnet-mounts.md`](tailnet-mounts.md); the code is `modules/tailnet-mounts/`.
+
+##### Alternatives considered
+
+| Alternative | Why not |
+|---|---|
+| Taildrive (`tailscale drive` + WebDAV / `davfs2`) | Alpha. This node answers `Access denied: taildrive sharing not enabled ... add drive:share to nodeAttrs`, so it needs tailnet policy edits; WebDAV loses unix permissions, symlinks and locking and `davfs2` caches whole files; share names are lower case only; every disk needs a `tailscale drive share` on every server (per-host state nobody reconciles). |
+| NFS or Samba | Root and an export on every server (odroidn2 and bananapi-m4 need a sudo password we do not have), authentication by IP only. |
+| `autofs` with a program map | A daemon and a package more, an indirect program map cannot list the hosts in a file manager, and dynamic code runs as root on every access. |
+| `rclone mount` over sftp | A heavy userspace VFS cache and one more dependency. |
+| Tailscale SSH (`tailscale set --ssh`) | Not needed: plain sshd with key auth already works between the machines (`RunSSH` is true on `home` but the module does not depend on it). Its default policy is `check` (periodic re-authentication), which would break unattended mounts. |
+| Mounting the remote `/` | An sshfs recursion loop (`home` mounts `ubuntu-pc`, whose view contains the `home` mount) and indexers walking `/proc`. |
+| Lines in `/etc/fstab` | fstab is for static disks; these units are regenerated every five minutes from what the peers report. |
+
+##### Known limitations and why they are acceptable
+
+- **sshfs is in upstream maintenance mode.** It is the stable distribution package, used only for plain file access, and the
+  transport is isolated in `render_mount` (`Type=`, `What=`, `Options=`), so replacing it is a change of one function.
+- **A dead peer makes a `stat` on an active mount block** until `ServerAliveInterval` x `ServerAliveCountMax` (about 45 s)
+  gives up, then `EIO`. That is bounded; the idle automount unmounts after `idle_timeout`; the sync never touches mounts, only
+  units, so it never hangs on one; `check` wraps its `stat` in `timeout 5` and reports a hung mount as a finding.
+- **Not a workload filesystem.** No coherent locking: SQLite, git and docker volumes on it are slow or wrong. The mounts are for
+  access, copying and backup.
+- **`ubuntu-pc` exposes `/run/media/ultra/*`** (udisks): present only while logged in and plugged in, so the path can vanish;
+  the automount then answers `ENOENT` and the next sync drops the unit. Follow-up ticket: declare those disks in
+  `machines/ubuntu-pc/machine.toml` through the `disks` module with stable `/mnt` paths.
+- **The key is the owner's private key read by root at mount time:** no new exposure compared to `ssh` itself. `/mnt/tailnet`
+  is `0700`, which keeps other local users out.
+- **Host keys are trusted on first use** in a dedicated `known_hosts` (`StrictHostKeyChecking=accept-new`), because the transport
+  is already WireGuard-authenticated by Tailscale. A changed host key makes ssh refuse: it shows as a `status` warning and the
+  peer's existing units stay.
+- **Only Linux peers** (Windows and macOS peers are never asked; no sshd is assumed). A peer whose sshd does not accept the key
+  (today `ubuntu-hyper`) is skipped with a visible warning.
+- **One user.** Every peer is reached as the desktop user's name, and every file shows as owned by that user (`uid=`/`gid=`).
+- **A changed `idle_timeout`** is written to the unit files at once but an already running automount unit keeps its old value
+  until it is restarted (reboot).
+
+**Owner steps** (the root step is the owner's; agents never run it): on `home` and on `ubuntu-pc`
+`ubuntu-tweak apply --commit --only tailnet-mounts`. On `ubuntu-pc` the CLI is the symlink `~/.local/bin/ubuntu-tweak` to
+`~/xp/ubuntu-tweaks/bin/ubuntu-tweak`, so `git -C ~/xp/ubuntu-tweaks pull --ff-only` first. Then `ubuntu-tweak status` shows
+no drift, `ls /mnt/tailnet/odroidn2/storage` mounts the disk on first access (`findmnt /mnt/tailnet/odroidn2/storage`), and a
+second `apply` says `0 changed`. A container cannot show what needs the machine's own systemd, ssh and tailnet; those are
+checked after the owner's `apply --commit`.
 
 #### Passwords (`passwords-app`, `passwords-app-polkit`)
 
