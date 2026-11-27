@@ -504,7 +504,7 @@ class CommandLineTests(FinishCommandCase):
         self.systemd = FakeProcess({SHOW_ENVIRONMENT: CommandResult(0, "DISPLAY=:42\n")})
         seen: list[str | None] = []
 
-        def streamed(argv: list[str]) -> int:
+        def streamed(argv: list[str], *, terminal: bool) -> int:
             seen.append(os.environ.get("DISPLAY"))
             return 0
 
@@ -548,7 +548,8 @@ class CommandLineTests(FinishCommandCase):
         ):
             code = finish_command.run(self.context(), argparse.Namespace(dry_run=False, step=None, yes=False))
         self.assertEqual(code, 0)
-        (argv,), _ = streamed.call_args
+        (argv,), kwargs = streamed.call_args
+        self.assertIs(kwargs["terminal"], True)
         self.assertEqual(argv[1:4], [str(self.repo / "bin" / "ubuntu-tweak"), "apply", "--commit"])
         self.assertIn("apply", argv)
         self.assertIn("--commit", argv)

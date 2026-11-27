@@ -6,7 +6,7 @@ init pipeline (base tools, zsh, clipboard, git/gh, brew, ...) is made of modules
 Assumptions:
 
 - One apt batch: the ``[install] apt`` names of every enabled module with the same phase are one
-  ``package`` action (``apt-get install -y a b c``), so base tools and clipboard utilities are one
+  ``package`` action (``apt-get install -y a b c``, built by ``apt_command.install_command``: non-interactive), so base tools and clipboard utilities are one
   ``apt`` run, while each module stays switchable on its own. A package counts as installed when
   ``dpkg-query`` says ``ii`` **or** the command the module's ``[install.provides]`` names for it is on
   ``PATH`` (a brew-installed ``gh`` or ``zsh`` satisfies the package).
@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from ubuntu_tweaks import dotfiles_rc, git_identity
+from ubuntu_tweaks import apt_command, dotfiles_rc, git_identity
 from ubuntu_tweaks.actions import Action, ActionFailed, ManualStepRequired, Phase
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.git_identity import KEYS
@@ -119,7 +119,7 @@ class ModuleAptAction(PackageAction):
             names,
             process,
             lister,
-            lambda missing: ["apt-get", "install", "-y", *missing],
+            apt_command.install_command,
             needs_root=True,
             before=None,
         )

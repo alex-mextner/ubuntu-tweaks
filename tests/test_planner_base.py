@@ -1,7 +1,9 @@
 """The base planner and the built-in steps: apt batch, login shell, rc files, git/gh, brew, ``[[post]]``."""
 
+import contextlib
 import dataclasses
 import hashlib
+import io
 import os
 import shutil
 import time
@@ -15,6 +17,7 @@ from ubuntu_tweaks.errors import ConfigError
 from ubuntu_tweaks.identity import Location
 from ubuntu_tweaks.planners import base
 from ubuntu_tweaks.planners import packages as packages_planner
+from ubuntu_tweaks.apt_command import install_command
 from ubuntu_tweaks.process import CommandError, CommandResult, FakeProcess
 from ubuntu_tweaks.profile import Packages, Profile
 from ubuntu_tweaks.settings import FakeBackend
@@ -101,7 +104,31 @@ class AptBatchTests(BaseCase):
         self.assertEqual(action.describe(), "apt: install zsh [base-tools]")
         action.run()
 
-        self.assertEqual(installed, ["sudo -- apt-get install -y zsh"])
+        self.assertEqual(installed, [" ".join(["sudo", "--", *install_command(["zsh"])])])
+        self.assertEqual(runner.on_terminal, [("sudo", "--", *install_command(["zsh"]))])  # the keyboard stays usable
+
+    def test_a_conffile_dpkg_kept_is_named_after_the_install(self) -> None:
+        self.module("base-tools", self.TOOLS)
+        runner = FakeProcess(kept=["/etc/zsh/zshrc"])
+        (action,) = self.plan(runner).actions
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            action.run()
+        self.assertIn("kept your /etc/zsh/zshrc", out.getvalue())
+
+    def test_a_conffile_dpkg_kept_is_named_even_when_the_install_then_fails(self) -> None:
+        self.module("base-tools", self.TOOLS)
+        runner = FakeProcess(kept=["/etc/zsh/zshrc"])
+
+        def fail(_argv: object, _input: object) -> None:
+            raise ActionFailed("a later package failed to configure")
+
+        runner._effects = fail  # noqa: SLF001
+        (action,) = self.plan(runner).actions
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(ActionFailed):
+            action.run()
+        self.assertIn("kept your /etc/zsh/zshrc", out.getvalue())
 
     def test_a_command_on_path_counts_as_the_package(self) -> None:
         self.module(
@@ -139,7 +166,8 @@ class AptBatchTests(BaseCase):
             (action,) = self.plan(runner).actions
             self.assertIn("(after apt-get update)", action.describe())
             action.run()
-            self.assertEqual([run[2:4] for run in runs], [("apt-get", "update"), ("apt-get", "install")])
+            self.assertEqual([run[2] for run in runs], ["apt-get", "env"])
+            self.assertEqual(runs[0][2:], ("apt-get", "update"))
 
     def test_fresh_package_lists_are_not_refreshed(self) -> None:
         self.module("base-tools", self.TOOLS)
@@ -149,7 +177,8 @@ class AptBatchTests(BaseCase):
         (action,) = self.plan(runner).actions
         self.assertNotIn("apt-get update", action.describe())
         action.run()
-        self.assertEqual([run[2:4] for run in runs], [("apt-get", "install")])
+        self.assertEqual([run[2] for run in runs], ["env"])
+        self.assertIn("Dpkg::Options::=--force-confold", runs[0])
 
     def test_disabled_modules_and_modules_outside_only_contribute_nothing(self) -> None:
         self.module("base-tools", self.TOOLS)

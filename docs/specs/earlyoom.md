@@ -25,8 +25,9 @@ is `modules/earlyoom/earlyoom_lib.py`.
 | `earlyoom.service` is enabled | `systemctl is-enabled` |
 | `earlyoom.service` is active | `systemctl is-active` |
 
-`install` (as root, through the engine's `RootSession`): `apt-get install -y -o Dpkg::Options::=--force-confold
-earlyoom` when missing (the option keeps *our* file at a later upgrade instead of stopping to ask), write the file
+`install` (as root, through the engine's `RootSession`): `apt-get install -o Dpkg::Options::=--force-confdef -o
+Dpkg::Options::=--force-confold -y earlyoom` when missing (`module_script.apt_get` adds both options: they keep
+*our* file at a later upgrade instead of stopping to ask), write the file
 atomically, `systemctl enable`, and `systemctl restart` **only when the file changed** (`start` when the service was
 down; nothing when everything already matches, so a second run reports `nothing to change`). The Ubuntu package
 already starts the service with its stock file; the first install therefore changes the file and restarts once.

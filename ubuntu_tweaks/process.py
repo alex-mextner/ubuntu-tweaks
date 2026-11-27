@@ -8,6 +8,12 @@ Assumptions: ``query`` is for read-only checks (captured output, a timeout, neve
 missing binary); ``execute`` is for mutations (stdin stays the terminal so a child can read an answer and ``sudo`` can
 open ``/dev/tty`` for its password; stdout and stderr are pipes copied to ``sys.stdout`` / ``sys.stderr`` as they
 arrive, so the session log sees what the child shows) and raises ``CommandError`` on a non-zero exit.
+A step that may need the keyboard (the root package installs: ``apt-get``, ``snap``) passes ``terminal=True``: the child
+then inherits stdin, stdout and stderr and stays in the terminal's foreground process group, so it talks to the tty
+itself. Pipes cannot do that: ``sudo`` whose stdout is a pipe starts its command in the *background* of its own pty,
+where nothing typed ever arrives (spec, *Stalled steps*). The price: the child's output is not in the session log (its
+footer says so) and a failure has no stderr tail, so it is not retried as transient. Without a terminal on all three
+descriptors (CI, a pipe) ``terminal=True`` falls back to the pipes: nobody could type anyway.
 
 Public API:
 
@@ -16,7 +22,8 @@ Public API:
   ``_TAIL`` characters of the child's stderr (set by ``execute`` only, ``""`` elsewhere).
 - ``Process``: ``execute`` raises ``CommandError`` ``<argv>: exited with status N`` plus, when the child wrote to stderr, ``: <its last line>``
   (so a retry classifier can read ``could not resolve host``); ``query(argv, *, timeout=60.0, cwd=None) -> CommandResult`` (127 when the binary is
-  missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None)`` and
+  missing, 126 when it cannot be executed, 124 on timeout; stdin closed), ``execute(argv, *, input_text=None, cwd=None,
+  terminal=False)``, ``kept_conffiles(since) -> list[str]`` (the conffiles dpkg kept since ``since``, from dpkg's log) and
   ``elevate(argv) -> list[str]`` (prefix with ``sudo --`` or ``pkexec``; unchanged when already
   root; ``CommandError`` when neither exists; while an ``elevation.RootSession`` is open it uses the prefix
   that session found working, e.g. ``sudo -A --``).
@@ -24,10 +31,12 @@ Public API:
   ``use_root_prefix(prefix)`` / ``root_prefix()`` (the session's prefix; ``None`` outside a session) and
   ``run(argv, *, cwd=None, capture=False, timeout=None) -> str`` (raises ``CommandError``; the
   helper behind ``git``/``apt``/``glib-compile-schemas`` calls in the commands and submodule planners) and
-  ``run_streamed(argv, *, cwd=None, env=None, input_text=None, timeout=None, stderr_tail=None, last_line=None) -> int``
+  ``run_streamed(argv, *, cwd=None, env=None, input_text=None, timeout=None, stderr_tail=None, last_line=None,
+  terminal=False) -> int``
   (the child's exit status; its output is copied through the pipes described above; ``OSError`` when it cannot
   start, ``TimeoutExpired``).
-- ``FakeProcess(responses, effects)``: records ``queries`` and ``executed``; ``responses`` maps an
+- ``FakeProcess(responses, effects, kept=())``: records ``queries``, ``executed`` and, of those, the commands that asked
+  for ``terminal`` (``on_terminal``); ``kept`` is what ``kept_conffiles`` answers; ``responses`` maps an
   argv tuple to a ``CommandResult`` (anything else answers 127); ``effects`` is called with
   ``(argv, input_text)`` on every ``execute`` so a test can change the fake machine state.
 """
@@ -46,12 +55,13 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-from ubuntu_tweaks import watchdog
+from ubuntu_tweaks import apt_command, watchdog
 from ubuntu_tweaks.errors import UbuntuTweakError
-from ubuntu_tweaks.sessionlog import LineMasker
+from ubuntu_tweaks.sessionlog import SESSION_ENV, LineMasker, note
 
 _CHUNK = 65536
 _TAIL = 2000  # characters of a child's stderr kept for the error message of a failure
@@ -273,6 +283,47 @@ def _watchdog_for(pid: int, watch: Watch, argv: Sequence[str]) -> watchdog.Watch
     )
 
 
+def _wind_down(process: subprocess.Popen[bytes], error: BaseException) -> None:
+    """The wait for ``process`` ended with ``error`` (a timeout, Ctrl-C...): stop the child before it propagates."""
+    if isinstance(error, KeyboardInterrupt):  # the child got the same Ctrl-C: let it wind down first
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(_INTERRUPT_GRACE)
+    if process.poll() is None:
+        try:
+            process.kill()
+        except PermissionError:  # a root child (sudo) cannot be signalled by us
+            pass
+        else:
+            process.wait()
+
+
+def _on_terminal() -> bool:
+    """True when the three standard descriptors are all terminals (the real ones, below any session-log tee)."""
+    return all(os.isatty(descriptor) for descriptor in (0, 1, 2))
+
+
+def _run_on_terminal(
+    argv: Sequence[str], cwd: Path | None, env: Mapping[str, str] | None, timeout: float | None
+) -> int:
+    """``run_streamed`` for a child that talks to the terminal itself: nothing is piped, same process group."""
+    for stream in (sys.stdout, sys.stderr):  # what we printed so far is on the screen before the child's text
+        with contextlib.suppress(OSError, ValueError):
+            stream.flush()
+    watch = _watch
+    step = (watch.label if watch is not None and watch.label else shlex.join(map(str, argv)))[:_STEP_LABEL]
+    note(f"terminal: {step}", "its output went to the terminal only, not to this log")
+    # Its output bypasses our session log, so a child ubuntu-tweak must not believe it is nested in one: it logs itself.
+    environment = {name: value for name, value in (os.environ if env is None else env).items() if name != SESSION_ENV}
+    process = subprocess.Popen(list(argv), cwd=cwd, env=environment)
+    try:
+        return process.wait(timeout)
+    except SystemExit:  # SIGTERM to us: do not kill the child, as on the pipe path
+        raise
+    except BaseException as error:
+        _wind_down(process, error)
+        raise
+
+
 def run_streamed(
     argv: Sequence[str],
     *,
@@ -282,6 +333,7 @@ def run_streamed(
     timeout: float | None = None,
     stderr_tail: list[str] | None = None,
     last_line: list[str] | None = None,
+    terminal: bool = False,
 ) -> int:
     """Run ``argv`` (never through a shell) and return its exit status, showing its output as it arrives.
 
@@ -299,7 +351,17 @@ def run_streamed(
     reported, and a quiet step shows a heartbeat. Outside a block nothing is watched, so a command nested in a
     watched one (the child ``apply`` of ``finish``, a module script's ``apt-get``) is never reported twice.
     Nothing is ever killed for being slow.
+
+    ``terminal=True`` (a step that may ask the person something; no ``input_text``): when stdin, stdout and stderr are
+    all terminals the child inherits them and stays in our foreground process group, so its prompts and the answers
+    typed to them need nobody in between. Its output then bypasses the pumps: the screen shows it, the session log does
+    not (its footer says so), ``stderr_tail`` / ``last_line`` stay empty and there is neither watchdog nor heartbeat
+    (they read the pipes, and the stop the watchdog exists for needs a pipe). Otherwise it is the pipe path above.
     """
+    if terminal and input_text is not None:
+        raise ValueError("a step on the terminal reads the terminal: input_text cannot be given")
+    if terminal and _on_terminal():
+        return _run_on_terminal(argv, cwd, env, timeout)
     # A Python child on a pipe would hold its prompts back and mix its two streams: ask it not to buffer.
     environment = {**(os.environ if env is None else env), "PYTHONUNBUFFERED": "1"}
     process = subprocess.Popen(
@@ -340,16 +402,7 @@ def run_streamed(
     except SystemExit:  # SIGTERM to us: do not kill the child (it may die of SIGPIPE on its next write)
         raise
     except BaseException as error:
-        if isinstance(error, KeyboardInterrupt):  # the child got the same Ctrl-C: let it wind down first
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(_INTERRUPT_GRACE)
-        if process.poll() is None:
-            try:
-                process.kill()
-            except PermissionError:  # a root child (sudo) cannot be signalled by us
-                pass
-            else:
-                process.wait()
+        _wind_down(process, error)
         raise
     finally:
         stop.set()
@@ -374,17 +427,24 @@ def run_streamed(
     return returncode
 
 
-def run(argv: Sequence[str], *, cwd: Path | None = None, capture: bool = False, timeout: float | None = None) -> str:
+def run(
+    argv: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    capture: bool = False,
+    timeout: float | None = None,
+    terminal: bool = False,
+) -> str:
     """Run ``argv`` (never through a shell); return its stdout when ``capture`` else ``""``.
 
     Failures (missing binary, timeout, non-zero exit) raise ``CommandError`` carrying the command
     line and, for a captured command, the last stderr line. Output of a non-captured command is shown through
-    ``sys.stdout`` / ``sys.stderr`` (``run_streamed``).
+    ``sys.stdout`` / ``sys.stderr`` (``run_streamed``; ``terminal=True`` as there: the child gets the terminal itself).
     """
     line = " ".join(argv)
     try:
         if not capture:
-            returncode = run_streamed(argv, cwd=cwd, timeout=timeout)
+            returncode = run_streamed(argv, cwd=cwd, timeout=timeout, terminal=terminal)
             if returncode != 0:
                 raise CommandError(f"`{line}` failed with exit code {returncode}", returncode)
             return ""
@@ -428,10 +488,12 @@ class Process:
             return CommandResult(126, "", f"{argv[0]}: cannot run: {error.strerror or error}")
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
-    def execute(self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None) -> None:
+    def execute(
+        self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None, terminal: bool = False
+    ) -> None:
         tail: list[str] = []
         try:
-            returncode = run_streamed(argv, cwd=cwd, input_text=input_text, stderr_tail=tail)
+            returncode = run_streamed(argv, cwd=cwd, input_text=input_text, stderr_tail=tail, terminal=terminal)
         except FileNotFoundError as error:
             raise CommandError(f"{argv[0]}: command not found") from error
         except OSError as error:
@@ -444,28 +506,41 @@ class Process:
     def elevate(self, argv: Sequence[str]) -> list[str]:
         return elevate(argv)
 
+    def kept_conffiles(self, since: datetime) -> list[str]:
+        return apt_command.kept_conffiles(since)
+
 
 class FakeProcess(Process):
     def __init__(
         self,
         responses: Mapping[tuple[str, ...], CommandResult] | None = None,
         effects: Callable[[tuple[str, ...], str | None], None] | None = None,
+        kept: Sequence[str] = (),
     ) -> None:
         self._responses = dict(responses or {})
         self._effects = effects
+        self._kept = tuple(kept)
         self.queries: list[tuple[str, ...]] = []
         self.executed: list[tuple[tuple[str, ...], str | None]] = []
+        self.on_terminal: list[tuple[str, ...]] = []
 
     def query(self, argv: Sequence[str], *, timeout: float = 60.0, cwd: Path | None = None) -> CommandResult:
         key = tuple(argv)
         self.queries.append(key)
         return self._responses.get(key, CommandResult(127, "", f"{argv[0]}: command not found"))
 
-    def execute(self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None) -> None:
+    def execute(
+        self, argv: Sequence[str], *, input_text: str | None = None, cwd: Path | None = None, terminal: bool = False
+    ) -> None:
         key = tuple(argv)
         self.executed.append((key, input_text))
+        if terminal:
+            self.on_terminal.append(key)
         if self._effects is not None:
             self._effects(key, input_text)
+
+    def kept_conffiles(self, since: datetime) -> list[str]:
+        return list(self._kept)
 
     def elevate(self, argv: Sequence[str]) -> list[str]:
         return ["sudo", "--", *argv]

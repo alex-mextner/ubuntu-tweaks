@@ -14,6 +14,7 @@ MODULE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE.parents[1]))
 sys.dont_write_bytecode = True
 
+from ubuntu_tweaks.apt_command import DPKG_OPTIONS  # noqa: E402
 from ubuntu_tweaks.module_script import (  # noqa: E402
     APT_ENVIRONMENT,
     EXIT_DRIFT,
@@ -365,7 +366,7 @@ class Install(Base):
         machine = FakeMachine(self.root, installed=False)
         module = self.module(machine)
         module.apply()
-        self.assertEqual(machine.executed[0], ("apt-get", "install", "-y", "openssh-server"))
+        self.assertEqual(machine.executed[0], ("apt-get", "install", *DPKG_OPTIONS, "-y", "openssh-server"))
         self.assertIn(("systemctl", "enable", "ssh.service"), machine.executed)
         self.assertTrue(all(f.ok for f in module.findings()))
         self.assertEqual(sorted((self.root / "etc").rglob("*.conf")), [])  # no config written

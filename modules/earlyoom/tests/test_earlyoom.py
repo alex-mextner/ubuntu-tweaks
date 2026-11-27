@@ -87,7 +87,9 @@ class FakeMachine(Process):
             self.apt_runs.append((input_text, {name: os.environ.get(name) for name in APT_ENVIRONMENT}))
         if self.fail and tuple(argv[: len(self.fail)]) == self.fail:
             if argv[0] == "systemctl" and argv[-2] in ("start", "restart"):
-                setattr(self, "user_active" if argv[1] == "--user" else "active", False)  # a failed (re)start leaves it down
+                setattr(
+                    self, "user_active" if argv[1] == "--user" else "active", False
+                )  # a failed (re)start leaves it down
             raise CommandError(f"{' '.join(argv)}: exited with status 1")
         if argv[0] == "apt-get" and argv[1] == "install":
             self.installed = self.enabled = self.active = True
@@ -327,7 +329,21 @@ class SystemInstall(Base):
         self.assertIn(LAPTOP_LINE, self.defaults)
         self.assertEqual(self.defaults.count("EARLYOOM_ARGS"), 1)
         apt = [call for call in self.machine.executed if call[0] == "apt-get"]
-        self.assertEqual(apt, [("apt-get", "install", "-y", "-o", "Dpkg::Options::=--force-confold", "earlyoom")])
+        self.assertEqual(
+            apt,
+            [
+                (
+                    "apt-get",
+                    "install",
+                    "-o",
+                    "Dpkg::Options::=--force-confdef",
+                    "-o",
+                    "Dpkg::Options::=--force-confold",
+                    "-y",
+                    "earlyoom",
+                )
+            ],
+        )
         self.assertEqual(
             [c for c in self.machine.executed if "restart" in c], [("systemctl", "restart", "earlyoom.service")]
         )
@@ -433,7 +449,9 @@ class SystemInstall(Base):
         self.machine.active = False
         self.machine.fail = ("systemctl", "start")
         self.machine.executed.clear()
-        with self.assertRaisesRegex(ModuleError, r"does not stay active even with its options in place \(.+; see its journal\)"):
+        with self.assertRaisesRegex(
+            ModuleError, r"does not stay active even with its options in place \(.+; see its journal\)"
+        ):
             self.system({}).apply()
         self.assertEqual(
             [call[1] for call in self.machine.executed], ["start", "reset-failed", "start"]

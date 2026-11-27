@@ -18,7 +18,7 @@ for tool in git curl; do command -v "$tool" >/dev/null 2>&1 || missing=1; done
 python3 -c 'import gi' >/dev/null 2>&1 || missing=1
 if [ -n "$missing" ]; then
     $SUDO apt-get update
-    $SUDO apt-get install -y git curl ca-certificates python3-gi
+    $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 APT_LISTCHANGES_FRONTEND=none apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold git curl ca-certificates python3-gi
 fi
 
 if [ -e "$DIR/.git" ]; then

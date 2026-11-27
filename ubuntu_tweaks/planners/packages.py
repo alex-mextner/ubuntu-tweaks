@@ -7,7 +7,11 @@ Assumptions:
 
 - Never removes anything: a package that is installed but no longer listed is left alone.
 - ``apt`` and ``snap`` need root (``needs_root = True``): one ``apt-get install -y`` (or ``snap
-  install``) batch through sudo/pkexec. ``flatpak`` runs as the user (polkit asks when a system
+  install``) batch through sudo/pkexec, run on the terminal (``Process.execute(terminal=True)``: stdin, stdout and
+  stderr inherited, so a child that needs the keyboard gets it). The apt batch is non-interactive by default
+  (``apt_command.install_command``: ``DEBIAN_FRONTEND=noninteractive``, dpkg ``--force-confdef --force-confold``, so a
+  conffile conflict keeps the local file and never waits for an answer; the kept files are printed after the run).
+  ``flatpak`` runs as the user (polkit asks when a system
   installation needs it) and installs from one remote: ``flatpak_remote`` of ``packages.toml``
   (default ``flathub``); the remote must already be configured.
 - Installed means: ``dpkg-query`` status ``ii``; a ``snap list`` row; a ``flatpak list`` row
@@ -32,10 +36,11 @@ Public API: ``build(ctx, backend, *, process=None, home=None)``, ``installed_apt
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from ubuntu_tweaks import tool_packages, ui
+from ubuntu_tweaks import apt_command, tool_packages, ui
 from ubuntu_tweaks.actions import Action, ActionFailed, Permanent, Phase, Transient, is_transient
 from ubuntu_tweaks.context import Context
 from ubuntu_tweaks.errors import ConfigError, UbuntuTweakError
@@ -116,7 +121,16 @@ class PackageAction(Action):
         if before:
             self._process.execute(self._process.elevate(list(before)) if self.needs_root else list(before))
         argv = self._install_argv(missing)
-        self._process.execute(self._process.elevate(argv) if self.needs_root else argv)
+        started = datetime.now()
+        try:
+            if self.needs_root:  # may need the keyboard (snap, a polkit prompt): it gets the terminal, not pipes
+                self._process.execute(self._process.elevate(argv), terminal=True)
+            else:
+                self._process.execute(argv)
+        finally:  # a later package failing must not hide that dpkg already kept the owner's file
+            if self._manager == "apt":
+                for path in self._process.kept_conffiles(started):
+                    print(apt_command.conffile_note(path))
 
 
 class ManagerMissing(Action):
@@ -302,7 +316,7 @@ def build(
                 packages.apt,
                 runner,
                 installed_apt,
-                lambda names: ["apt-get", "install", "-y", *names],
+                apt_command.install_command,
                 needs_root=True,
                 before=["apt-get", "update"] if packages.apt_update else None,
             )

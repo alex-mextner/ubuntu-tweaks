@@ -567,5 +567,71 @@ class SudoRsBackgroundPtyModel(unittest.TestCase):
         self.assertEqual(report["bounces"], 0)
 
 
+class TerminalStepTests(unittest.TestCase):
+    """``terminal=True``: a child that may need the keyboard inherits our descriptors and process group (UB-271: with a
+    pipe for stdout, sudo starts its command in the background of its own pty and typed input never arrives)."""
+
+    PROBE = (
+        "import os, sys\n"
+        "ids = [f'{s.st_dev}:{s.st_ino}' for s in (os.fstat(fd) for fd in (0, 1, 2))]\n"
+        "open(sys.argv[1], 'w').write(' '.join(ids + [str(os.getpgrp())]))\n"
+    )
+
+    def probe(self, *, terminal: bool, on_terminal: bool) -> tuple[list[str], str]:
+        """What the child saw (its three descriptors, its process group) and what we have for the same."""
+        with tempfile.TemporaryDirectory() as raw:
+            report = Path(raw) / "report"
+            with mock.patch.object(process_module, "_on_terminal", return_value=on_terminal):
+                code = process_module.run_streamed([sys.executable, "-c", self.PROBE, str(report)], terminal=terminal)
+            self.assertEqual(code, 0)
+            seen = report.read_text(encoding="utf-8").split()
+        ours = [f"{s.st_dev}:{s.st_ino}" for s in (os.fstat(fd) for fd in (0, 1, 2))]
+        return seen, " ".join([*ours, str(os.getpgrp())])
+
+    def test_on_a_terminal_the_child_gets_our_descriptors_and_our_process_group(self) -> None:
+        seen, ours = self.probe(terminal=True, on_terminal=True)
+
+        self.assertEqual(" ".join(seen), ours)
+
+    def test_without_a_terminal_the_child_is_piped_as_always(self) -> None:
+        seen, ours = self.probe(terminal=True, on_terminal=False)
+
+        self.assertEqual(seen[0], ours.split()[0])  # stdin is still ours
+        self.assertNotEqual(seen[1], ours.split()[1])  # stdout is a pipe the engine reads
+        self.assertNotEqual(seen[2], ours.split()[2])
+
+    def test_a_step_that_does_not_ask_for_the_terminal_is_piped_even_on_one(self) -> None:
+        seen, ours = self.probe(terminal=False, on_terminal=True)
+
+        self.assertNotEqual(seen[1], ours.split()[1])
+
+    def test_a_child_on_the_terminal_is_not_told_it_is_nested_in_our_session_log(self) -> None:
+        with (
+            mock.patch.object(process_module, "_on_terminal", return_value=True),
+            mock.patch.dict(os.environ, {process_module.SESSION_ENV: "/x/y.log"}),
+            mock.patch.object(process_module.subprocess, "Popen") as popen,
+        ):
+            popen.return_value.wait.return_value = 0
+            process_module.run_streamed(["true"], terminal=True)
+        self.assertNotIn(process_module.SESSION_ENV, popen.call_args.kwargs["env"])
+
+    def test_a_terminal_step_has_no_input_text(self) -> None:
+        with self.assertRaises(ValueError):
+            process_module.run_streamed(["true"], input_text="x", terminal=True)
+
+    def test_the_exit_status_is_the_childs_and_execute_raises_on_failure(self) -> None:
+        with mock.patch.object(process_module, "_on_terminal", return_value=True):
+            self.assertEqual(process_module.run_streamed(["sh", "-c", "exit 3"], terminal=True), 3)
+            with self.assertRaisesRegex(CommandError, "exited with status 3"):
+                Process().execute(["sh", "-c", "exit 3"], terminal=True)
+
+    def test_fake_process_records_which_commands_asked_for_the_terminal(self) -> None:
+        fake = FakeProcess()
+        fake.execute(["a"])
+        fake.execute(["b"], terminal=True)
+
+        self.assertEqual(fake.on_terminal, [("b",)])
+
+
 if __name__ == "__main__":
     unittest.main()

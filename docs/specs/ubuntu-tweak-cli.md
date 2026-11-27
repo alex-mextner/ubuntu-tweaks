@@ -570,7 +570,7 @@ manual = "how the user completes the step a `system` installer reports as manual
 ```
 
 - **`[install] apt`** of every enabled module of one phase is **one** `package` action (one
-  `apt-get install -y a b c`, names deduplicated), so the base tools and the clipboard utilities are a
+  `apt-get install -y a b c`, names deduplicated; non-interactive, see *Stalled steps*), so the base tools and the clipboard utilities are a
   single `apt` run while each module stays switchable; its preview line ends with the contributing
   modules. A package counts as installed when `dpkg-query` says `ii` or its `provides` command is on
   `PATH`. `apt_update = true` of `packages.toml` also applies.
@@ -956,7 +956,8 @@ safe: done steps are only listed.
 
 Request 13. `scripts/bootstrap.sh` (POSIX `sh`, at most 40 lines) takes a stock Ubuntu with neither `curl` nor
 `git` to a running `init`: when `git`, `curl`, the CA bundle or `python3-gi` is missing it runs `sudo apt-get update`
-and `sudo apt-get install -y git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
+and `sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 APT_LISTCHANGES_FRONTEND=none apt-get install -y -o Dpkg::Options::=--force-confdef -o
+Dpkg::Options::=--force-confold git curl ca-certificates python3-gi` (also for the preview: nothing can be previewed
 without them), clones this project's repository (`$UBUNTU_TWEAKS_REPO`, default `alex-mextner/ubuntu-tweaks`) with its submodules into `~/ubuntu-tweaks` (or
 `$UBUNTU_TWEAKS_DIR`; an existing checkout is fast-forwarded and its submodules updated; that directory is the stable
 checkout of *Checkout*), then runs
@@ -1307,7 +1308,8 @@ by this file: see *Plan and actions*. They must be on the `PATH` of the `apply` 
 into a directory only a new login shell adds (Homebrew's, `~/.cargo/bin`) is reported blocked until the next run.
 
 One `package` action per manager that has names, listing what is missing right now. apt and
-snap run as one batch through sudo (`apt-get install -y …`, `snap install …`); flatpak runs
+snap run as one batch through sudo (`apt-get install -y …` made by `apt_command.install_command`, non-interactive: see
+*Stalled steps*; `snap install …`), both on the terminal; flatpak runs
 as the user from one remote, `flatpak_remote` (default `flathub`; a bare remote name, which must
 already be configured; the overlay value replaces the shared one). Installed means: `dpkg-query`
 status `ii`, a `snap list` row, a `flatpak list` row. The apt lists are refreshed only with
@@ -2122,6 +2124,29 @@ would stop the module script too. Every `apt-get` of a root module script theref
 `NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1`, `APT_LISTCHANGES_FRONTEND=none`), and the watchdog above covers any other
 child that stops. `tests/sudo_rs_monitor.py` models the sudo-rs monitor and reproduces the stop in a sandbox.
 
+**Apt steps are non-interactive, and a root install owns the terminal (the hang of 26 Nov 2026).** `apt-get install -y`
+does not answer dpkg: an install that touched a conffile the owner had edited stopped at dpkg's `*** zshrc
+(Y/I/N/O/D/Z) [default=N] ?` and nothing typed reached it. Two causes, two fixes. (1) Every apt install the engine
+builds (`apt_command.install_command`, also `doctor --yes`, `module_script.apt_get` and `scripts/bootstrap.sh`) is
+`sudo -- env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 APT_LISTCHANGES_FRONTEND=none
+apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold <packages>`: the variables
+travel inside the elevated command because sudo scrubs the environment; `--force-confdef` answers every conffile
+question that has a default and `--force-confold` keeps the file on disk for the rest, so a local edit is never
+replaced silently (never `--force-confnew`; the package's own copy lands beside it as `<file>.dpkg-dist`). After an apt
+install the output carries one line per conffile dpkg kept (`apt: kept your /etc/zsh/zshrc ...`), read from dpkg's
+log (`/var/log/dpkg.log`, best effort: an unreadable log says nothing). (2) The keyboard never reached the child
+because `run_streamed` gave it pipes for stdout and stderr: `sudo` whose stdout is not a terminal starts its command
+in the background of its own pty (`CD_EXEC_BG` in sudo's `exec_pty.c`; the sudo-rs case of ticket #126 above is the
+same family) and leaves the owner's terminal in cooked mode, so a prompt could be seen but never answered. A root
+package step (`apt`, `snap`) and `doctor --yes` therefore pass `terminal=True`: when stdin, stdout and stderr are all
+terminals the child inherits them and stays in the engine's foreground process group (no new session, no pipes), and
+sudo, apt and dpkg behave as in a plain shell. Costs, by design: the child's output is not in the session log (its
+footer carries a `# terminal: <step>` note), a failure has no stderr tail (so it is not retried as transient, so an install that finds the apt lock held fails at once and the owner runs it again) and there
+is no watchdog or heartbeat for it (they read the pipes; the stop they exist for needs a pipe). `finish` and `update --commit` run their child `apply` with `terminal=True` too (otherwise the child's stdout would be a pipe and
+nothing above would reach it; the child gets an environment without the session-log variable, so it opens a session log of its own). Without terminals
+(CI, a pipe, the agent sessions) `terminal=True` falls back to the pipes. `apt-get update` keeps the pipes: it asks
+nothing.
+
 **Summary and exit code.** The run ends with `N changed` and one list per class (converged count, failed with the
 cause and the next command, blocked with the blocker, root remainder, needs-human). Exit codes: `0` everything
 declared and runnable converged (needs-human steps and root actions skipped by an explicit `--no-sudo` do not
@@ -2423,7 +2448,10 @@ place a dry run may write.
   files in the directory are deleted (never `latest.log`, never the file it points at, never any other file).
 - **Nested runs.** `update --commit` runs `apply --commit` in a child `ubuntu-tweak`. The outer run exports
   `UBUNTU_TWEAK_SESSION_LOG=<its log>` for its lifetime; a process that finds it set and its directory writable
-  writes no log of its own (its output already flows through the outer run's pipes into the outer log).
+  writes no log of its own (its output already flows through the outer run's pipes into the outer log). The
+  exception is a child that owns the terminal (`finish`, `update --commit`: `run_streamed(..., terminal=True)`): its output
+  bypasses the outer log, so `run_streamed` starts it without the variable (only when it really takes the terminal path) and it writes a log of its
+  own; the outer log carries the `# terminal:` note (the failure text is on the screen).
 - **Test seam.** `UBUNTU_TWEAK_LOG_DIR` names the log directory itself (replacing the path above); `tests/__init__.py`
   points it at a temporary directory so no test writes into the real state directory. It is not an opt-out for
   users: unset it and every run is logged.

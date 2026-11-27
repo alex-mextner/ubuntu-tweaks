@@ -5,7 +5,8 @@ once it knows the command and the profile. No other module logs anything.
 
 Assumptions: the tee wraps ``sys.stdout`` / ``sys.stderr`` and sees only what is written through them; a
 child process that inherits the real descriptors bypasses it, so ``process.run_streamed`` gives children pipes and
-copies them to these streams. The sudo/pkexec password prompt is opened by those programs on ``/dev/tty`` and an
+copies them to these streams (the one exception: a ``terminal=True`` step, a root package install that may need the
+keyboard, inherits the terminal and leaves a ``# terminal: <step>`` note in the footer instead). The sudo/pkexec password prompt is opened by those programs on ``/dev/tty`` and an
 answer typed into a child's own prompt goes straight to that child: neither passes through this process, and
 neither is ever logged. A log write failure must never fail the command: logging is switched off for the rest of
 the run and one warning goes to stderr.
